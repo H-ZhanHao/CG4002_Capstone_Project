@@ -13,38 +13,47 @@ Adafruit_MPU6050 mpu;
 // SETTINGS
 // ======================================================
 
+// Harmless if no LED is connected
 const int LED_PIN = 2;
 
 // 50 Hz sampling
 const unsigned long SAMPLE_INTERVAL_US = 20000;
 
-// Filtering: lower value = smoother signal
+// Lower value gives a smoother signal
 const float FILTER_ALPHA = 0.20;
 
-// User must remain still during this period
+// Remain still for two seconds after reset
 const unsigned long BASELINE_TIME_MS = 2000;
 
-// Temporary calibration gates in m/s²
+// Temporary gates used only during calibration
 const float CALIBRATION_START_GATE = 0.80;
 const float CALIBRATION_END_GATE = 0.30;
 
 // Three similar calibration squats are required
 const int REQUIRED_STABLE_REPS = 3;
 
-// Peaks must be within ±25% of their average
-const float SIMILARITY_TOLERANCE = 0.25;
+// Calibration squats must have similar peaks and durations
+const float PEAK_SIMILARITY_TOLERANCE = 0.25;
+const float DURATION_SIMILARITY_TOLERANCE = 0.35;
 
-// Reject movements that are too small
-const float MINIMUM_VALID_PEAK = 1.00;
+// Safeguards for accepting a calibration movement
+const float MINIMUM_VALID_CALIBRATION_PEAK = 1.00;
+const unsigned long CALIBRATION_MIN_DURATION_MS = 700;
+const unsigned long CALIBRATION_MAX_DURATION_MS = 6000;
 
-// Movement must remain near baseline before the squat ends
+// Final thresholds calculated from calibration
+const float HIGH_THRESHOLD_FACTOR = 0.55;
+const float LOW_THRESHOLD_FACTOR = 0.20;
+const float REQUIRED_PEAK_FACTOR = 0.70;
+
+// Final timing limits calculated from calibration
+const float MIN_DURATION_FACTOR = 0.60;
+const float MAX_DURATION_FACTOR = 1.60;
+
+// End movement after returning near baseline
 const unsigned long QUIET_TIME_MS = 350;
 
-// Reject movements that are too short or too long
-const unsigned long MIN_REP_DURATION_MS = 700;
-const unsigned long MAX_REP_DURATION_MS = 6000;
-
-// Minimum gap before another movement can begin
+// Minimum delay before another movement starts
 const unsigned long MIN_REP_GAP_MS = 300;
 
 // ======================================================
@@ -76,6 +85,7 @@ unsigned long baselineStartTime = 0;
 
 float baselineSum = 0.0;
 unsigned int baselineSamples = 0;
+
 float baselineMagnitude = 9.81;
 
 // ======================================================
@@ -83,10 +93,23 @@ float baselineMagnitude = 9.81;
 // ======================================================
 
 float calibrationPeaks[REQUIRED_STABLE_REPS];
+
+unsigned long calibrationDurations[
+  REQUIRED_STABLE_REPS
+];
+
 int storedCalibrationReps = 0;
 
+// Final calculated thresholds
 float highThreshold = 0.0;
 float lowThreshold = 0.0;
+float requiredRepPeak = 0.0;
+
+// Final calculated duration limits
+unsigned long minimumRepDuration = 0;
+unsigned long maximumRepDuration = 0;
+
+unsigned long lastCompletedDuration = 0;
 
 // ======================================================
 // MOVEMENT TRACKING VARIABLES
@@ -121,47 +144,100 @@ void resetMovementCycle() {
 }
 
 // ======================================================
-// STORE LATEST CALIBRATION PEAK
+// STORE CALIBRATION MOVEMENT
 // ======================================================
 
-void saveCalibrationPeak(float peak) {
-  if (storedCalibrationReps < REQUIRED_STABLE_REPS) {
-    calibrationPeaks[storedCalibrationReps] = peak;
+void saveCalibrationMovement(
+  float peak,
+  unsigned long duration
+) {
+  if (storedCalibrationReps <
+      REQUIRED_STABLE_REPS) {
+    calibrationPeaks[storedCalibrationReps] =
+      peak;
+
+    calibrationDurations[
+      storedCalibrationReps
+    ] = duration;
+
     storedCalibrationReps++;
   } else {
-    // Remove oldest value and keep latest three
-    calibrationPeaks[0] = calibrationPeaks[1];
-    calibrationPeaks[1] = calibrationPeaks[2];
+    // Remove oldest movement
+    calibrationPeaks[0] =
+      calibrationPeaks[1];
+
+    calibrationPeaks[1] =
+      calibrationPeaks[2];
+
     calibrationPeaks[2] = peak;
+
+    calibrationDurations[0] =
+      calibrationDurations[1];
+
+    calibrationDurations[1] =
+      calibrationDurations[2];
+
+    calibrationDurations[2] = duration;
   }
 }
 
 // ======================================================
-// CHECK WHETHER THREE PEAKS ARE SIMILAR
+// CHECK CALIBRATION STABILITY
 // ======================================================
 
-bool calibrationPeaksAreStable() {
-  if (storedCalibrationReps < REQUIRED_STABLE_REPS) {
+bool calibrationMovementsAreStable() {
+  if (storedCalibrationReps <
+      REQUIRED_STABLE_REPS) {
     return false;
   }
 
   float averagePeak =
-    (calibrationPeaks[0] +
-     calibrationPeaks[1] +
-     calibrationPeaks[2]) / 3.0;
+    (
+      calibrationPeaks[0] +
+      calibrationPeaks[1] +
+      calibrationPeaks[2]
+    ) / 3.0;
 
-  if (averagePeak <= 0.0) {
+  float averageDuration =
+    (
+      calibrationDurations[0] +
+      calibrationDurations[1] +
+      calibrationDurations[2]
+    ) / 3.0;
+
+  if (averagePeak <= 0.0 ||
+      averageDuration <= 0.0) {
     return false;
   }
 
-  for (int i = 0; i < REQUIRED_STABLE_REPS; i++) {
-    float difference =
-      fabs(calibrationPeaks[i] - averagePeak);
+  for (int i = 0;
+       i < REQUIRED_STABLE_REPS;
+       i++) {
+    float peakDifference =
+      fabs(
+        calibrationPeaks[i] -
+        averagePeak
+      );
 
-    float allowedDifference =
-      SIMILARITY_TOLERANCE * averagePeak;
+    float durationDifference =
+      fabs(
+        (float)calibrationDurations[i] -
+        averageDuration
+      );
 
-    if (difference > allowedDifference) {
+    if (
+      peakDifference >
+      PEAK_SIMILARITY_TOLERANCE *
+      averagePeak
+    ) {
+      return false;
+    }
+
+    if (
+      durationDifference >
+      DURATION_SIMILARITY_TOLERANCE *
+      averageDuration
+    ) {
       return false;
     }
   }
@@ -170,26 +246,80 @@ bool calibrationPeaksAreStable() {
 }
 
 // ======================================================
-// CALCULATE FINAL THRESHOLDS
+// CALCULATE FINAL LIMITS
 // ======================================================
 
 void finishMovementCalibration() {
   float averagePeak =
-    (calibrationPeaks[0] +
-     calibrationPeaks[1] +
-     calibrationPeaks[2]) / 3.0;
+    (
+      calibrationPeaks[0] +
+      calibrationPeaks[1] +
+      calibrationPeaks[2]
+    ) / 3.0;
 
-  // Hysteresis thresholds
-  highThreshold = averagePeak * 0.45;
-  lowThreshold = averagePeak * 0.20;
+  float averageDuration =
+    (
+      calibrationDurations[0] +
+      calibrationDurations[1] +
+      calibrationDurations[2]
+    ) / 3.0;
 
-  // Prevent thresholds from becoming too sensitive
+  // Movement start and end thresholds
+  highThreshold =
+    averagePeak * HIGH_THRESHOLD_FACTOR;
+
+  lowThreshold =
+    averagePeak * LOW_THRESHOLD_FACTOR;
+
+  // Required amplitude for a valid repetition
+  requiredRepPeak =
+    averagePeak * REQUIRED_PEAK_FACTOR;
+
+  // Prevent thresholds becoming too sensitive
   if (highThreshold < 0.45) {
     highThreshold = 0.45;
   }
 
   if (lowThreshold < 0.20) {
     lowThreshold = 0.20;
+  }
+
+  if (
+    requiredRepPeak <
+    MINIMUM_VALID_CALIBRATION_PEAK
+  ) {
+    requiredRepPeak =
+      MINIMUM_VALID_CALIBRATION_PEAK;
+  }
+
+  // Dynamically calculate timing limits
+  minimumRepDuration =
+    (unsigned long)(
+      averageDuration *
+      MIN_DURATION_FACTOR
+    );
+
+  maximumRepDuration =
+    (unsigned long)(
+      averageDuration *
+      MAX_DURATION_FACTOR
+    );
+
+  // Broad safety bounds
+  if (minimumRepDuration < 500) {
+    minimumRepDuration = 500;
+  }
+
+  if (maximumRepDuration > 8000) {
+    maximumRepDuration = 8000;
+  }
+
+  if (
+    maximumRepDuration <=
+    minimumRepDuration
+  ) {
+    maximumRepDuration =
+      minimumRepDuration + 500;
   }
 
   repetitionCount = 0;
@@ -199,44 +329,94 @@ void finishMovementCalibration() {
 }
 
 // ======================================================
-// HANDLE A COMPLETED MOVEMENT
+// HANDLE COMPLETED MOVEMENT
 // ======================================================
 
-void completeMovement(unsigned long currentTime) {
+void completeMovement(
+  unsigned long currentTime
+) {
   unsigned long movementDuration =
     currentTime - movementStartTime;
 
   float completedPeak = movementPeak;
 
+  lastCompletedDuration =
+    movementDuration;
+
   resetMovementCycle();
+
   lastMovementEndTime = currentTime;
 
-  // Reject invalid movements
-  if (movementDuration < MIN_REP_DURATION_MS) {
-    return;
-  }
+  if (
+    systemState ==
+    MOVEMENT_CALIBRATION
+  ) {
+    // Reject invalid calibration movement
+    if (
+      movementDuration <
+      CALIBRATION_MIN_DURATION_MS
+    ) {
+      return;
+    }
 
-  if (movementDuration > MAX_REP_DURATION_MS) {
-    return;
-  }
+    if (
+      movementDuration >
+      CALIBRATION_MAX_DURATION_MS
+    ) {
+      return;
+    }
 
-  if (completedPeak < MINIMUM_VALID_PEAK) {
-    return;
-  }
+    if (
+      completedPeak <
+      MINIMUM_VALID_CALIBRATION_PEAK
+    ) {
+      return;
+    }
 
-  if (systemState == MOVEMENT_CALIBRATION) {
-    saveCalibrationPeak(completedPeak);
+    saveCalibrationMovement(
+      completedPeak,
+      movementDuration
+    );
 
-    if (calibrationPeaksAreStable()) {
+    if (
+      calibrationMovementsAreStable()
+    ) {
       finishMovementCalibration();
     }
   }
 
-  else if (systemState == REP_COUNTING) {
+  else if (
+    systemState ==
+    REP_COUNTING
+  ) {
+    // Must reach calibrated movement amplitude
+    if (
+      completedPeak <
+      requiredRepPeak
+    ) {
+      return;
+    }
+
+    // Must fit calibrated timing range
+    if (
+      movementDuration <
+      minimumRepDuration
+    ) {
+      return;
+    }
+
+    if (
+      movementDuration >
+      maximumRepDuration
+    ) {
+      return;
+    }
+
     repetitionCount++;
 
-    // LED feedback for a counted repetition
+    // Harmless if no LED is connected
     digitalWrite(LED_PIN, HIGH);
+
     ledActive = true;
     ledStartTime = currentTime;
   }
@@ -254,40 +434,66 @@ void processMovement(
 ) {
   if (!movementActive) {
     bool enoughTimePassed =
-      currentTime - lastMovementEndTime >= MIN_REP_GAP_MS;
+      currentTime -
+      lastMovementEndTime >=
+      MIN_REP_GAP_MS;
 
-    if (motionSignal > startThreshold &&
-        enoughTimePassed) {
+    if (
+      motionSignal > startThreshold &&
+      enoughTimePassed
+    ) {
       movementActive = true;
-      movementStartTime = currentTime;
-      movementPeak = motionSignal;
+
+      movementStartTime =
+        currentTime;
+
+      movementPeak =
+        motionSignal;
+
       quietStartTime = 0;
     }
 
     return;
   }
 
-  // Update peak value during movement
+  // Store largest movement value
   if (motionSignal > movementPeak) {
     movementPeak = motionSignal;
   }
 
+  unsigned long activeMaximumDuration;
+
+  if (systemState == REP_COUNTING) {
+    activeMaximumDuration =
+      maximumRepDuration;
+  } else {
+    activeMaximumDuration =
+      CALIBRATION_MAX_DURATION_MS;
+  }
+
   // Cancel an abnormally long movement
-  if (currentTime - movementStartTime >
-      MAX_REP_DURATION_MS) {
+  if (
+    currentTime - movementStartTime >
+    activeMaximumDuration
+  ) {
     resetMovementCycle();
-    lastMovementEndTime = currentTime;
+
+    lastMovementEndTime =
+      currentTime;
+
     return;
   }
 
-  // Check whether user has returned to rest
+  // Check whether movement returned to rest
   if (motionSignal < endThreshold) {
     if (quietStartTime == 0) {
       quietStartTime = currentTime;
     }
 
-    if (currentTime - quietStartTime >=
-        QUIET_TIME_MS) {
+    if (
+      currentTime - quietStartTime >=
+      QUIET_TIME_MS
+    ) {
       completeMovement(currentTime);
     }
   } else {
@@ -296,10 +502,10 @@ void processMovement(
 }
 
 // ======================================================
-// SERIAL PLOTTER OUTPUT
+// SERIAL MONITOR / PLOTTER OUTPUT
 // ======================================================
 
-void printPlotterData(
+void printOutput(
   float rawMagnitude,
   float filteredValue,
   float motionSignal
@@ -318,6 +524,27 @@ void printPlotterData(
 
   Serial.print("\tLow:");
   Serial.print(lowThreshold, 3);
+
+  Serial.print("\tRequiredPeak:");
+  Serial.print(requiredRepPeak, 3);
+
+  Serial.print("\tMinTimeS:");
+  Serial.print(
+    minimumRepDuration / 1000.0,
+    2
+  );
+
+  Serial.print("\tMaxTimeS:");
+  Serial.print(
+    maximumRepDuration / 1000.0,
+    2
+  );
+
+  Serial.print("\tLastTimeS:");
+  Serial.print(
+    lastCompletedDuration / 1000.0,
+    2
+  );
 
   Serial.print("\tReps:");
   Serial.print(repetitionCount);
@@ -341,7 +568,8 @@ void setup() {
   digitalWrite(LED_PIN, LOW);
 
   if (!mpu.begin()) {
-    // Flash continuously if MPU-6050 cannot be found
+    Serial.println("MPU6050_Error:0");
+
     while (1) {
       digitalWrite(LED_PIN, HIGH);
       delay(200);
@@ -351,9 +579,17 @@ void setup() {
     }
   }
 
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  mpu.setAccelerometerRange(
+    MPU6050_RANGE_8_G
+  );
+
+  mpu.setGyroRange(
+    MPU6050_RANGE_500_DEG
+  );
+
+  mpu.setFilterBandwidth(
+    MPU6050_BAND_21_HZ
+  );
 
   baselineStartTime = millis();
   lastSampleTime = micros();
@@ -366,20 +602,25 @@ void setup() {
 void loop() {
   unsigned long currentTime = millis();
 
-  // Turn LED off after 200 ms without stopping sampling
-  if (ledActive &&
-      currentTime - ledStartTime >= 200) {
+  // Turn LED off without stopping sampling
+  if (
+    ledActive &&
+    currentTime - ledStartTime >= 200
+  ) {
     digitalWrite(LED_PIN, LOW);
     ledActive = false;
   }
 
-  // Maintain approximately 50 Hz sampling
-  if (micros() - lastSampleTime <
-      SAMPLE_INTERVAL_US) {
+  // Maintain approximately 50 Hz
+  if (
+    micros() - lastSampleTime <
+    SAMPLE_INTERVAL_US
+  ) {
     return;
   }
 
-  lastSampleTime += SAMPLE_INTERVAL_US;
+  lastSampleTime +=
+    SAMPLE_INTERVAL_US;
 
   sensors_event_t acceleration;
   sensors_event_t gyroscope;
@@ -405,36 +646,57 @@ void loop() {
 
   // Exponential moving-average filter
   if (!filterInitialised) {
-    filteredMagnitude = rawMagnitude;
+    filteredMagnitude =
+      rawMagnitude;
+
     filterInitialised = true;
   } else {
     filteredMagnitude =
-      FILTER_ALPHA * rawMagnitude +
+      FILTER_ALPHA *
+      rawMagnitude +
+
       (1.0 - FILTER_ALPHA) *
       filteredMagnitude;
   }
 
-  // Absolute movement relative to stationary baseline
+  // Movement relative to stationary baseline
   float motionSignal =
-    fabs(filteredMagnitude - baselineMagnitude);
+    fabs(
+      filteredMagnitude -
+      baselineMagnitude
+    );
 
-  // State 0: user remains still
-  if (systemState == BASELINE_CALIBRATION) {
-    baselineSum += filteredMagnitude;
+  // State 0: stationary calibration
+  if (
+    systemState ==
+    BASELINE_CALIBRATION
+  ) {
+    baselineSum +=
+      filteredMagnitude;
+
     baselineSamples++;
 
-    if (currentTime - baselineStartTime >=
-        BASELINE_TIME_MS) {
+    if (
+      currentTime -
+      baselineStartTime >=
+      BASELINE_TIME_MS
+    ) {
       baselineMagnitude =
-        baselineSum / baselineSamples;
+        baselineSum /
+        baselineSamples;
 
-      systemState = MOVEMENT_CALIBRATION;
+      systemState =
+        MOVEMENT_CALIBRATION;
+
       resetMovementCycle();
     }
   }
 
-  // State 1: first similar squats are used for calibration
-  else if (systemState == MOVEMENT_CALIBRATION) {
+  // State 1: squat calibration
+  else if (
+    systemState ==
+    MOVEMENT_CALIBRATION
+  ) {
     processMovement(
       motionSignal,
       CALIBRATION_START_GATE,
@@ -443,8 +705,11 @@ void loop() {
     );
   }
 
-  // State 2: subsequent squats are counted
-  else if (systemState == REP_COUNTING) {
+  // State 2: normal rep counting
+  else if (
+    systemState ==
+    REP_COUNTING
+  ) {
     processMovement(
       motionSignal,
       highThreshold,
@@ -453,7 +718,7 @@ void loop() {
     );
   }
 
-  printPlotterData(
+  printOutput(
     rawMagnitude,
     filteredMagnitude,
     motionSignal
