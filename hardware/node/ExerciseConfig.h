@@ -108,8 +108,8 @@ inline ExerciseSettings getExerciseSettings(
 // ======================================================
 
 namespace GeneralConfig {
-  // Harmless if no external LED is connected
-  constexpr int LED_PIN = 2;
+  // Built in esp32 led (D9)
+  constexpr int LED_PIN = LED_BUILTIN;
 
   // 50 Hz sampling
   constexpr unsigned long SAMPLE_INTERVAL_US =
