@@ -7,6 +7,8 @@
 #include "RepCounter.h"
 #include "FallDetector.h"
 
+#include "WirelessStreamer.h"
+
 Adafruit_MPU6050 mpu;
 
 // ======================================================
@@ -30,6 +32,7 @@ RepCounter repCounter(
 );
 
 FallDetector fallDetector;
+WirelessStreamer wirelessStreamer;
 
 // ======================================================
 // SAMPLING AND FILTERING
@@ -155,7 +158,17 @@ void printOutput(
 
 void setup() {
   Serial.begin(115200);
+  if (
+    !wirelessStreamer.begin(
+      "ExerciseNode"
+    )
+  ) {
+    Serial.println(
+      "Bluetooth_Error:0"
+    );
+  }
   delay(1000);
+  
 
   // ----------------------------------------------------
   // LED setup
@@ -396,5 +409,15 @@ void loop() {
 
   printOutput(
     rawMagnitude
+  );
+
+  wirelessStreamer.update(
+    rawMagnitude,
+    filteredMagnitude,
+    repCounter,
+    fallDetector,
+    buzzerActive,
+    SELECTED_EXERCISE,
+    currentTime
   );
 }
