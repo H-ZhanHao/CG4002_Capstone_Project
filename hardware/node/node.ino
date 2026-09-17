@@ -5,28 +5,58 @@
 
 #include "ExerciseConfig.h"
 #include "RepCounter.h"
+#include "FallDetector.h"
 
 Adafruit_MPU6050 mpu;
 
+// ======================================================
+// SELECTED EXERCISE
+// ======================================================
+
 const ExerciseType SELECTED_EXERCISE =
-  PUSH_UP;
+  SQUAT;
 
 ExerciseSettings exerciseSettings =
   getExerciseSettings(
     SELECTED_EXERCISE
   );
 
+// ======================================================
+// ALGORITHM OBJECTS
+// ======================================================
+
 RepCounter repCounter(
   exerciseSettings
 );
+
+FallDetector fallDetector;
+
+// ======================================================
+// SAMPLING AND FILTERING
+// ======================================================
 
 unsigned long lastSampleTime = 0;
 
 float filteredMagnitude = 0.0;
 bool filterInitialised = false;
 
+// ======================================================
+// LED STATE
+// ======================================================
+
 bool ledActive = false;
 unsigned long ledStartTime = 0;
+
+// ======================================================
+// BUZZER STATE
+// ======================================================
+
+bool buzzerActive = false;
+unsigned long buzzerStartTime = 0;
+
+// ======================================================
+// SERIAL OUTPUT
+// ======================================================
 
 void printOutput(
   float rawMagnitude
@@ -98,9 +128,19 @@ void printOutput(
     repCounter.calibrationCount()
   );
 
-  Serial.print("\tState:");
+  Serial.print("\tRepState:");
   Serial.print(
     (int)repCounter.state()
+  );
+
+  Serial.print("\tFallState:");
+  Serial.print(
+    (int)fallDetector.state()
+  );
+
+  Serial.print("\tBuzzer:");
+  Serial.print(
+    buzzerActive ? 1 : 0
   );
 
   Serial.print("\tExercise:");
@@ -109,9 +149,17 @@ void printOutput(
   );
 }
 
+// ======================================================
+// SETUP
+// ======================================================
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
+
+  // ----------------------------------------------------
+  // LED setup
+  // ----------------------------------------------------
 
   pinMode(
     GeneralConfig::LED_PIN,
@@ -122,6 +170,24 @@ void setup() {
     GeneralConfig::LED_PIN,
     LOW
   );
+
+  // ----------------------------------------------------
+  // Buzzer setup
+  // ----------------------------------------------------
+
+  pinMode(
+    FallConfig::BUZZER_PIN,
+    OUTPUT
+  );
+
+  digitalWrite(
+    FallConfig::BUZZER_PIN,
+    LOW
+  );
+
+  // ----------------------------------------------------
+  // MPU6050 setup
+  // ----------------------------------------------------
 
   if (!mpu.begin()) {
     Serial.println(
@@ -157,17 +223,36 @@ void setup() {
     MPU6050_BAND_21_HZ
   );
 
+  // ----------------------------------------------------
+  // Algorithm initialisation
+  // ----------------------------------------------------
+
   unsigned long currentTime =
     millis();
 
-  repCounter.begin(currentTime);
+  repCounter.begin(
+    currentTime
+  );
 
-  lastSampleTime = micros();
+  fallDetector.begin(
+    currentTime
+  );
+
+  lastSampleTime =
+    micros();
 }
+
+// ======================================================
+// MAIN LOOP
+// ======================================================
 
 void loop() {
   unsigned long currentTime =
     millis();
+
+  // ----------------------------------------------------
+  // Turn off LED after 200 ms
+  // ----------------------------------------------------
 
   if (
     ledActive &&
@@ -181,6 +266,27 @@ void loop() {
     ledActive = false;
   }
 
+  // ----------------------------------------------------
+  // Turn off buzzer after alarm duration
+  // ----------------------------------------------------
+
+  if (
+    buzzerActive &&
+    currentTime - buzzerStartTime >=
+      FallConfig::BUZZER_DURATION_MS
+  ) {
+    digitalWrite(
+      FallConfig::BUZZER_PIN,
+      LOW
+    );
+
+    buzzerActive = false;
+  }
+
+  // ----------------------------------------------------
+  // Maintain 50 Hz sampling
+  // ----------------------------------------------------
+
   if (
     micros() - lastSampleTime <
     GeneralConfig::SAMPLE_INTERVAL_US
@@ -190,6 +296,10 @@ void loop() {
 
   lastSampleTime +=
     GeneralConfig::SAMPLE_INTERVAL_US;
+
+  // ----------------------------------------------------
+  // Read MPU6050
+  // ----------------------------------------------------
 
   sensors_event_t acceleration;
   sensors_event_t gyroscope;
@@ -201,6 +311,7 @@ void loop() {
     &temperature
   );
 
+  // Calculate total acceleration magnitude
   float rawMagnitude = sqrt(
     acceleration.acceleration.x *
     acceleration.acceleration.x +
@@ -211,6 +322,34 @@ void loop() {
     acceleration.acceleration.z *
     acceleration.acceleration.z
   );
+
+  // ----------------------------------------------------
+  // Fall detection
+  //
+  // Use raw magnitude because filtering could reduce
+  // the short impact peak.
+  // ----------------------------------------------------
+
+  fallDetector.update(
+    rawMagnitude,
+    currentTime
+  );
+
+  if (
+    fallDetector.consumeFallEvent()
+  ) {
+    digitalWrite(
+      FallConfig::BUZZER_PIN,
+      HIGH
+    );
+
+    buzzerActive = true;
+    buzzerStartTime = currentTime;
+  }
+
+  // ----------------------------------------------------
+  // Exponential moving-average filter
+  // ----------------------------------------------------
 
   if (!filterInitialised) {
     filteredMagnitude =
@@ -229,12 +368,19 @@ void loop() {
       filteredMagnitude;
   }
 
+  // ----------------------------------------------------
+  // Rep-counting algorithm
+  // ----------------------------------------------------
+
   repCounter.update(
     filteredMagnitude,
     currentTime
   );
 
-  if (repCounter.consumeRepEvent()) {
+  // Flash LED whenever a valid rep is counted
+  if (
+    repCounter.consumeRepEvent()
+  ) {
     digitalWrite(
       GeneralConfig::LED_PIN,
       HIGH
@@ -244,5 +390,11 @@ void loop() {
     ledStartTime = currentTime;
   }
 
-  printOutput(rawMagnitude);
+  // ----------------------------------------------------
+  // Serial Monitor and Serial Plotter output
+  // ----------------------------------------------------
+
+  printOutput(
+    rawMagnitude
+  );
 }

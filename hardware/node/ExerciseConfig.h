@@ -138,3 +138,24 @@ namespace GeneralConfig {
   // Minimum gap before another movement can begin
   constexpr unsigned long MIN_REP_GAP_MS = 300;
 }
+
+namespace FallConfig {
+  // Buzzer control pin.
+  // Change D3 if you use a different output pin.
+  constexpr int BUZZER_PIN = D3;
+
+  // Acceleration magnitude below this indicates possible free fall.
+  constexpr float FREE_FALL_THRESHOLD = 4.0;
+
+  // It must remain below the threshold for this long.
+  constexpr unsigned long FREE_FALL_MIN_TIME_MS = 100;
+
+  // Impact required after free fall.
+  constexpr float IMPACT_THRESHOLD = 25.0;
+
+  // Maximum time allowed between free fall and impact.
+  constexpr unsigned long IMPACT_WINDOW_MS = 1000;
+
+  // Buzzer duration after detecting a fall.
+  constexpr unsigned long BUZZER_DURATION_MS = 3000;
+}
