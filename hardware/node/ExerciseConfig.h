@@ -12,7 +12,7 @@ enum ExerciseType {
 };
 
 // ======================================================
-// EXERCISE SETTINGS STRUCTURE
+// EXERCISE SETTINGS
 // ======================================================
 
 struct ExerciseSettings {
@@ -32,9 +32,7 @@ struct ExerciseSettings {
 };
 
 // ======================================================
-// SQUAT SETTINGS
-// Sensor position: Hip
-// Signal: Acceleration magnitude
+// SQUAT — HIP NODE
 // ======================================================
 
 inline ExerciseSettings getSquatSettings() {
@@ -58,9 +56,8 @@ inline ExerciseSettings getSquatSettings() {
 }
 
 // ======================================================
-// PUSH-UP SETTINGS
-// Sensor position: Chest
-// Signal: Acceleration magnitude
+// PUSH-UP — CHEST NODE
+// These values are not validated for wrist placement.
 // ======================================================
 
 inline ExerciseSettings getPushUpSettings() {
@@ -83,79 +80,78 @@ inline ExerciseSettings getPushUpSettings() {
   return settings;
 }
 
-// ======================================================
-// RETURN SETTINGS FOR SELECTED EXERCISE
-// ======================================================
-
 inline ExerciseSettings getExerciseSettings(
   ExerciseType exercise
 ) {
   switch (exercise) {
-    case SQUAT:
-      return getSquatSettings();
-
     case PUSH_UP:
       return getPushUpSettings();
 
+    case SQUAT:
     default:
-      // Safety fallback
       return getSquatSettings();
   }
 }
 
 // ======================================================
-// GENERAL SETTINGS FOR ALL EXERCISES
+// GENERAL CONFIGURATION
 // ======================================================
 
 namespace GeneralConfig {
-  // Built in esp32 led (D9)
   constexpr int LED_PIN = LED_BUILTIN;
 
-  // 50 Hz sampling
-  constexpr unsigned long SAMPLE_INTERVAL_US =
-    20000;
+  // Assumes HIGH turns the LED on.
+  constexpr int LED_ON = HIGH;
+  constexpr int LED_OFF = LOW;
 
-  // Exponential moving-average filter
+  // Target sample interval: 50 Hz.
+  constexpr unsigned long SAMPLE_INTERVAL_US = 20000;
+
   constexpr float FILTER_ALPHA = 0.20;
 
-  // Stationary baseline calibration duration
-  constexpr unsigned long BASELINE_TIME_MS =
-    2000;
+  // Three continuous seconds of detected stillness.
+  constexpr unsigned long BASELINE_TIME_MS = 3000;
 
-  // Number of mutually similar calibration movements
-  constexpr int REQUIRED_STABLE_REPS = 3;
+  // Requires the two-rep-compatible RepCounter.cpp.
+  constexpr int REQUIRED_STABLE_REPS = 2;
 
-  // Broad duration limits during calibration
-  constexpr unsigned long
-    CALIBRATION_MIN_DURATION_MS = 700;
+  constexpr unsigned long CALIBRATION_MIN_DURATION_MS = 700;
+  constexpr unsigned long CALIBRATION_MAX_DURATION_MS = 6000;
 
-  constexpr unsigned long
-    CALIBRATION_MAX_DURATION_MS = 6000;
-
-  // Time near baseline required to complete a movement
   constexpr unsigned long QUIET_TIME_MS = 350;
-
-  // Minimum gap before another movement can begin
   constexpr unsigned long MIN_REP_GAP_MS = 300;
+
+  // Gyroscope magnitudes are in rad/s.
+  // Rotate/move the node after reset to arm preparation.
+  constexpr float POSITIONING_MOVEMENT_GYRO = 0.30;
+  constexpr float STATIONARY_MAX_GYRO = 0.15;
+
+  // Maximum change in filtered acceleration magnitude
+  // between successive samples, in m/s².
+  constexpr float STATIONARY_MAX_ACCEL_CHANGE = 0.05;
+
+  constexpr int CALIBRATION_READY_BLINKS = 3;
+  constexpr unsigned long
+    CALIBRATION_READY_BLINK_INTERVAL_MS = 200;
+
+  constexpr unsigned long REP_LED_DURATION_MS = 200;
 }
 
+// ======================================================
+// FALL DETECTION CONFIGURATION
+// Prototype thresholds — require experimental validation.
+// ======================================================
+
 namespace FallConfig {
-  // Buzzer control pin.
-  // Change D3 if you use a different output pin.
+  // Keep this consistent with your actual wiring.
   constexpr int BUZZER_PIN = D3;
 
-  // Acceleration magnitude below this indicates possible free fall.
+  // Acceleration magnitude in m/s².
   constexpr float FREE_FALL_THRESHOLD = 4.0;
-
-  // It must remain below the threshold for this long.
   constexpr unsigned long FREE_FALL_MIN_TIME_MS = 100;
 
-  // Impact required after free fall.
   constexpr float IMPACT_THRESHOLD = 25.0;
-
-  // Maximum time allowed between free fall and impact.
   constexpr unsigned long IMPACT_WINDOW_MS = 1000;
 
-  // Buzzer duration after detecting a fall.
   constexpr unsigned long BUZZER_DURATION_MS = 3000;
 }
