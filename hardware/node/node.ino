@@ -6,22 +6,20 @@
 #include "ExerciseConfig.h"
 #include "RepCounter.h"
 #include "FallDetector.h"
+#include "ExerciseRecognition.h"
 #include "WirelessStreamer.h"
 
 // ======================================================
-// OBJECTS AND EXERCISE SELECTION
+// OBJECTS
+// No exercise selection is used to construct the counter.
 // ======================================================
 
 Adafruit_MPU6050 mpu;
 
-// Change to PUSH_UP when testing push-ups.
-const ExerciseType SELECTED_EXERCISE = SQUAT;
+RepCounter repCounter(getGenericSettings());
 
-ExerciseSettings exerciseSettings =
-  getExerciseSettings(SELECTED_EXERCISE);
-
-RepCounter repCounter(exerciseSettings);
 FallDetector fallDetector;
+ExerciseRecognition exerciseRecognition;
 WirelessStreamer wirelessStreamer;
 
 bool wirelessStarted = false;
@@ -31,8 +29,9 @@ bool wirelessStarted = false;
 // ======================================================
 
 unsigned long lastSampleTime = 0;
+unsigned long lastUsbOutputTime = 0;
 
-float filteredMagnitude = 0.0;
+float filteredMagnitude = 0.0f;
 bool filterInitialised = false;
 
 // ======================================================
@@ -42,7 +41,7 @@ bool filterInitialised = false;
 bool positioningMovementSeen = false;
 
 bool previousMagnitudeAvailable = false;
-float previousFilteredMagnitude = 0.0;
+float previousFilteredMagnitude = 0.0f;
 
 // ======================================================
 // LED STATE
@@ -51,11 +50,8 @@ float previousFilteredMagnitude = 0.0;
 bool ledActive = false;
 unsigned long ledStartTime = 0;
 
-bool calibrationReadyBlinking = false;
-bool calibrationBlinkLedOn = false;
-
-int calibrationBlinksCompleted = 0;
-unsigned long calibrationBlinkChangeTime = 0;
+bool calibrationLedOffPulse = false;
+unsigned long calibrationLedOffStartTime = 0;
 
 // ======================================================
 // BUZZER STATE
@@ -65,135 +61,14 @@ bool buzzerActive = false;
 unsigned long buzzerStartTime = 0;
 
 // ======================================================
-// SERIAL OUTPUT
+// LED HELPER
 // ======================================================
 
-void printOutput(float rawMagnitude) {
-  Serial.print("Raw:");
-  Serial.print(rawMagnitude, 3);
-
-  Serial.print("\tFiltered:");
-  Serial.print(filteredMagnitude, 3);
-
-  Serial.print("\tMotion:");
-  Serial.print(repCounter.motionSignal(), 3);
-
-  Serial.print("\tHigh:");
-  Serial.print(repCounter.highThreshold(), 3);
-
-  Serial.print("\tLow:");
-  Serial.print(repCounter.lowThreshold(), 3);
-
-  Serial.print("\tRequiredPeak:");
-  Serial.print(repCounter.requiredRepPeak(), 3);
-
-  Serial.print("\tLastPeak:");
-  Serial.print(repCounter.lastCompletedPeak(), 3);
-
-  Serial.print("\tMinTimeS:");
-  Serial.print(
-    repCounter.minimumRepDuration() / 1000.0,
-    2
-  );
-
-  Serial.print("\tMaxTimeS:");
-  Serial.print(
-    repCounter.maximumRepDuration() / 1000.0,
-    2
-  );
-
-  Serial.print("\tLastTimeS:");
-  Serial.print(
-    repCounter.lastCompletedDuration() / 1000.0,
-    2
-  );
-
-  Serial.print("\tReps:");
-  Serial.print(repCounter.repetitionCount());
-
-  Serial.print("\tCalibrationReps:");
-  Serial.print(repCounter.calibrationCount());
-
-  Serial.print("\tRepState:");
-  Serial.print((int)repCounter.state());
-
-  Serial.print("\tPositioningSeen:");
-  Serial.print(positioningMovementSeen ? 1 : 0);
-
-  Serial.print("\tReadyBlink:");
-  Serial.print(calibrationReadyBlinking ? 1 : 0);
-
-  Serial.print("\tFallState:");
-  Serial.print((int)fallDetector.state());
-
-  Serial.print("\tBuzzer:");
-  Serial.print(buzzerActive ? 1 : 0);
-
-  Serial.print("\tExercise:");
-  Serial.println((int)SELECTED_EXERCISE);
-}
-
-// ======================================================
-// CALIBRATION READY LED PATTERN
-// ======================================================
-
-void startCalibrationReadyBlink(
-  unsigned long currentTime
-) {
-  calibrationReadyBlinking = true;
-  calibrationBlinkLedOn = true;
-  calibrationBlinksCompleted = 0;
-
-  calibrationBlinkChangeTime = currentTime;
-
-  // Cancel any normal rep flash.
-  ledActive = false;
-
+void setLed(bool on) {
   digitalWrite(
     GeneralConfig::LED_PIN,
-    GeneralConfig::LED_ON
+    on ? GeneralConfig::LED_ON : GeneralConfig::LED_OFF
   );
-}
-
-void updateCalibrationReadyBlink(
-  unsigned long currentTime
-) {
-  if (!calibrationReadyBlinking) {
-    return;
-  }
-
-  if (
-    currentTime - calibrationBlinkChangeTime <
-    GeneralConfig::CALIBRATION_READY_BLINK_INTERVAL_MS
-  ) {
-    return;
-  }
-
-  calibrationBlinkChangeTime = currentTime;
-
-  if (calibrationBlinkLedOn) {
-    digitalWrite(
-      GeneralConfig::LED_PIN,
-      GeneralConfig::LED_OFF
-    );
-
-    calibrationBlinkLedOn = false;
-    calibrationBlinksCompleted++;
-
-    if (
-      calibrationBlinksCompleted >=
-      GeneralConfig::CALIBRATION_READY_BLINKS
-    ) {
-      calibrationReadyBlinking = false;
-    }
-  } else {
-    digitalWrite(
-      GeneralConfig::LED_PIN,
-      GeneralConfig::LED_ON
-    );
-
-    calibrationBlinkLedOn = true;
-  }
 }
 
 // ======================================================
@@ -201,20 +76,25 @@ void updateCalibrationReadyBlink(
 // ======================================================
 
 void updateOutputTimers(unsigned long currentTime) {
-  updateCalibrationReadyBlink(currentTime);
+  if (
+    calibrationLedOffPulse &&
+    currentTime - calibrationLedOffStartTime >=
+      GeneralConfig::CALIBRATION_LED_OFF_MS
+  ) {
+    calibrationLedOffPulse = false;
+
+    if (repCounter.state() == MOVEMENT_CALIBRATION) {
+      setLed(true);
+    }
+  }
 
   if (
-    !calibrationReadyBlinking &&
     ledActive &&
     currentTime - ledStartTime >=
       GeneralConfig::REP_LED_DURATION_MS
   ) {
-    digitalWrite(
-      GeneralConfig::LED_PIN,
-      GeneralConfig::LED_OFF
-    );
-
     ledActive = false;
+    setLed(false);
   }
 
   if (
@@ -238,10 +118,10 @@ void updateRepCounting(
   const bool hadPreviousMagnitude =
     previousMagnitudeAvailable;
 
-  float accelerationChange = 0.0;
+  float accelerationChange = 0.0f;
 
   if (hadPreviousMagnitude) {
-    accelerationChange = fabs(
+    accelerationChange = fabsf(
       filteredMagnitude - previousFilteredMagnitude
     );
   }
@@ -249,17 +129,12 @@ void updateRepCounting(
   previousFilteredMagnitude = filteredMagnitude;
   previousMagnitudeAvailable = true;
 
-  // Do not accept calibration reps during the LED pattern.
-  if (calibrationReadyBlinking) {
-    return;
-  }
-
   if (repCounter.state() == BASELINE_CALIBRATION) {
     const bool positioningMovement =
       gyroMagnitude >
       GeneralConfig::POSITIONING_MOVEMENT_GYRO;
 
-    // Wait for positioning movement at least once.
+    // Wait until positioning movement has occurred.
     if (!positioningMovementSeen) {
       if (positioningMovement) {
         positioningMovementSeen = true;
@@ -277,33 +152,94 @@ void updateRepCounting(
         GeneralConfig::STATIONARY_MAX_ACCEL_CHANGE;
 
     if (!stationary) {
-      // Discard previous baseline samples and restart
-      // the three-second baseline timer.
+      // Restart the stationary baseline window.
       repCounter.begin(currentTime);
       return;
     }
 
-    // Only stationary samples enter the baseline average.
-    repCounter.update(filteredMagnitude, currentTime);
+    repCounter.update(
+      filteredMagnitude,
+      currentTime
+    );
 
     if (repCounter.state() == MOVEMENT_CALIBRATION) {
-      startCalibrationReadyBlink(currentTime);
+      calibrationLedOffPulse = false;
+      ledActive = false;
+      setLed(true);
     }
 
     return;
   }
 
-  // Baseline and ready indication have completed.
-  repCounter.update(filteredMagnitude, currentTime);
+  const CounterState previousState = repCounter.state();
+
+  repCounter.update(
+    filteredMagnitude,
+    currentTime
+  );
+
+  const bool calibrationEvent =
+    repCounter.consumeCalibrationEvent();
+
+  if (
+    previousState == MOVEMENT_CALIBRATION &&
+    repCounter.state() == REP_COUNTING
+  ) {
+    // Two matching candidates have completed calibration.
+    calibrationLedOffPulse = false;
+    ledActive = false;
+    setLed(false);
+  } else if (
+    calibrationEvent &&
+    repCounter.state() == MOVEMENT_CALIBRATION
+  ) {
+    // Brief OFF pulse for a valid calibration candidate.
+    calibrationLedOffPulse = true;
+    calibrationLedOffStartTime = currentTime;
+    setLed(false);
+  }
 
   if (repCounter.consumeRepEvent()) {
-    digitalWrite(
-      GeneralConfig::LED_PIN,
-      GeneralConfig::LED_ON
-    );
-
     ledActive = true;
     ledStartTime = currentTime;
+    setLed(true);
+  }
+}
+
+// ======================================================
+// RECOGNITION LIFECYCLE
+// The exercise label never changes counting settings.
+// ======================================================
+
+void updateRecognition(
+  CounterState previousState,
+  const float acceleration[3],
+  const float gyroscope[3],
+  unsigned long currentTime
+) {
+  const CounterState currentState = repCounter.state();
+
+  if (
+    previousState == BASELINE_CALIBRATION &&
+    currentState == MOVEMENT_CALIBRATION
+  ) {
+    exerciseRecognition.beginCalibration(currentTime);
+  }
+
+  if (previousState == MOVEMENT_CALIBRATION) {
+    // Includes the final sample that completes calibration.
+    exerciseRecognition.update(
+      acceleration,
+      gyroscope,
+      repCounter.calibrationCount(),
+      currentTime
+    );
+
+    if (currentState == REP_COUNTING) {
+      // Freeze whichever result exists, including UNKNOWN.
+      // Rep counting never waits for the recognition feature.
+      exerciseRecognition.endCalibration();
+    }
   }
 }
 
@@ -315,10 +251,7 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(GeneralConfig::LED_PIN, OUTPUT);
-  digitalWrite(
-    GeneralConfig::LED_PIN,
-    GeneralConfig::LED_OFF
-  );
+  setLed(false);
 
   pinMode(FallConfig::BUZZER_PIN, OUTPUT);
   digitalWrite(FallConfig::BUZZER_PIN, LOW);
@@ -329,16 +262,10 @@ void setup() {
     Serial.println("MPU6050_Error:0");
 
     while (true) {
-      digitalWrite(
-        GeneralConfig::LED_PIN,
-        GeneralConfig::LED_ON
-      );
+      setLed(true);
       delay(200);
 
-      digitalWrite(
-        GeneralConfig::LED_PIN,
-        GeneralConfig::LED_OFF
-      );
+      setLed(false);
       delay(200);
     }
   }
@@ -360,6 +287,7 @@ void setup() {
   fallDetector.begin(currentTime);
 
   lastSampleTime = micros();
+  lastUsbOutputTime = currentTime;
 }
 
 // ======================================================
@@ -369,7 +297,6 @@ void setup() {
 void loop() {
   unsigned long currentTime = millis();
 
-  // Service LED and buzzer even between sensor samples.
   updateOutputTimers(currentTime);
 
   const unsigned long sampleTime = micros();
@@ -381,52 +308,62 @@ void loop() {
     return;
   }
 
-  // Do not generate catch-up bursts if a loop runs late.
   lastSampleTime = sampleTime;
 
-  sensors_event_t acceleration;
-  sensors_event_t gyroscope;
-  sensors_event_t temperature;
+  sensors_event_t accelerationEvent;
+  sensors_event_t gyroscopeEvent;
+  sensors_event_t temperatureEvent;
 
   mpu.getEvent(
-    &acceleration,
-    &gyroscope,
-    &temperature
+    &accelerationEvent,
+    &gyroscopeEvent,
+    &temperatureEvent
   );
 
   currentTime = millis();
 
-  const float rawMagnitude = sqrt(
-    acceleration.acceleration.x *
-      acceleration.acceleration.x +
-    acceleration.acceleration.y *
-      acceleration.acceleration.y +
-    acceleration.acceleration.z *
-      acceleration.acceleration.z
+  const float acceleration[3] = {
+    accelerationEvent.acceleration.x,
+    accelerationEvent.acceleration.y,
+    accelerationEvent.acceleration.z
+  };
+
+  const float gyroscope[3] = {
+    gyroscopeEvent.gyro.x,
+    gyroscopeEvent.gyro.y,
+    gyroscopeEvent.gyro.z
+  };
+
+  const float rawMagnitude = sqrtf(
+    acceleration[0] * acceleration[0] +
+    acceleration[1] * acceleration[1] +
+    acceleration[2] * acceleration[2]
   );
 
-  const float gyroMagnitude = sqrt(
-    gyroscope.gyro.x * gyroscope.gyro.x +
-    gyroscope.gyro.y * gyroscope.gyro.y +
-    gyroscope.gyro.z * gyroscope.gyro.z
+  const float gyroMagnitude = sqrtf(
+    gyroscope[0] * gyroscope[0] +
+    gyroscope[1] * gyroscope[1] +
+    gyroscope[2] * gyroscope[2]
   );
 
   // ----------------------------------------------------
-  // Fall detection remains active during preparation,
-  // baseline collection, blinking and rep counting.
-  // Uses magnitude before the additional EMA filter.
+  // Fall detection
   // ----------------------------------------------------
 
-  fallDetector.update(rawMagnitude, currentTime);
+  fallDetector.update(
+    rawMagnitude,
+    currentTime
+  );
 
   if (fallDetector.consumeFallEvent()) {
     digitalWrite(FallConfig::BUZZER_PIN, HIGH);
+
     buzzerActive = true;
     buzzerStartTime = currentTime;
   }
 
   // ----------------------------------------------------
-  // Acceleration filtering
+  // Acceleration-magnitude filtering
   // ----------------------------------------------------
 
   if (!filterInitialised) {
@@ -435,18 +372,34 @@ void loop() {
   } else {
     filteredMagnitude =
       GeneralConfig::FILTER_ALPHA * rawMagnitude +
-      (1.0 - GeneralConfig::FILTER_ALPHA) *
+      (1.0f - GeneralConfig::FILTER_ALPHA) *
         filteredMagnitude;
   }
 
   // ----------------------------------------------------
-  // Preparation, baseline and exercise processing
+  // Local rep counting
   // ----------------------------------------------------
 
-  updateRepCounting(gyroMagnitude, currentTime);
+  const CounterState previousState = repCounter.state();
+
+  updateRepCounting(
+    gyroMagnitude,
+    currentTime
+  );
 
   // ----------------------------------------------------
-  // Wireless telemetry
+  // Recognition during movement calibration only
+  // ----------------------------------------------------
+
+  updateRecognition(
+    previousState,
+    acceleration,
+    gyroscope,
+    currentTime
+  );
+
+  // ----------------------------------------------------
+  // Bluetooth output
   // ----------------------------------------------------
 
   if (wirelessStarted) {
@@ -455,12 +408,30 @@ void loop() {
       filteredMagnitude,
       repCounter,
       fallDetector,
+      exerciseRecognition,
       buzzerActive,
-      SELECTED_EXERCISE,
       currentTime
     );
   }
 
-  // Wired USB telemetry.
-  printOutput(rawMagnitude);
+  // ----------------------------------------------------
+  // USB output
+  // ----------------------------------------------------
+
+  if (
+    currentTime - lastUsbOutputTime >=
+    GeneralConfig::OUTPUT_INTERVAL_MS
+  ) {
+    lastUsbOutputTime = currentTime;
+
+    printTelemetry(
+      Serial,
+      rawMagnitude,
+      filteredMagnitude,
+      repCounter,
+      fallDetector,
+      exerciseRecognition,
+      buzzerActive
+    );
+  }
 }

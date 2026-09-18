@@ -3,6 +3,9 @@
 #include <Arduino.h>
 #include "ExerciseConfig.h"
 
+static_assert(GeneralConfig::REQUIRED_STABLE_REPS >= 2,
+              "Calibration requires at least two candidates");
+
 enum CounterState {
   BASELINE_CALIBRATION = 0,
   MOVEMENT_CALIBRATION = 1,
@@ -23,6 +26,7 @@ class RepCounter {
   );
 
   bool consumeRepEvent();
+  bool consumeCalibrationEvent();
 
   CounterState state() const;
 
@@ -81,6 +85,7 @@ class RepCounter {
 
   int repetitionCount_;
   bool repEvent_;
+  bool calibrationEvent_;
 
   void resetMovementCycle();
 
@@ -105,18 +110,6 @@ class RepCounter {
     int first,
     int second
   ) const;
-
-  float pairDifferenceScore(
-    int first,
-    int second
-  ) const;
-
-  void retainCalibrationPair(
-    int first,
-    int second
-  );
-
-  void retainNewestCalibrationCandidate();
 
   void finishCalibration();
 };

@@ -39,6 +39,7 @@ void RepCounter::begin(
 
   repetitionCount_ = 0;
   repEvent_ = false;
+  calibrationEvent_ = false;
 }
 
 void RepCounter::update(
@@ -236,6 +237,16 @@ void RepCounter::addCalibrationCandidate(
   float peak,
   unsigned long duration
 ) {
+  if (state_ != MOVEMENT_CALIBRATION) {
+    return;
+  }
+
+  // Guard before writing so an invalid count cannot overrun either array.
+  if (calibrationCount_ < 0 ||
+      calibrationCount_ >= GeneralConfig::REQUIRED_STABLE_REPS) {
+    calibrationCount_ = 0;
+  }
+
   calibrationPeaks_[calibrationCount_] =
     peak;
 
@@ -243,6 +254,7 @@ void RepCounter::addCalibrationCandidate(
     duration;
 
   calibrationCount_++;
+  calibrationEvent_ = true;
 
   if (
     calibrationCount_ ==
@@ -296,169 +308,48 @@ bool RepCounter::movementsAreSimilar(
   );
 }
 
-float RepCounter::pairDifferenceScore(
-  int first,
-  int second
-) const {
-  float averagePeak =
-    (
-      calibrationPeaks_[first] +
-      calibrationPeaks_[second]
-    ) / 2.0;
-
-  float averageDuration =
-    (
-      calibrationDurations_[first] +
-      calibrationDurations_[second]
-    ) / 2.0;
-
-  if (
-    averagePeak <= 0.0 ||
-    averageDuration <= 0.0
-  ) {
-    return 1000000.0;
+void RepCounter::evaluateCalibrationCandidates() {
+  if (calibrationCount_ != GeneralConfig::REQUIRED_STABLE_REPS) {
+    return;
   }
 
-  float relativePeakDifference =
-    fabs(
-      calibrationPeaks_[first] -
-      calibrationPeaks_[second]
-    ) / averagePeak;
+  bool allSimilar = true;
+  for (int first = 0; first < calibrationCount_; ++first) {
+    for (int second = first + 1; second < calibrationCount_; ++second) {
+      if (!movementsAreSimilar(first, second)) {
+        allSimilar = false;
+      }
+    }
+  }
 
-  float relativeDurationDifference =
-    fabs(
-      (float)calibrationDurations_[first] -
-      (float)calibrationDurations_[second]
-    ) / averageDuration;
-
-  return (
-    relativePeakDifference +
-    relativeDurationDifference
-  );
-}
-
-void RepCounter::retainCalibrationPair(
-  int first,
-  int second
-) {
-  float firstPeak =
-    calibrationPeaks_[first];
-
-  float secondPeak =
-    calibrationPeaks_[second];
-
-  unsigned long firstDuration =
-    calibrationDurations_[first];
-
-  unsigned long secondDuration =
-    calibrationDurations_[second];
-
-  calibrationPeaks_[0] = firstPeak;
-  calibrationPeaks_[1] = secondPeak;
-
-  calibrationDurations_[0] =
-    firstDuration;
-
-  calibrationDurations_[1] =
-    secondDuration;
-
-  calibrationCount_ = 2;
-}
-
-void RepCounter::
-retainNewestCalibrationCandidate() {
-  calibrationPeaks_[0] =
-    calibrationPeaks_[2];
-
-  calibrationDurations_[0] =
-    calibrationDurations_[2];
-
-  calibrationCount_ = 1;
-}
-
-void RepCounter::
-evaluateCalibrationCandidates() {
-  bool similar01 =
-    movementsAreSimilar(0, 1);
-
-  bool similar02 =
-    movementsAreSimilar(0, 2);
-
-  bool similar12 =
-    movementsAreSimilar(1, 2);
-
-  // All three must agree with each other
-  if (
-    similar01 &&
-    similar02 &&
-    similar12
-  ) {
+  if (allSimilar) {
     finishCalibration();
     return;
   }
 
-  // Otherwise, keep the closest matching pair
-  float bestScore = 1000000.0;
-
-  int bestFirst = -1;
-  int bestSecond = -1;
-
-  if (similar01) {
-    bestScore =
-      pairDifferenceScore(0, 1);
-
-    bestFirst = 0;
-    bestSecond = 1;
+  // Reject the oldest candidate, retaining the more recent ones.
+  // With two candidates, this keeps only the newest movement.
+  for (int i = 1; i < calibrationCount_; ++i) {
+    calibrationPeaks_[i - 1] = calibrationPeaks_[i];
+    calibrationDurations_[i - 1] = calibrationDurations_[i];
   }
-
-  if (similar02) {
-    float score =
-      pairDifferenceScore(0, 2);
-
-    if (score < bestScore) {
-      bestScore = score;
-      bestFirst = 0;
-      bestSecond = 2;
-    }
-  }
-
-  if (similar12) {
-    float score =
-      pairDifferenceScore(1, 2);
-
-    if (score < bestScore) {
-      bestScore = score;
-      bestFirst = 1;
-      bestSecond = 2;
-    }
-  }
-
-  if (bestFirst >= 0) {
-    retainCalibrationPair(
-      bestFirst,
-      bestSecond
-    );
-  } else {
-    // If nothing matches, retain only
-    // the newest movement
-    retainNewestCalibrationCandidate();
-  }
+  --calibrationCount_;
 }
 
 void RepCounter::finishCalibration() {
-  float averagePeak =
-    (
-      calibrationPeaks_[0] +
-      calibrationPeaks_[1] +
-      calibrationPeaks_[2]
-    ) / 3.0;
+  if (calibrationCount_ != GeneralConfig::REQUIRED_STABLE_REPS) {
+    return;
+  }
 
-  float averageDuration =
-    (
-      calibrationDurations_[0] +
-      calibrationDurations_[1] +
-      calibrationDurations_[2]
-    ) / 3.0;
+  float totalPeak = 0.0f;
+  float totalDuration = 0.0f;
+  for (int i = 0; i < calibrationCount_; ++i) {
+    totalPeak += calibrationPeaks_[i];
+    totalDuration += calibrationDurations_[i];
+  }
+
+  float averagePeak = totalPeak / calibrationCount_;
+  float averageDuration = totalDuration / calibrationCount_;
 
   highThreshold_ =
     averagePeak *
@@ -520,6 +411,12 @@ void RepCounter::finishCalibration() {
   state_ = REP_COUNTING;
 
   resetMovementCycle();
+}
+
+bool RepCounter::consumeCalibrationEvent() {
+  bool result = calibrationEvent_;
+  calibrationEvent_ = false;
+  return result;
 }
 
 bool RepCounter::consumeRepEvent() {
