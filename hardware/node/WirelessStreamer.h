@@ -4,20 +4,47 @@
 #include <BluetoothSerial.h>
 
 #include "ExerciseConfig.h"
-#include "RepCounter.h"
-#include "FallDetector.h"
-#include "ExerciseRecognition.h"
 
-// Common numeric output for USB Serial and Bluetooth.
-// Numeric values keep the format suitable for Serial Plotter.
+struct TelemetryData {
+  float raw;
+  float filtered;
+  float motion;
+
+  // Pause-detector diagnostics.
+  float high;
+  float low;
+  float requiredPeak;
+  float lastPeak;
+  float lastTimeS;
+
+  // Continuous-detector diagnostics.
+  float gyroSignal;
+  float gyroHigh;
+  float requiredAngle;
+  float lastAngle;
+  float cycleTimeS;
+
+  int reps;
+  int calibrationReps;
+  int pauseCandidates;
+  int continuousCandidates;
+
+  int repState;
+  int mode;
+  int requestedMode;
+  int gyroAxis;
+
+  int fallState;
+  bool buzzer;
+
+  int exercise;
+  bool recognitionActive;
+  bool recognitionMock;
+};
+
 void printTelemetry(
   Print& output,
-  float rawMagnitude,
-  float filteredMagnitude,
-  const RepCounter& repCounter,
-  const FallDetector& fallDetector,
-  const ExerciseRecognition& recognition,
-  bool buzzerActive
+  const TelemetryData& data
 );
 
 class WirelessStreamer {
@@ -27,12 +54,7 @@ class WirelessStreamer {
   bool begin(const char* deviceName);
 
   void update(
-    float rawMagnitude,
-    float filteredMagnitude,
-    const RepCounter& repCounter,
-    const FallDetector& fallDetector,
-    const ExerciseRecognition& recognition,
-    bool buzzerActive,
+    const TelemetryData& data,
     unsigned long currentTime
   );
 

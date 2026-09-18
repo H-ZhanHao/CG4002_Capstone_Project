@@ -2,12 +2,7 @@
 
 #include <Arduino.h>
 
-// ======================================================
-// EXERCISE LABELS
-// These describe recognition results.
-// They do not select the rep-counting settings.
-// ======================================================
-
+// Recognition labels. These do not control counting mode.
 enum ExerciseType {
   UNKNOWN_EXERCISE = -1,
   SQUAT = 0,
@@ -18,10 +13,11 @@ enum ExerciseType {
   LEG_RAISE = 5
 };
 
-// ======================================================
-// SHARED REP-COUNTING SETTINGS
-// Compatible with your current RepCounter class.
-// ======================================================
+enum CountingMode {
+  AUTO_MODE = 0,
+  PAUSE_MODE = 1,
+  CONTINUOUS_MODE = 2
+};
 
 struct ExerciseSettings {
   float calibrationStartGate;
@@ -39,11 +35,7 @@ struct ExerciseSettings {
   float maximumDurationFactor;
 };
 
-// One provisional profile for every exercise.
-// Recognition never changes these settings in this version.
-//
-// Acceleration thresholds are in m/s².
-// Validate these gates using your actual sensor placement.
+// Existing shared settings for the pause-based detector.
 inline ExerciseSettings getGenericSettings() {
   ExerciseSettings settings;
 
@@ -64,19 +56,12 @@ inline ExerciseSettings getGenericSettings() {
   return settings;
 }
 
-// ======================================================
-// GENERAL SETTINGS
-// ======================================================
-
 namespace GeneralConfig {
   constexpr int LED_PIN = LED_BUILTIN;
-
   constexpr int LED_ON = HIGH;
   constexpr int LED_OFF = LOW;
 
   constexpr unsigned long SAMPLE_INTERVAL_US = 20000;
-
-  // USB and Bluetooth output at approximately 10 Hz.
   constexpr unsigned long OUTPUT_INTERVAL_MS = 100;
 
   constexpr float FILTER_ALPHA = 0.20f;
@@ -90,20 +75,53 @@ namespace GeneralConfig {
   constexpr unsigned long QUIET_TIME_MS = 350;
   constexpr unsigned long MIN_REP_GAP_MS = 300;
 
-  // Gyroscope magnitudes: rad/s.
   constexpr float POSITIONING_MOVEMENT_GYRO = 0.30f;
   constexpr float STATIONARY_MAX_GYRO = 0.15f;
-
-  // Successive filtered acceleration-magnitude change: m/s².
   constexpr float STATIONARY_MAX_ACCEL_CHANGE = 0.05f;
 
   constexpr unsigned long CALIBRATION_LED_OFF_MS = 200;
   constexpr unsigned long REP_LED_DURATION_MS = 200;
 }
 
-// ======================================================
-// FALL DETECTION
-// ======================================================
+namespace ModeConfig {
+  // AUTO_MODE: choose during calibration.
+  // PAUSE_MODE: force your existing detector.
+  // CONTINUOUS_MODE: force the new gyro detector.
+  constexpr CountingMode REQUESTED_MODE = AUTO_MODE;
+
+  // Automatic pause-mode selection requires both low
+  // acceleration motion and low bias-corrected gyro activity.
+  constexpr float QUIET_GYRO_LIMIT = 0.20f;
+}
+
+namespace ContinuousConfig {
+  constexpr float GYRO_FILTER_ALPHA = 0.25f;
+
+  // Discover the dominant gyro axis from a moving window.
+  constexpr unsigned long AXIS_WINDOW_MS = 1000;
+  constexpr float MIN_AXIS_RMS = 0.40f;
+  constexpr float MIN_AXIS_ENERGY_FRACTION = 0.55f;
+
+  // Initial direction-detection gates, in rad/s.
+  constexpr float INITIAL_START_GATE = 0.60f;
+  constexpr float INITIAL_END_GATE = 0.18f;
+
+  // Integrated angular travel per half-cycle, in radians.
+  constexpr float MIN_HALF_ANGLE = 0.60f;
+
+  constexpr unsigned long MIN_HALF_TIME_MS = 100;
+  constexpr unsigned long END_SETTLE_MS = 60;
+
+  constexpr unsigned long MIN_CYCLE_TIME_MS = 600;
+  constexpr unsigned long MAX_CYCLE_TIME_MS = 6000;
+
+  constexpr float PEAK_SIMILARITY = 0.25f;
+  constexpr float ANGLE_SIMILARITY = 0.30f;
+  constexpr float TIME_SIMILARITY = 0.30f;
+
+  // Reject integration across a large sampling interruption.
+  constexpr unsigned long MAX_SAMPLE_GAP_MS = 100;
+}
 
 namespace FallConfig {
   constexpr int BUZZER_PIN = D3;

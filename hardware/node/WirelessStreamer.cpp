@@ -2,95 +2,98 @@
 
 void printTelemetry(
   Print& output,
-  float rawMagnitude,
-  float filteredMagnitude,
-  const RepCounter& repCounter,
-  const FallDetector& fallDetector,
-  const ExerciseRecognition& recognition,
-  bool buzzerActive
+  const TelemetryData& data
 ) {
   output.print("Raw:");
-  output.print(rawMagnitude, 3);
+  output.print(data.raw, 3);
 
   output.print("\tFiltered:");
-  output.print(filteredMagnitude, 3);
+  output.print(data.filtered, 3);
 
   output.print("\tMotion:");
-  output.print(repCounter.motionSignal(), 3);
+  output.print(data.motion, 3);
 
   output.print("\tHigh:");
-  output.print(repCounter.highThreshold(), 3);
+  output.print(data.high, 3);
 
   output.print("\tLow:");
-  output.print(repCounter.lowThreshold(), 3);
+  output.print(data.low, 3);
 
   output.print("\tRequiredPeak:");
-  output.print(repCounter.requiredRepPeak(), 3);
+  output.print(data.requiredPeak, 3);
 
   output.print("\tLastPeak:");
-  output.print(repCounter.lastCompletedPeak(), 3);
-
-  output.print("\tMinTimeS:");
-  output.print(
-    repCounter.minimumRepDuration() / 1000.0f,
-    2
-  );
-
-  output.print("\tMaxTimeS:");
-  output.print(
-    repCounter.maximumRepDuration() / 1000.0f,
-    2
-  );
+  output.print(data.lastPeak, 3);
 
   output.print("\tLastTimeS:");
-  output.print(
-    repCounter.lastCompletedDuration() / 1000.0f,
-    2
-  );
+  output.print(data.lastTimeS, 2);
+
+  output.print("\tGyro:");
+  output.print(data.gyroSignal, 3);
+
+  output.print("\tGyroHigh:");
+  output.print(data.gyroHigh, 3);
+
+  output.print("\tRequiredAngle:");
+  output.print(data.requiredAngle, 3);
+
+  output.print("\tLastAngle:");
+  output.print(data.lastAngle, 3);
+
+  output.print("\tCycleTimeS:");
+  output.print(data.cycleTimeS, 2);
 
   output.print("\tReps:");
-  output.print(repCounter.repetitionCount());
+  output.print(data.reps);
 
   output.print("\tCalibrationReps:");
-  output.print(repCounter.calibrationCount());
+  output.print(data.calibrationReps);
+
+  output.print("\tPauseCandidates:");
+  output.print(data.pauseCandidates);
+
+  output.print("\tContinuousCandidates:");
+  output.print(data.continuousCandidates);
 
   output.print("\tRepState:");
-  output.print((int)repCounter.state());
+  output.print(data.repState);
+
+  output.print("\tMode:");
+  output.print(data.mode);
+
+  output.print("\tRequestedMode:");
+  output.print(data.requestedMode);
+
+  output.print("\tGyroAxis:");
+  output.print(data.gyroAxis);
 
   output.print("\tFallState:");
-  output.print((int)fallDetector.state());
+  output.print(data.fallState);
 
   output.print("\tBuzzer:");
-  output.print(buzzerActive ? 1 : 0);
+  output.print(data.buzzer ? 1 : 0);
 
   output.print("\tExercise:");
-  output.print((int)recognition.exercise());
+  output.print(data.exercise);
 
   output.print("\tRecognitionActive:");
-  output.print(recognition.active() ? 1 : 0);
+  output.print(data.recognitionActive ? 1 : 0);
 
   output.print("\tRecognitionMock:");
-  output.println(recognition.usingMock() ? 1 : 0);
+  output.println(data.recognitionMock ? 1 : 0);
 }
 
 WirelessStreamer::WirelessStreamer()
   : lastOutputTime_(0) {
 }
 
-bool WirelessStreamer::begin(
-  const char* deviceName
-) {
+bool WirelessStreamer::begin(const char* deviceName) {
   lastOutputTime_ = 0;
   return bluetooth_.begin(deviceName);
 }
 
 void WirelessStreamer::update(
-  float rawMagnitude,
-  float filteredMagnitude,
-  const RepCounter& repCounter,
-  const FallDetector& fallDetector,
-  const ExerciseRecognition& recognition,
-  bool buzzerActive,
+  const TelemetryData& data,
   unsigned long currentTime
 ) {
   if (
@@ -106,13 +109,5 @@ void WirelessStreamer::update(
     return;
   }
 
-  printTelemetry(
-    bluetooth_,
-    rawMagnitude,
-    filteredMagnitude,
-    repCounter,
-    fallDetector,
-    recognition,
-    buzzerActive
-  );
+  printTelemetry(bluetooth_, data);
 }
