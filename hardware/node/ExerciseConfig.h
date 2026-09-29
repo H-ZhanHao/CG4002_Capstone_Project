@@ -2,19 +2,7 @@
 
 #include <Arduino.h>
 
-// Recognition labels. These do not control counting mode.
-enum ExerciseType {
-  UNKNOWN_EXERCISE = -1,
-  SQUAT = 0,
-  PUSH_UP = 1,
-  SIT_UP = 2,
-  JUMPING_JACK = 3,
-  LUNGE = 4,
-  LEG_RAISE = 5
-};
-
 enum CountingMode {
-  AUTO_MODE = 0,
   PAUSE_MODE = 1,
   CONTINUOUS_MODE = 2
 };
@@ -62,6 +50,7 @@ namespace GeneralConfig {
   constexpr int LED_OFF = LOW;
 
   constexpr unsigned long SAMPLE_INTERVAL_US = 20000;
+  // Same USB/Bluetooth output cadence as the remote baseline.
   constexpr unsigned long OUTPUT_INTERVAL_MS = 100;
 
   constexpr float FILTER_ALPHA = 0.20f;
@@ -84,13 +73,15 @@ namespace GeneralConfig {
 }
 
 namespace ModeConfig {
-  // AUTO_MODE: choose during calibration.
-  // PAUSE_MODE: force your existing detector.
-  // CONTINUOUS_MODE: force the new gyro detector.
-  constexpr CountingMode REQUESTED_MODE = AUTO_MODE;
+  // Select before uploading: PAUSE_MODE for exercises with pauses,
+  // CONTINUOUS_MODE for continuous movements such as jumping jacks.
+  constexpr CountingMode REQUESTED_MODE = PAUSE_MODE;
+  static_assert(
+    REQUESTED_MODE == PAUSE_MODE || REQUESTED_MODE == CONTINUOUS_MODE,
+    "Select PAUSE_MODE or CONTINUOUS_MODE"
+  );
 
-  // Automatic pause-mode selection requires both low
-  // acceleration motion and low bias-corrected gyro activity.
+  // Stillness gate used during continuous-counter calibration.
   constexpr float QUIET_GYRO_LIMIT = 0.20f;
 }
 

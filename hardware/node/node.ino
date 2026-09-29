@@ -7,7 +7,6 @@
 #include "RepCounter.h"
 #include "ContinuousCounter.h"
 #include "FallDetector.h"
-#include "ExerciseRecognition.h"
 #include "WirelessStreamer.h"
 
 Adafruit_MPU6050 mpu;
@@ -18,15 +17,14 @@ RepCounter repCounter(genericSettings);
 ContinuousCounter continuousCounter;
 
 FallDetector fallDetector;
-ExerciseRecognition exerciseRecognition;
 WirelessStreamer wirelessStreamer;
 
 bool wirelessStarted = false;
 
-// AUTO_MODE means no detector has been selected yet.
-CountingMode activeMode = AUTO_MODE;
+constexpr CountingMode activeMode = ModeConfig::REQUESTED_MODE;
+bool countingStarted = false;
 
-// Ignore any internal counts accumulated before mode selection.
+// Exclude calibration cycles from the displayed count.
 int repetitionOffset = 0;
 
 unsigned long lastSampleTime = 0;
@@ -43,10 +41,6 @@ float previousFilteredMagnitude = 0.0f;
 float gyroBaselineSum[3] = {};
 float gyroBias[3] = {};
 unsigned int gyroBaselineSamples = 0;
-
-// True quiet interval for AUTO mode selection.
-bool quietSelectionActive = false;
-unsigned long quietSelectionStart = 0;
 
 // LED output.
 bool ledActive = false;
@@ -71,7 +65,7 @@ int sessionState() {
     return 0;
   }
 
-  return activeMode == AUTO_MODE ? 1 : 2;
+  return countingStarted ? 2 : 1;
 }
 
 int calibrationProgress() {
@@ -79,28 +73,16 @@ int calibrationProgress() {
     return 0;
   }
 
-  if (activeMode != AUTO_MODE) {
-    return 2;
-  }
-
-  int progress = 0;
-
-  if (ModeConfig::REQUESTED_MODE != CONTINUOUS_MODE) {
-    progress = repCounter.calibrationCount();
-  }
-
-  if (
-    ModeConfig::REQUESTED_MODE != PAUSE_MODE &&
-    continuousCounter.calibrationCount() > progress
-  ) {
-    progress = continuousCounter.calibrationCount();
-  }
-
-  // Report completion only after a mode has been selected.
-  return progress > 0 ? 1 : 0;
+  return activeMode == PAUSE_MODE
+    ? repCounter.calibrationCount()
+    : continuousCounter.calibrationCount();
 }
 
 int reportedRepetitions() {
+  if (!countingStarted) {
+    return 0;
+  }
+
   if (activeMode == PAUSE_MODE) {
     return repCounter.repetitionCount() - repetitionOffset;
   }
@@ -209,12 +191,8 @@ void updateBaseline(
     continuousCounter.begin(
       gyroBias,
       now,
-      ModeConfig::REQUESTED_MODE == AUTO_MODE
+      false
     );
-
-    exerciseRecognition.beginCalibration(now);
-
-    quietSelectionActive = false;
 
     calibrationLedOffPulse = false;
     ledActive = false;
@@ -222,10 +200,10 @@ void updateBaseline(
   }
 }
 
-void selectMode(CountingMode mode) {
-  activeMode = mode;
+void startCounting() {
+  countingStarted = true;
 
-  if (mode == PAUSE_MODE) {
+  if (activeMode == PAUSE_MODE) {
     repetitionOffset = repCounter.repetitionCount();
   } else {
     repetitionOffset = continuousCounter.repetitionCount();
@@ -237,7 +215,6 @@ void selectMode(CountingMode mode) {
 }
 
 void processMovement(
-  const float acceleration[3],
   const float gyro[3],
   unsigned long now
 ) {
@@ -259,36 +236,11 @@ void processMovement(
     accelerationMotion < genericSettings.calibrationEndGate &&
     correctedGyroMagnitude < ModeConfig::QUIET_GYRO_LIMIT;
 
-  if (stationary) {
-    if (!quietSelectionActive) {
-      quietSelectionActive = true;
-      quietSelectionStart = now;
-    }
-  } else {
-    quietSelectionActive = false;
-  }
-
-  const bool stillCalibrating = activeMode == AUTO_MODE;
-
-  const bool runPauseDetector =
-    activeMode == PAUSE_MODE ||
-    (
-      stillCalibrating &&
-      ModeConfig::REQUESTED_MODE != CONTINUOUS_MODE
-    );
-
-  const bool runContinuousDetector =
-    activeMode == CONTINUOUS_MODE ||
-    (
-      stillCalibrating &&
-      ModeConfig::REQUESTED_MODE != PAUSE_MODE
-    );
-
-  if (runPauseDetector) {
+  if (activeMode == PAUSE_MODE) {
     repCounter.update(filteredMagnitude, now);
   }
 
-  if (runContinuousDetector) {
+  if (activeMode == CONTINUOUS_MODE) {
     continuousCounter.update(gyro, stationary, now);
   }
 
@@ -305,48 +257,18 @@ void processMovement(
   const bool continuousRepEvent =
     continuousCounter.consumeRepEvent();
 
-  if (stillCalibrating) {
+  if (!countingStarted) {
     const bool pauseReady =
       repCounter.state() == REP_COUNTING;
 
     const bool continuousReady =
       continuousCounter.calibrated();
 
-    if (ModeConfig::REQUESTED_MODE == PAUSE_MODE) {
-      if (pauseReady) {
-        selectMode(PAUSE_MODE);
-      }
-    } else if (
-      ModeConfig::REQUESTED_MODE == CONTINUOUS_MODE
+    if (
+      (activeMode == PAUSE_MODE && pauseReady) ||
+      (activeMode == CONTINUOUS_MODE && continuousReady)
     ) {
-      if (continuousReady) {
-        selectMode(CONTINUOUS_MODE);
-      }
-    } else {
-      const bool genuineQuietInterval =
-        quietSelectionActive &&
-        now - quietSelectionStart >=
-          GeneralConfig::QUIET_TIME_MS;
-
-      // Prefer the existing detector when its candidates
-      // match and the signal genuinely settles.
-      if (pauseReady && genuineQuietInterval) {
-        selectMode(PAUSE_MODE);
-      } else if (continuousReady) {
-        selectMode(CONTINUOUS_MODE);
-      }
-    }
-
-    // Recognition remains independent of counting mode.
-    exerciseRecognition.update(
-      acceleration,
-      gyro,
-      calibrationProgress(),
-      now
-    );
-
-    if (activeMode != AUTO_MODE) {
-      exerciseRecognition.endCalibration();
+      startCounting();
       return;
     }
 
@@ -370,50 +292,21 @@ void processMovement(
   }
 }
 
-TelemetryData makeTelemetry(float rawMagnitude) {
+TelemetryData makeTelemetry() {
   TelemetryData data = {};
-
-  data.raw = rawMagnitude;
-  data.filtered = filteredMagnitude;
-
-  data.motion = fabsf(
-    filteredMagnitude - repCounter.baselineMagnitude()
-  );
-
-  data.high = repCounter.highThreshold();
-  data.low = repCounter.lowThreshold();
-  data.requiredPeak = repCounter.requiredRepPeak();
-  data.lastPeak = repCounter.lastCompletedPeak();
-
-  data.lastTimeS =
-    repCounter.lastCompletedDuration() / 1000.0f;
-
-  data.gyroSignal = continuousCounter.signal();
-  data.gyroHigh = continuousCounter.startGate();
-  data.requiredAngle = continuousCounter.requiredAngle();
-  data.lastAngle = continuousCounter.lastAngle();
-
-  data.cycleTimeS =
-    continuousCounter.lastDuration() / 1000.0f;
 
   data.reps = reportedRepetitions();
   data.calibrationReps = calibrationProgress();
-
-  data.pauseCandidates = repCounter.calibrationCount();
-  data.continuousCandidates =
-    continuousCounter.calibrationCount();
+  data.calibrationTarget = activeMode == PAUSE_MODE
+    ? GeneralConfig::REQUIRED_STABLE_REPS
+    : 2;
 
   data.repState = sessionState();
   data.mode = (int)activeMode;
-  data.requestedMode = (int)ModeConfig::REQUESTED_MODE;
   data.gyroAxis = continuousCounter.axis();
 
-  data.fallState = (int)fallDetector.state();
+  data.positioningSeen = positioningMovementSeen;
   data.buzzer = buzzerActive;
-
-  data.exercise = (int)exerciseRecognition.exercise();
-  data.recognitionActive = exerciseRecognition.active();
-  data.recognitionMock = exerciseRecognition.usingMock();
 
   return data;
 }
@@ -430,7 +323,7 @@ void setup() {
   delay(1000);
 
   if (!mpu.begin()) {
-    Serial.println("MPU6050_Error:0");
+    Serial.println("ERROR: MPU6050 not found. Check the sensor wiring.");
 
     while (true) {
       setLed(true);
@@ -444,11 +337,10 @@ void setup() {
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-  wirelessStarted =
-    wirelessStreamer.begin("ExerciseNode");
+  wirelessStarted = wirelessStreamer.begin("ExerciseNode");
 
   if (!wirelessStarted) {
-    Serial.println("Bluetooth_Error:0");
+    Serial.println("WARNING: Bluetooth unavailable. USB output is still active.");
   }
 
   const unsigned long now = millis();
@@ -533,19 +425,16 @@ void loop() {
   if (repCounter.state() == BASELINE_CALIBRATION) {
     updateBaseline(gyro, gyroMagnitude, now);
   } else {
-    processMovement(acceleration, gyro, now);
+    processMovement(gyro, now);
   }
 
-  const TelemetryData data = makeTelemetry(rawMagnitude);
+  const TelemetryData data = makeTelemetry();
 
   if (wirelessStarted) {
     wirelessStreamer.update(data, now);
   }
 
-  if (
-    now - lastUsbOutputTime >=
-    GeneralConfig::OUTPUT_INTERVAL_MS
-  ) {
+  if (now - lastUsbOutputTime >= GeneralConfig::OUTPUT_INTERVAL_MS) {
     lastUsbOutputTime = now;
     printTelemetry(Serial, data);
   }
