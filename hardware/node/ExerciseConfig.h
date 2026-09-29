@@ -73,8 +73,8 @@ namespace GeneralConfig {
 }
 
 namespace ModeConfig {
-  // Select before uploading: PAUSE_MODE for exercises with pauses,
-  // CONTINUOUS_MODE for continuous movements such as jumping jacks.
+  // Default after power-on or hardware reset. USB/Bluetooth commands
+  // MODE:PAUSE and MODE:CONTINUOUS can change it until the next reboot.
   constexpr CountingMode REQUESTED_MODE = PAUSE_MODE;
   static_assert(
     REQUESTED_MODE == PAUSE_MODE || REQUESTED_MODE == CONTINUOUS_MODE,

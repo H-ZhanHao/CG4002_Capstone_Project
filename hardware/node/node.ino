@@ -2,6 +2,9 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 #include <math.h>
+#include <ctype.h>
+#include <string.h>
+#include <stdio.h>
 
 #include "ExerciseConfig.h"
 #include "RepCounter.h"
@@ -21,7 +24,7 @@ WirelessStreamer wirelessStreamer;
 
 bool wirelessStarted = false;
 
-constexpr CountingMode activeMode = ModeConfig::REQUESTED_MODE;
+CountingMode activeMode = ModeConfig::REQUESTED_MODE;
 bool countingStarted = false;
 
 // Exclude calibration cycles from the displayed count.
@@ -134,6 +137,92 @@ void restartBaseline(unsigned long now) {
   }
 }
 
+void restartSession(unsigned long now) {
+  countingStarted = false;
+  repetitionOffset = 0;
+  filteredMagnitude = 0.0f;
+  filterInitialised = false;
+  positioningMovementSeen = false;
+  previousMagnitudeAvailable = false;
+  previousFilteredMagnitude = 0.0f;
+
+  for (int i = 0; i < 3; ++i) {
+    gyroBias[i] = 0.0f;
+  }
+
+  restartBaseline(now);
+  continuousCounter.begin(gyroBias, now, false);
+
+  ledActive = false;
+  calibrationLedOffPulse = false;
+  ledStartTime = now;
+  calibrationLedOffStartTime = now;
+  setLed(false);
+
+  lastSampleTime = micros();
+  lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
+  // Reset only the exercise session. Bluetooth and fall monitoring keep running.
+}
+
+void processCommand(char* command, unsigned long now) {
+  char* text = command;
+  while (isspace((unsigned char)*text)) {
+    ++text;
+  }
+
+  size_t length = strlen(text);
+  while (length > 0 && isspace((unsigned char)text[length - 1])) {
+    text[--length] = '\0';
+  }
+  for (size_t i = 0; i < length; ++i) {
+    text[i] = (char)toupper((unsigned char)text[i]);
+  }
+  if (length == 0) {
+    return;
+  }
+
+  if (!strcmp(text, "HELP")) {
+    wirelessStreamer.message("Commands: RESET | MODE:PAUSE | MODE:CONTINUOUS. Select Newline, then Send.");
+    return;
+  }
+  if (!strcmp(text, "#OVERFLOW")) {
+    wirelessStreamer.message("ERROR: Command too long. Use RESET, MODE:PAUSE or MODE:CONTINUOUS.");
+    return;
+  }
+
+  if (!strcmp(text, "RESET")) {
+    restartSession(now);
+    wirelessStreamer.message(activeMode == PAUSE_MODE
+      ? "OK: RESET | Mode: PAUSE | Reps cleared. Move into position, then hold still."
+      : "OK: RESET | Mode: CONTINUOUS | Reps cleared. Move into position, then hold still.");
+    return;
+  }
+
+  const char* mode = text;
+  if (!strncmp(mode, "MODE:", 5)) {
+    mode += 5;
+    while (isspace((unsigned char)*mode)) {
+      ++mode;
+    }
+  }
+
+  CountingMode requested;
+  if (!strcmp(mode, "PAUSE")) {
+    requested = PAUSE_MODE;
+  } else if (!strcmp(mode, "CONTINUOUS")) {
+    requested = CONTINUOUS_MODE;
+  } else {
+    wirelessStreamer.message("ERROR: Unknown command. Use RESET, MODE:PAUSE or MODE:CONTINUOUS.");
+    return;
+  }
+
+  activeMode = requested;
+  restartSession(now);
+  wirelessStreamer.message(activeMode == PAUSE_MODE
+    ? "OK: Mode: PAUSE | Reps cleared. Move into position, then hold still."
+    : "OK: Mode: CONTINUOUS | Reps cleared. Move into position, then hold still.");
+}
+
 void updateBaseline(
   const float gyro[3],
   float gyroMagnitude,
@@ -214,6 +303,29 @@ void startCounting() {
   setLed(false);
 }
 
+void reportCalibrationResult(CalibrationResult result) {
+  if (result == CAL_NO_RESULT) {
+    return;
+  }
+
+  const char* reason = "";
+  switch (result) {
+    case CAL_TOO_SHORT: reason = "REJECTED: movement too short"; break;
+    case CAL_TOO_LONG: reason = "REJECTED: timeout; no completed rep with a pause"; break;
+    case CAL_TOO_WEAK: reason = "REJECTED: movement peak too weak"; break;
+    case CAL_MISMATCH: reason = "REJECTED PAIR: peaks or durations differ; keeping latest rep"; break;
+    case CAL_ACCEPTED: reason = "First candidate accepted; repeat at the same pace"; break;
+    case CAL_FINISHED: reason = "Two matching candidates accepted; counting starts at zero"; break;
+    default: return;
+  }
+
+  char message[192];
+  snprintf(message, sizeof(message), "CAL: %s | Peak: %.2f m/s2 | Time: %.2f s",
+    reason, repCounter.lastCompletedPeak(),
+    repCounter.lastCompletedDuration() / 1000.0f);
+  wirelessStreamer.message(message);
+}
+
 void processMovement(
   const float gyro[3],
   unsigned long now
@@ -238,6 +350,7 @@ void processMovement(
 
   if (activeMode == PAUSE_MODE) {
     repCounter.update(filteredMagnitude, now);
+    reportCalibrationResult(repCounter.consumeCalibrationResult());
   }
 
   if (activeMode == CONTINUOUS_MODE) {
@@ -295,6 +408,7 @@ void processMovement(
 TelemetryData makeTelemetry() {
   TelemetryData data = {};
 
+  data.uptimeMs = millis();
   data.reps = reportedRepetitions();
   data.calibrationReps = calibrationProgress();
   data.calibrationTarget = activeMode == PAUSE_MODE
@@ -304,6 +418,8 @@ TelemetryData makeTelemetry() {
   data.repState = sessionState();
   data.mode = (int)activeMode;
   data.gyroAxis = continuousCounter.axis();
+  data.pauseMotion = repCounter.motionSignal();
+  data.pausePeak = repCounter.currentMovementPeak();
 
   data.positioningSeen = positioningMovementSeen;
   data.buzzer = buzzerActive;
@@ -321,6 +437,7 @@ void setup() {
   digitalWrite(FallConfig::BUZZER_PIN, LOW);
 
   delay(1000);
+  Serial.println("[BOOT] ExerciseNode restarting; preparing baseline.");
 
   if (!mpu.begin()) {
     Serial.println("ERROR: MPU6050 not found. Check the sensor wiring.");
@@ -345,8 +462,10 @@ void setup() {
 
   const unsigned long now = millis();
 
-  restartBaseline(now);
+  restartSession(now);
   fallDetector.begin(now);
+
+  wirelessStreamer.message("Commands: RESET | MODE:PAUSE | MODE:CONTINUOUS. Select Newline, then Send.");
 
   lastSampleTime = micros();
   lastUsbOutputTime = now;
@@ -356,6 +475,11 @@ void loop() {
   unsigned long now = millis();
 
   updateOutputTimers(now);
+
+  char command[32];
+  if (wirelessStreamer.pollCommand(command, sizeof(command))) {
+    processCommand(command, millis());
+  }
 
   const unsigned long sampleTime = micros();
 
@@ -372,6 +496,7 @@ void loop() {
   sensors_event_t gyroscopeEvent;
   sensors_event_t temperatureEvent;
 
+  const unsigned long readStarted = millis();
   mpu.getEvent(
     &accelerationEvent,
     &gyroscopeEvent,
@@ -379,6 +504,9 @@ void loop() {
   );
 
   now = millis();
+  if (now - readStarted >= 100) {
+    Serial.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
+  }
 
   const float acceleration[3] = {
     accelerationEvent.acceleration.x,
@@ -430,12 +558,13 @@ void loop() {
 
   const TelemetryData data = makeTelemetry();
 
-  if (wirelessStarted) {
-    wirelessStreamer.update(data, now);
-  }
-
   if (now - lastUsbOutputTime >= GeneralConfig::OUTPUT_INTERVAL_MS) {
     lastUsbOutputTime = now;
     printTelemetry(Serial, data);
+  }
+
+  // Show USB status before attempting a potentially blocking Bluetooth write.
+  if (wirelessStarted) {
+    wirelessStreamer.update(data, now);
   }
 }

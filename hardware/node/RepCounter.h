@@ -12,6 +12,16 @@ enum CounterState {
   REP_COUNTING = 2
 };
 
+enum CalibrationResult {
+  CAL_NO_RESULT = 0,
+  CAL_TOO_SHORT,
+  CAL_TOO_LONG,
+  CAL_TOO_WEAK,
+  CAL_MISMATCH,
+  CAL_ACCEPTED,
+  CAL_FINISHED
+};
+
 class RepCounter {
  public:
   explicit RepCounter(
@@ -27,6 +37,8 @@ class RepCounter {
 
   bool consumeRepEvent();
   bool consumeCalibrationEvent();
+  CalibrationResult consumeCalibrationResult();
+  float currentMovementPeak() const { return movementPeak_; }
 
   CounterState state() const;
 
@@ -86,6 +98,7 @@ class RepCounter {
   int repetitionCount_;
   bool repEvent_;
   bool calibrationEvent_;
+  CalibrationResult calibrationResult_ = CAL_NO_RESULT;
 
   void resetMovementCycle();
 

@@ -40,6 +40,7 @@ void RepCounter::begin(
   repetitionCount_ = 0;
   repEvent_ = false;
   calibrationEvent_ = false;
+  calibrationResult_ = CAL_NO_RESULT;
 }
 
 void RepCounter::update(
@@ -137,6 +138,11 @@ void RepCounter::processMovement(
     currentTime - movementStartTime_ >
     activeMaximumDuration
   ) {
+    if (state_ == MOVEMENT_CALIBRATION) {
+      lastCompletedPeak_ = movementPeak_;
+      lastCompletedDuration_ = currentTime - movementStartTime_;
+      calibrationResult_ = CAL_TOO_LONG;
+    }
     resetMovementCycle();
     lastMovementEndTime_ = currentTime;
     return;
@@ -183,6 +189,7 @@ void RepCounter::completeMovement(
       GeneralConfig::
         CALIBRATION_MIN_DURATION_MS
     ) {
+      calibrationResult_ = CAL_TOO_SHORT;
       return;
     }
 
@@ -191,6 +198,7 @@ void RepCounter::completeMovement(
       GeneralConfig::
         CALIBRATION_MAX_DURATION_MS
     ) {
+      calibrationResult_ = CAL_TOO_LONG;
       return;
     }
 
@@ -198,6 +206,7 @@ void RepCounter::completeMovement(
       completedPeak <
       settings_.minimumCalibrationPeak
     ) {
+      calibrationResult_ = CAL_TOO_WEAK;
       return;
     }
 
@@ -255,6 +264,7 @@ void RepCounter::addCalibrationCandidate(
 
   calibrationCount_++;
   calibrationEvent_ = true;
+  calibrationResult_ = CAL_ACCEPTED;
 
   if (
     calibrationCount_ ==
@@ -324,9 +334,11 @@ void RepCounter::evaluateCalibrationCandidates() {
 
   if (allSimilar) {
     finishCalibration();
+    calibrationResult_ = CAL_FINISHED;
     return;
   }
 
+  calibrationResult_ = CAL_MISMATCH;
   // Reject the oldest candidate, retaining the more recent ones.
   // With two candidates, this keeps only the newest movement.
   for (int i = 1; i < calibrationCount_; ++i) {
@@ -416,6 +428,12 @@ void RepCounter::finishCalibration() {
 bool RepCounter::consumeCalibrationEvent() {
   bool result = calibrationEvent_;
   calibrationEvent_ = false;
+  return result;
+}
+
+CalibrationResult RepCounter::consumeCalibrationResult() {
+  const CalibrationResult result = calibrationResult_;
+  calibrationResult_ = CAL_NO_RESULT;
   return result;
 }
 
