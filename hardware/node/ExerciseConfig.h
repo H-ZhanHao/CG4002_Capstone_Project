@@ -31,13 +31,15 @@ inline ExerciseSettings getGenericSettings() {
   settings.calibrationEndGate = 0.20f;
   settings.minimumCalibrationPeak = 0.70f;
 
-  settings.peakSimilarityTolerance = 0.20f;
+  // Allow moderate peak variation between otherwise similar movements.
+  settings.peakSimilarityTolerance = 0.30f;
   settings.durationSimilarityTolerance = 0.25f;
 
   settings.highThresholdFactor = 0.55f;
   settings.lowThresholdFactor = 0.20f;
   settings.requiredPeakFactor = 0.70f;
 
+  // Keep the original duration guard against short movement fragments.
   settings.minimumDurationFactor = 0.60f;
   settings.maximumDurationFactor = 1.60f;
 
@@ -62,6 +64,7 @@ namespace GeneralConfig {
   constexpr unsigned long CALIBRATION_MAX_DURATION_MS = 6000;
 
   constexpr unsigned long QUIET_TIME_MS = 350;
+  // Includes the quiet period that completes a movement.
   constexpr unsigned long MIN_REP_GAP_MS = 300;
 
   constexpr float POSITIONING_MOVEMENT_GYRO = 0.30f;

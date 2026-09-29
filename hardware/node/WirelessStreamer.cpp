@@ -19,7 +19,7 @@ namespace {
           : "Repeat evenly at a steady pace";
       if (data.mode == PAUSE_MODE) {
         snprintf(status, sizeof(status),
-          "CALIBRATING: %d/%d | Motion: %.2f | Peak: %.2f | Reps: -- | %s",
+          "CALIBRATING: %d/%d | Motion: %.2f | Peak: %.2f m/s2 | Reps: -- | %s",
           data.calibrationReps, data.calibrationTarget,
           data.pauseMotion, data.pausePeak, instruction);
       } else {
@@ -27,7 +27,13 @@ namespace {
           data.calibrationReps, data.calibrationTarget, instruction);
       }
     } else {
-      snprintf(status, sizeof(status), "COUNTING | Reps: %d", data.reps);
+      if (data.mode == PAUSE_MODE) {
+        snprintf(status, sizeof(status),
+          "COUNTING | Reps: %d | Motion: %.2f | Peak: %.2f m/s2",
+          data.reps, data.pauseMotion, data.pausePeak);
+      } else {
+        snprintf(status, sizeof(status), "COUNTING | Reps: %d", data.reps);
+      }
     }
 
     const int length = snprintf(line, capacity, "Up: %lus | Mode: %s | %s%s\r\n",

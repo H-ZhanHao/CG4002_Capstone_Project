@@ -41,6 +41,7 @@ void RepCounter::begin(
   repEvent_ = false;
   calibrationEvent_ = false;
   calibrationResult_ = CAL_NO_RESULT;
+  repResult_ = REP_NO_RESULT;
 }
 
 void RepCounter::update(
@@ -138,10 +139,12 @@ void RepCounter::processMovement(
     currentTime - movementStartTime_ >
     activeMaximumDuration
   ) {
+    lastCompletedPeak_ = movementPeak_;
+    lastCompletedDuration_ = currentTime - movementStartTime_;
     if (state_ == MOVEMENT_CALIBRATION) {
-      lastCompletedPeak_ = movementPeak_;
-      lastCompletedDuration_ = currentTime - movementStartTime_;
       calibrationResult_ = CAL_TOO_LONG;
+    } else {
+      repResult_ = REP_TOO_LONG;
     }
     resetMovementCycle();
     lastMovementEndTime_ = currentTime;
@@ -178,10 +181,12 @@ void RepCounter::completeMovement(
   lastCompletedPeak_ =
     completedPeak;
 
-  resetMovementCycle();
+  // The quiet period already separates this movement from the next one.
+  // Count it toward the minimum gap instead of adding a blind interval
+  // after completion. Timeouts still impose a gap from the timeout itself.
+  lastMovementEndTime_ = quietStartTime_;
 
-  lastMovementEndTime_ =
-    currentTime;
+  resetMovementCycle();
 
   if (state_ == MOVEMENT_CALIBRATION) {
     if (
@@ -221,6 +226,7 @@ void RepCounter::completeMovement(
   if (
     completedPeak < requiredRepPeak_
   ) {
+    repResult_ = REP_TOO_WEAK;
     return;
   }
 
@@ -228,6 +234,7 @@ void RepCounter::completeMovement(
     completedDuration <
     minimumRepDuration_
   ) {
+    repResult_ = REP_TOO_SHORT;
     return;
   }
 
@@ -235,6 +242,7 @@ void RepCounter::completeMovement(
     completedDuration >
     maximumRepDuration_
   ) {
+    repResult_ = REP_TOO_LONG;
     return;
   }
 
@@ -441,6 +449,12 @@ bool RepCounter::consumeRepEvent() {
   bool result = repEvent_;
   repEvent_ = false;
 
+  return result;
+}
+
+RepResult RepCounter::consumeRepResult() {
+  const RepResult result = repResult_;
+  repResult_ = REP_NO_RESULT;
   return result;
 }
 

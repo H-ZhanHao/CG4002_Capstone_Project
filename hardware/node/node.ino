@@ -324,6 +324,42 @@ void reportCalibrationResult(CalibrationResult result) {
     reason, repCounter.lastCompletedPeak(),
     repCounter.lastCompletedDuration() / 1000.0f);
   wirelessStreamer.message(message);
+
+  if (result == CAL_FINISHED) {
+    snprintf(message, sizeof(message),
+      "PAUSE limits: Start > %.2f | Peak >= %.2f m/s2 | Time: %.2f-%.2f s (includes end pause)",
+      repCounter.highThreshold(), repCounter.requiredRepPeak(),
+      repCounter.minimumRepDuration() / 1000.0f,
+      repCounter.maximumRepDuration() / 1000.0f);
+    wirelessStreamer.message(message);
+  }
+}
+
+void reportRepResult(RepResult result) {
+  if (result == REP_NO_RESULT) {
+    return;
+  }
+
+  const char* reason = "";
+  switch (result) {
+    case REP_TOO_SHORT: reason = "movement too short"; break;
+    case REP_TOO_LONG: reason = "timeout before a completed rep with a pause"; break;
+    case REP_TOO_WEAK:
+      reason = repCounter.lastCompletedDuration() < repCounter.minimumRepDuration()
+        ? "peak too weak AND movement too short"
+        : "movement peak too weak";
+      break;
+    default: return;
+  }
+
+  char message[192];
+  snprintf(message, sizeof(message),
+    "REP skipped: %s | Peak: %.2f m/s2 / allowed >= %.2f m/s2 | Time: %.2f s / allowed %.2f-%.2f s",
+    reason, repCounter.lastCompletedPeak(), repCounter.requiredRepPeak(),
+    repCounter.lastCompletedDuration() / 1000.0f,
+    repCounter.minimumRepDuration() / 1000.0f,
+    repCounter.maximumRepDuration() / 1000.0f);
+  wirelessStreamer.message(message);
 }
 
 void processMovement(
@@ -351,6 +387,7 @@ void processMovement(
   if (activeMode == PAUSE_MODE) {
     repCounter.update(filteredMagnitude, now);
     reportCalibrationResult(repCounter.consumeCalibrationResult());
+    reportRepResult(repCounter.consumeRepResult());
   }
 
   if (activeMode == CONTINUOUS_MODE) {
