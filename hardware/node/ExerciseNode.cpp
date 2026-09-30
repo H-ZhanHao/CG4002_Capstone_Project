@@ -5,13 +5,20 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
+#include <esp_system.h>
 
+#include "ExerciseNode.h"
 #include "ExerciseConfig.h"
 #include "RepCounter.h"
 #include "ContinuousCounter.h"
 #include "FallDetector.h"
 #include "WirelessStreamer.h"
+#include "NodeRadio.h"
+#include "NodeSession.h"
 
+namespace ExerciseNode {
+
+NodeRole nodeRole = HIP;
 Adafruit_MPU6050 mpu;
 
 ExerciseSettings genericSettings = getGenericSettings();
@@ -21,6 +28,10 @@ ContinuousCounter continuousCounter;
 
 FallDetector fallDetector;
 WirelessStreamer wirelessStreamer;
+
+void linkMessage(const char* text) { wirelessStreamer.message(text); }
+NodeSession nodeSession(NodeRadio::send, linkMessage);
+const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | MODE:PAUSE | MODE:CONTINUOUS | STATUS | HELP. Select Newline, then Send.";
 
 bool wirelessStarted = false;
 
@@ -105,7 +116,7 @@ void updateOutputTimers(unsigned long now) {
   ) {
     calibrationLedOffPulse = false;
 
-    if (sessionState() == 1) {
+    if (nodeSession.localActive() && sessionState() == 1) {
       setLed(true);
     }
   }
@@ -182,19 +193,43 @@ void processCommand(char* command, unsigned long now) {
   }
 
   if (!strcmp(text, "HELP")) {
-    wirelessStreamer.message("Commands: RESET | MODE:PAUSE | MODE:CONTINUOUS. Select Newline, then Send.");
+    wirelessStreamer.message(commandHelp);
+    return;
+  }
+  if (!strcmp(text, "STATUS")) {
+    nodeSession.status();
+    wirelessStreamer.message(NodeRadio::ready() ? "[ESP-NOW configured and ready]"
+      : "[ESP-NOW unavailable; check peer MAC configuration and USB boot messages]");
     return;
   }
   if (!strcmp(text, "#OVERFLOW")) {
-    wirelessStreamer.message("ERROR: Command too long. Use RESET, MODE:PAUSE or MODE:CONTINUOUS.");
+    wirelessStreamer.message("ERROR: Command too long. Send HELP for commands.");
+    return;
+  }
+  if (!strcmp(text, "STANDBY") || !strcmp(text, "DEACTIVATE")) {
+    nodeSession.standby();
+    return;
+  }
+
+  if (!strcmp(text, "ACTIVATE")) {
+    if (!NodeRadio::ready()) {
+      wirelessStreamer.message("ERROR: ESP-NOW unavailable. Configure peer MACs and check USB boot messages.");
+      return;
+    }
+    nodeSession.activate(now);
+    return;
+  }
+  if (!strncmp(text, "SOURCE:", 7)) {
+    wirelessStreamer.message("Use ACTIVATE in the desired node's own monitor; it will put the other node in standby.");
     return;
   }
 
   if (!strcmp(text, "RESET")) {
+    if (nodeSession.waiting()) nodeSession.standby();
     restartSession(now);
-    wirelessStreamer.message(activeMode == PAUSE_MODE
-      ? "OK: RESET | Mode: PAUSE | Reps cleared. Move into position, then hold still."
-      : "OK: RESET | Mode: CONTINUOUS | Reps cleared. Move into position, then hold still.");
+    wirelessStreamer.message(nodeSession.localActive()
+      ? "[Session reset; move into position, then hold still for 3 seconds]"
+      : "[Session reset; still inactive. Send ACTIVATE to start]");
     return;
   }
 
@@ -212,15 +247,16 @@ void processCommand(char* command, unsigned long now) {
   } else if (!strcmp(mode, "CONTINUOUS")) {
     requested = CONTINUOUS_MODE;
   } else {
-    wirelessStreamer.message("ERROR: Unknown command. Use RESET, MODE:PAUSE or MODE:CONTINUOUS.");
+    wirelessStreamer.message("ERROR: Unknown command. Send HELP for commands.");
     return;
   }
 
   activeMode = requested;
+  if (nodeSession.waiting()) nodeSession.standby();
   restartSession(now);
-  wirelessStreamer.message(activeMode == PAUSE_MODE
-    ? "OK: Mode: PAUSE | Reps cleared. Move into position, then hold still."
-    : "OK: Mode: CONTINUOUS | Reps cleared. Move into position, then hold still.");
+  wirelessStreamer.message(nodeSession.localActive()
+    ? "[Mode changed; restarting calibration]"
+    : "[Mode changed; still inactive. Send ACTIVATE to start]");
 }
 
 void updateBaseline(
@@ -460,21 +496,29 @@ TelemetryData makeTelemetry() {
 
   data.positioningSeen = positioningMovementSeen;
   data.buzzer = buzzerActive;
+  data.source = nodeRole;
 
   return data;
 }
 
-void setup() {
+void begin(NodeRole role) {
+  nodeRole = role;
   Serial.begin(115200);
 
   pinMode(GeneralConfig::LED_PIN, OUTPUT);
   setLed(false);
 
-  pinMode(FallConfig::BUZZER_PIN, OUTPUT);
-  digitalWrite(FallConfig::BUZZER_PIN, LOW);
+  if (nodeRole == HIP) {
+    pinMode(FallConfig::BUZZER_PIN, OUTPUT);
+    digitalWrite(FallConfig::BUZZER_PIN, LOW);
+  }
 
   delay(1000);
-  Serial.println("[BOOT] ExerciseNode restarting; preparing baseline.");
+  Serial.println(nodeRole == HIP ? "[BOOT] Hip restarting; standby until ACTIVATE."
+                                : "[BOOT] Wrist restarting; standby until ACTIVATE.");
+
+  // Print the STA MAC even during initial provisioning (before MPU checks).
+  if (!NodeRadio::begin(nodeRole)) Serial.println("[ESP-NOW unavailable; activation will be refused]");
 
   if (!mpu.begin()) {
     Serial.println("ERROR: MPU6050 not found. Check the sensor wiring.");
@@ -491,7 +535,10 @@ void setup() {
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-  wirelessStarted = wirelessStreamer.begin("ExerciseNode");
+  const char* bluetoothName = nodeRole == HIP
+    ? NodeConfig::HIP_BLUETOOTH_NAME : NodeConfig::WRIST_BLUETOOTH_NAME;
+  wirelessStarted = wirelessStreamer.begin(bluetoothName);
+  if (wirelessStarted) Serial.printf("[Bluetooth: %s | Ready]\n", bluetoothName);
 
   if (!wirelessStarted) {
     Serial.println("WARNING: Bluetooth unavailable. USB output is still active.");
@@ -499,16 +546,18 @@ void setup() {
 
   const unsigned long now = millis();
 
+  nodeSession.begin(nodeRole, esp_random());
   restartSession(now);
   fallDetector.begin(now);
 
-  wirelessStreamer.message("Commands: RESET | MODE:PAUSE | MODE:CONTINUOUS. Select Newline, then Send.");
+  wirelessStreamer.message(commandHelp);
+  nodeSession.status();
 
   lastSampleTime = micros();
   lastUsbOutputTime = now;
 }
 
-void loop() {
+void update() {
   unsigned long now = millis();
 
   updateOutputTimers(now);
@@ -516,6 +565,23 @@ void loop() {
   char command[32];
   if (wirelessStreamer.pollCommand(command, sizeof(command))) {
     processCommand(command, millis());
+  }
+
+  LinkPacket packet;
+  // Bound receive work so a busy link cannot starve sensor sampling.
+  for (int i = 0; i < 12 && NodeRadio::receive(packet); ++i) {
+    nodeSession.receive(packet, millis());
+  }
+  now = millis();
+  nodeSession.update(now);
+  NodeRadio::update();
+  if (nodeSession.consumeRestart()) {
+    restartSession(now);
+  }
+  if (!nodeSession.localActive()) {
+    ledActive = false;
+    calibrationLedOffPulse = false;
+    setLed(false);
   }
 
   const unsigned long sampleTime = micros();
@@ -569,7 +635,7 @@ void loop() {
     gyro[2] * gyro[2]
   );
 
-  fallDetector.update(rawMagnitude, now);
+  if (nodeRole == HIP) fallDetector.update(rawMagnitude, now);
 
   if (fallDetector.consumeFallEvent()) {
     digitalWrite(FallConfig::BUZZER_PIN, HIGH);
@@ -577,23 +643,26 @@ void loop() {
     buzzerStartTime = now;
   }
 
-  if (!filterInitialised) {
-    filteredMagnitude = rawMagnitude;
-    filterInitialised = true;
-  } else {
-    filteredMagnitude =
-      GeneralConfig::FILTER_ALPHA * rawMagnitude +
-      (1.0f - GeneralConfig::FILTER_ALPHA) *
-        filteredMagnitude;
+  if (nodeSession.localActive()) {
+    if (!filterInitialised) {
+      filteredMagnitude = rawMagnitude;
+      filterInitialised = true;
+    } else {
+      filteredMagnitude =
+        GeneralConfig::FILTER_ALPHA * rawMagnitude +
+        (1.0f - GeneralConfig::FILTER_ALPHA) *
+          filteredMagnitude;
+    }
+
+    if (repCounter.state() == BASELINE_CALIBRATION) {
+      updateBaseline(gyro, gyroMagnitude, now);
+    } else {
+      processMovement(gyro, now);
+    }
   }
 
-  if (repCounter.state() == BASELINE_CALIBRATION) {
-    updateBaseline(gyro, gyroMagnitude, now);
-  } else {
-    processMovement(gyro, now);
-  }
-
-  const TelemetryData data = makeTelemetry();
+  const TelemetryData local = makeTelemetry();
+  const TelemetryData data = nodeSession.output(local);
 
   if (now - lastUsbOutputTime >= GeneralConfig::OUTPUT_INTERVAL_MS) {
     lastUsbOutputTime = now;
@@ -603,5 +672,11 @@ void loop() {
   // Show USB status before attempting a potentially blocking Bluetooth write.
   if (wirelessStarted) {
     wirelessStreamer.update(data, now);
+    if (wirelessStreamer.consumeConnectionEvent()) {
+      nodeSession.status();
+      if (!NodeRadio::ready()) wirelessStreamer.message("[ESP-NOW unavailable; configure peer MACs. Send STATUS for details.]");
+    }
   }
 }
+
+} // namespace ExerciseNode

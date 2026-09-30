@@ -1,11 +1,21 @@
 #pragma once
 
 #include <Arduino.h>
+#include "NodeTypes.h"
 
-enum CountingMode {
-  PAUSE_MODE = 1,
-  CONTINUOUS_MODE = 2
-};
+namespace NodeConfig {
+  // Roles are fixed in hip/hip.ino and wrist/wrist.ino; no role edits needed here.
+
+  // Enter each board's Wi-Fi STA MAC, printed on its USB monitor at startup.
+  // Bluetooth MAC addresses are different. Zero addresses disable the peer link
+  // until configured. Activation requires the other board's acknowledgement.
+  constexpr uint8_t HIP_MAC[6] = {0x38, 0x18, 0x2B, 0x19, 0x55, 0xBC};
+  constexpr uint8_t WRIST_MAC[6] = {0x38, 0x18, 0x2B, 0x18, 0x4E, 0xB8};
+  constexpr uint8_t RADIO_CHANNEL = 6; // Must match on both boards.
+  static_assert(RADIO_CHANNEL >= 1 && RADIO_CHANNEL <= 13, "Use a 2.4 GHz Wi-Fi channel from 1 to 13");
+  constexpr const char* HIP_BLUETOOTH_NAME = "ExerciseHip";
+  constexpr const char* WRIST_BLUETOOTH_NAME = "ExerciseWrist";
+}
 
 struct ExerciseSettings {
   float calibrationStartGate;

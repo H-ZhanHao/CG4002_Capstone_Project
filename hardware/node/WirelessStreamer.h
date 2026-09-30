@@ -4,20 +4,6 @@
 #include <BluetoothSerial.h>
 #include "ExerciseConfig.h"
 
-struct TelemetryData {
-  unsigned long uptimeMs;
-  int reps;
-  int calibrationReps;
-  int calibrationTarget;
-  int repState;
-  int mode;
-  int gyroAxis;
-  float pauseMotion;
-  float pausePeak;
-  bool positioningSeen;
-  bool buzzer;
-};
-
 void printTelemetry(Print& output, const TelemetryData& data);
 
 class WirelessStreamer {
@@ -27,6 +13,7 @@ class WirelessStreamer {
   void update(const TelemetryData& data, unsigned long now);
   bool pollCommand(char* destination, size_t capacity);
   void message(const char* text);
+  bool consumeConnectionEvent();
 
  private:
   struct CommandBuffer {
@@ -39,6 +26,7 @@ class WirelessStreamer {
   unsigned long lastOutputTime_;
   bool wasConnected_ = false;
   bool started_ = false;
+  bool connectionEvent_ = false;
   CommandBuffer usbInput_;
   CommandBuffer bluetoothInput_;
 

@@ -7,7 +7,13 @@ namespace {
   size_t formatTelemetry(char* line, size_t capacity, const TelemetryData& data) {
     char status[160];
 
-    if (data.repState == 0) {
+    if (data.repState == WAITING_FOR_PEER) {
+      snprintf(status, sizeof(status), "ACTIVATING | Reps: -- | Waiting for peer standby");
+    } else if (data.repState == ACTIVATION_FAILED) {
+      snprintf(status, sizeof(status), "ACTIVATION FAILED | Reps: -- | Check other node; send ACTIVATE to retry");
+    } else if (data.repState == NODE_STANDBY) {
+      snprintf(status, sizeof(status), "STANDBY | Reps: -- | Send ACTIVATE to start");
+    } else if (data.repState == 0) {
       snprintf(status, sizeof(status), "BASELINE | %s", data.positioningSeen
         ? "Hold still for 3 seconds"
         : "Move into your starting position");
@@ -36,8 +42,9 @@ namespace {
       }
     }
 
-    const int length = snprintf(line, capacity, "Up: %lus | Mode: %s | %s%s\r\n",
-      data.uptimeMs / 1000,
+    const int length = snprintf(line, capacity, "Up: %lus | Source: %s | Mode: %s | %s%s\r\n",
+      (unsigned long)(data.uptimeMs / 1000),
+      data.source == WRIST ? "WRIST" : "HIP",
       data.mode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
       status,
       data.buzzer ? " | FALL ALERT - BUZZER ON" : "");
@@ -65,6 +72,12 @@ bool WirelessStreamer::begin(const char* deviceName) {
   bluetoothInput_ = CommandBuffer{};
   started_ = bluetooth_.begin(deviceName);
   return started_;
+}
+
+bool WirelessStreamer::consumeConnectionEvent() {
+  const bool result = connectionEvent_;
+  connectionEvent_ = false;
+  return result;
 }
 
 bool WirelessStreamer::readCommand(
@@ -125,7 +138,7 @@ bool WirelessStreamer::pollCommand(char* destination, size_t capacity) {
 }
 
 void WirelessStreamer::message(const char* text) {
-  char line[192];
+  char line[224];
   const int length = snprintf(line, sizeof(line), "%s\r\n", text);
   if (length <= 0 || (size_t)length >= sizeof(line)) {
     return;
@@ -143,11 +156,12 @@ void WirelessStreamer::update(const TelemetryData& data, unsigned long now) {
   }
 
   lastOutputTime_ = now;
-  const bool connected = bluetooth_.hasClient();
+  const bool connected = started_ && bluetooth_.hasClient();
   if (connected != wasConnected_) {
-    Serial.println(connected
-      ? "[Bluetooth connected]"
+    message(connected
+      ? "[Laptop Bluetooth connected]"
       : "[Bluetooth disconnected; USB output remains active]");
+    connectionEvent_ = connected;
     wasConnected_ = connected;
   }
 
