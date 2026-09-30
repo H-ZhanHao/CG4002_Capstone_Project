@@ -173,6 +173,93 @@ void invalidPacketsAndTimerWrap() {
   assert(q.wrist.localActive());
 }
 
+void modeSyncAndRetries() {
+  Pair p;
+  p.wrist.activate(0); p.deliver(); p.wrist.consumeRestart();
+  p.wrist.setMode(CONTINUOUS_MODE, 0);
+  const auto request = fromWrist.front();
+  p.toHip(request); fromWrist.clear();
+  assert(p.hip.mode() == CONTINUOUS_MODE && p.wrist.mode() == CONTINUOUS_MODE);
+  assert(!p.hip.localActive() && p.wrist.localActive());
+  assert(p.hip.consumeRestart() && p.wrist.consumeRestart());
+  fromHip.clear(); // Lose ACK.
+  p.tick(LinkTiming::RETRY_MS); p.deliver();
+  assert(!p.wrist.modePending() && !p.hip.consumeRestart());
+  p.wrist.setMode(CONTINUOUS_MODE, p.now); p.deliver();
+  assert(!p.hip.consumeRestart() && !p.wrist.consumeRestart());
+  p.wrist.setMode(PAUSE_MODE, p.now); p.deliver();
+  assert(p.hip.mode() == PAUSE_MODE && p.wrist.mode() == PAUSE_MODE);
+  p.hip.consumeRestart(); p.wrist.consumeRestart();
+  p.toHip(request); // Older command cannot undo newer mode.
+  assert(p.hip.mode() == PAUSE_MODE && !p.hip.consumeRestart());
+  p.tick(100000); assert(fromHip.empty() && fromWrist.empty());
+}
+
+void modeFailuresAndStaleAcks() {
+  Pair p;
+  p.hip.activate(0); p.deliver(); p.hip.consumeRestart();
+  p.hip.setMode(CONTINUOUS_MODE, 0);
+  for (uint32_t t = LinkTiming::RETRY_MS; t <= LinkTiming::REQUEST_TIMEOUT_MS; t += LinkTiming::RETRY_MS) p.tick(t);
+  assert(fromHip.size() == LinkTiming::MAX_ATTEMPTS && !p.hip.modePending());
+  assert(p.hip.mode() == CONTINUOUS_MODE && p.hip.localActive());
+  p.deliver();
+  assert(!p.hip.modePending());
+  p.hip.setMode(PAUSE_MODE, p.now);
+  p.toWrist(fromHip.front()); fromHip.clear();
+  const auto ack = fromWrist.front(); fromWrist.clear();
+  p.hip.setMode(CONTINUOUS_MODE, p.now);
+  p.toHip(ack); assert(p.hip.modePending());
+  p.deliver(); assert(!p.hip.modePending());
+  p.hip.begin(HIP, 101);
+  p.hip.activate(p.now); p.deliver();
+  p.hip.setMode(PAUSE_MODE, p.now);
+  p.toHip(ack); assert(p.hip.modePending());
+  p.deliver(); assert(!p.hip.modePending() && p.wrist.mode() == PAUSE_MODE);
+
+  Pair q;
+  q.now = UINT32_MAX - 100;
+  q.wrist.activate(q.now); q.deliver();
+  q.wrist.setMode(CONTINUOUS_MODE, q.now); fromWrist.clear();
+  q.tick(q.now + LinkTiming::RETRY_MS); q.deliver();
+  assert(q.hip.mode() == CONTINUOUS_MODE && !q.wrist.modePending());
+}
+
+void onlyActiveNodeCanSelectMode() {
+  Pair p;
+  p.hip.setMode(CONTINUOUS_MODE, 0);
+  p.wrist.setMode(CONTINUOUS_MODE, 0);
+  assert(fromHip.empty() && fromWrist.empty());
+  assert(p.hip.mode() == PAUSE_MODE && p.wrist.mode() == PAUSE_MODE);
+  assert(!p.hip.consumeRestart() && !p.wrist.consumeRestart());
+  p.hip.activate(0);
+  const size_t queued = fromHip.size();
+  p.hip.setMode(CONTINUOUS_MODE, 0); // Pending activation is not active.
+  assert(p.hip.waiting() && p.hip.mode() == PAUSE_MODE && fromHip.size() == queued);
+  p.deliver(); p.hip.consumeRestart();
+  p.wrist.setMode(CONTINUOUS_MODE, 0);
+  assert(fromWrist.empty() && !p.wrist.consumeRestart());
+  p.hip.setMode(CONTINUOUS_MODE, 0);
+  const auto oldMode = fromHip.front(); fromHip.clear();
+  assert(p.hip.modePending());
+  p.wrist.activate(0); p.deliver(); // Handover cancels old node's mode retries.
+  assert(!p.hip.modePending() && p.wrist.localActive());
+  p.hip.consumeRestart(); p.wrist.consumeRestart();
+  p.toWrist(oldMode); // Old peer command cannot change the newly active node.
+  assert(p.wrist.mode() == PAUSE_MODE && !p.wrist.consumeRestart());
+  p.hip.setMode(PAUSE_MODE, 0);
+  assert(fromHip.empty() && p.hip.mode() == CONTINUOUS_MODE);
+  p.wrist.setMode(PAUSE_MODE, 0); p.deliver();
+  assert(p.hip.mode() == PAUSE_MODE && !p.wrist.modePending());
+  p.wrist.setMode(CONTINUOUS_MODE, 0); fromWrist.clear();
+  p.wrist.standby();
+  p.tick(LinkTiming::RETRY_MS);
+  assert(!p.wrist.modePending() && fromWrist.empty());
+  p.hip.activate(p.now); fromHip.clear();
+  p.tick(p.now + LinkTiming::REQUEST_TIMEOUT_MS);
+  p.hip.setMode(CONTINUOUS_MODE, p.now); // Failed activation is not active.
+  assert(fromHip.empty() && p.hip.mode() == PAUSE_MODE);
+}
+
 // Exercise arbitrary delivery order, duplicates, drops, local cancellations and
 // reboots. Check exclusion after every event, not only after queues drain.
 void reorderedLossyTraffic() {
@@ -213,6 +300,9 @@ int main() {
   cancelledAndRebootedRequests();
   simultaneousRequestsAndDuplicates();
   invalidPacketsAndTimerWrap();
+  modeSyncAndRetries();
+  modeFailuresAndStaleAcks();
+  onlyActiveNodeCanSelectMode();
   reorderedLossyTraffic();
-  puts("PASS: exclusive activation, retries, stale ACKs, reboots, races, local output, no heartbeats, timer wrap, 200000 lossy/reordered events");
+  puts("PASS: mode sync, duplicate/stale commands, mode timeout/retry, active-only mode selection, exclusive activation, reboots, local output, no heartbeats, timer wrap, 200000 lossy/reordered events");
 }

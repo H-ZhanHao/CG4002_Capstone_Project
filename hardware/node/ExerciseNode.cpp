@@ -251,12 +251,7 @@ void processCommand(char* command, unsigned long now) {
     return;
   }
 
-  activeMode = requested;
-  if (nodeSession.waiting()) nodeSession.standby();
-  restartSession(now);
-  wirelessStreamer.message(nodeSession.localActive()
-    ? "[Mode changed; restarting calibration]"
-    : "[Mode changed; still inactive. Send ACTIVATE to start]");
+  nodeSession.setMode(requested, now);
 }
 
 void updateBaseline(
@@ -546,7 +541,7 @@ void begin(NodeRole role) {
 
   const unsigned long now = millis();
 
-  nodeSession.begin(nodeRole, esp_random());
+  nodeSession.begin(nodeRole, esp_random(), activeMode);
   restartSession(now);
   fallDetector.begin(now);
 
@@ -575,7 +570,9 @@ void update() {
   now = millis();
   nodeSession.update(now);
   NodeRadio::update();
-  if (nodeSession.consumeRestart()) {
+  const bool restartRequested = nodeSession.consumeRestart();
+  if (restartRequested || activeMode != nodeSession.mode()) {
+    activeMode = nodeSession.mode();
     restartSession(now);
   }
   if (!nodeSession.localActive()) {

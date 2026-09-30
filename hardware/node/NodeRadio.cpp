@@ -75,7 +75,7 @@ bool NodeRadio::begin(NodeRole nodeRole) {
       esp_now_register_recv_cb(onReceive) != ESP_OK ||
       esp_now_register_send_cb(onSent) != ESP_OK) return false;
   started = true;
-  Serial.println("[ESP-NOW ready; activation commands only, no heartbeats or telemetry]");
+  Serial.println("[ESP-NOW ready; activation and mode commands only, no heartbeats or telemetry]");
   return true;
 }
 

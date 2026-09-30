@@ -53,21 +53,28 @@ RESET
   Clear THIS board's exercise session. An active board restarts calibration;
   an inactive board stays inactive. Cancels any pending activation.
 MODE:PAUSE / MODE:CONTINUOUS (PAUSE / CONTINUOUS also accepted)
-  Change THIS board's counting mode and reset its calibration. Active stays
-  active; inactive stays inactive. Cancels any pending activation.
+  Accepted only on the ACTIVE board. Change its mode and send it to the OTHER
+  board over ESP-NOW. Commands typed on an inactive board are rejected without
+  changing mode, resetting calibration, or sending a mode packet. The standby
+  board still accepts synchronized changes from the active board.
+  An actual mode change resets calibration on each board and cancels pending
+  activation. Active stays active; inactive stays inactive. Sending the same
+  mode again retries synchronization without resetting calibration.
+  Wait for "Mode synced" on the sending monitor. If confirmation times out,
+  the local mode remains selected; check the peer and resend the command.
   PAUSE is the pause-based counting algorithm, not a standby command.
 STATUS / HELP
   Show this board's activation/radio configuration or the command list.
 
 Type ACTIVATE in the HIP monitor for hip exercises; type ACTIVATE in the WRIST
 monitor for wrist exercises. The other board automatically enters standby.
-Each node retains its own selected counting mode. Every successful activation
+Mode changes from the active node's monitor are shared. Every successful activation
 starts fresh calibration. Move into position, hold still for three seconds,
 then perform the existing movement calibration. Counts start at zero afterward.
 
 SIMPLE CONTROL LINK
 
-ESP-NOW carries only 20-byte DEACTIVATE requests and STANDBY_ACK replies. There
+ESP-NOW carries only 20-byte DEACTIVATE/STANDBY_ACK and SET_MODE/MODE_ACK packets. There
 are no discovery broadcasts, periodic heartbeats, telemetry packets, or remote
 fall/calibration messages. USB/Bluetooth output remains at the original cadence.
 
@@ -82,6 +89,17 @@ and a per-boot random ID prevent delayed acknowledgements from starting old
 sessions. Receiving a deactivation always stops counting before acknowledging;
 a delayed duplicate can conservatively stop counting again, never start it.
 Old gateway packets are rejected by the new packet size/version.
+
+Mode synchronization also uses five attempts, 500 ms apart, and a 2.5-second
+deadline. Duplicate mode requests are acknowledged without recalibration;
+older requests from the same peer boot and stale acknowledgements are ignored.
+Entering standby cancels pending mode retries. An active board ignores incoming
+mode requests from its peer, including delayed requests from before a handover.
+Wait for acknowledgement before changing modes again. There is no periodic
+mode synchronization: after reboot, the board uses the configured default.
+Resend the desired MODE command from the active node to sync both after either
+board restarts. If neither is active, activate the desired node first.
+Upload BOTH sketches for this protocol update (version 3).
 
 After selection, counting continues locally even if the other board loses power
 or ESP-NOW reception. STATUS does not claim a peer is currently online because
@@ -100,6 +118,15 @@ BENCH CHECK BEFORE WEARING
   report standby. Then ACTIVATE WRIST and check that the roles reverse.
 - Repeat several times with both Bluetooth connections open and power unchanged.
 - Send RESET on the active board: it should restart baseline without a switch.
+- Send a MODE command from the standby monitor: expect "Mode command rejected"
+  and no changes to either board's mode or calibration.
+- Send MODE:CONTINUOUS from the active monitor: both should show CONTINUOUS and the
+  sender should report "Mode synced". The active node stays active and starts
+  calibration again. Switch activation and send MODE:PAUSE from the newly active
+  node to check the reverse direction too.
+- Repeat the same MODE command: it should confirm sync without recalibration.
+- With the peer off, a MODE command on the active node should apply locally then report sync
+  unconfirmed. Restore peer power and resend the command to synchronize.
 - Send STANDBY on the active board: both should now be inactive.
 - Turn the OTHER board off and request activation: expect an explicit failure,
   not counting. Restore its power and send ACTIVATE again.

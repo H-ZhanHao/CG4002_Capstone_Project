@@ -3,18 +3,62 @@
 namespace {
   constexpr uint32_t MAGIC = 0x45584E32;
   // Deliberately incompatible with the old gateway/telemetry protocol.
-  constexpr uint8_t VERSION = 2;
+  constexpr uint8_t VERSION = 3;
 }
 
 NodeSession::NodeSession(Send send, Log log) : send_(send), log_(log) {}
 
-void NodeSession::begin(NodeRole role, uint32_t boot) {
+void NodeSession::begin(NodeRole role, uint32_t boot, CountingMode mode) {
   role_ = role;
   boot_ = boot ? boot : 1;
   request_ = requestedAt_ = lastAttempt_ = 0;
   attempts_ = 0;
   state_ = State::STANDBY;
   restart_ = false;
+  mode_ = mode;
+  modeRequest_ = modeRequestedAt_ = modeLastAttempt_ = 0;
+  peerModeBoot_ = peerModeRequest_ = 0;
+  modeAttempts_ = 0;
+  modePending_ = peerModeAccepted_ = false;
+}
+
+void NodeSession::applyMode(CountingMode mode) {
+  if (mode_ == mode) return;
+  mode_ = mode;
+  if (waiting()) state_ = State::STANDBY;
+  restart_ = true;
+  log_(mode == PAUSE_MODE ? "[Mode: PAUSE | Calibration reset; activation unchanged]"
+                         : "[Mode: CONTINUOUS | Calibration reset; activation unchanged]");
+}
+
+void NodeSession::setMode(CountingMode mode, uint32_t now) {
+  if (mode != PAUSE_MODE && mode != CONTINUOUS_MODE) return;
+  if (!localActive()) {
+    log_("[Mode command rejected: use the active node's monitor, or ACTIVATE this node first]");
+    return;
+  }
+  applyMode(mode);
+  ++modeRequest_;
+  if (!modeRequest_) ++modeRequest_;
+  modeRequestedAt_ = now;
+  modeAttempts_ = 0;
+  modePending_ = true;
+  log_("[Mode sync requested; waiting for peer acknowledgement]");
+  requestMode(now);
+}
+
+void NodeSession::requestMode(uint32_t now) {
+  modeLastAttempt_ = now;
+  ++modeAttempts_;
+  LinkPacket p = packet(PacketKind::SET_MODE, modeRequest_, 0);
+  p.mode = mode_;
+  send_(p);
+}
+
+void NodeSession::expireMode(uint32_t now) {
+  if (!modePending_ || now - modeRequestedAt_ < LinkTiming::REQUEST_TIMEOUT_MS) return;
+  modePending_ = false;
+  log_("[Mode sync unconfirmed: local mode retained; check peer power/link and resend MODE command]");
 }
 
 LinkPacket NodeSession::packet(PacketKind kind, uint32_t request, uint32_t targetBoot) const {
@@ -51,6 +95,7 @@ void NodeSession::activate(uint32_t now) {
 
 void NodeSession::standby() {
   state_ = State::STANDBY;
+  modePending_ = false;
   restart_ = false;
   log_("[Standby; rep counting stopped. Send ACTIVATE to start]");
 }
@@ -70,19 +115,59 @@ bool NodeSession::expire(uint32_t now) {
 }
 
 void NodeSession::receive(const LinkPacket& p, uint32_t now) {
-  if (p.magic != MAGIC || p.version != VERSION || !p.boot || !p.request || p.reserved) return;
+  if (p.magic != MAGIC || p.version != VERSION || !p.boot || !p.request) return;
   const NodeRole peer = role_ == HIP ? WRIST : HIP;
   if (p.role != peer) return;
 
   // Check the deadline here too: a delayed ACK after a blocked main loop must
   // not activate a request whose timeout has already elapsed.
   expire(now);
+  expireMode(now);
+  if (p.kind == PacketKind::SET_MODE || p.kind == PacketKind::MODE_ACK) {
+    if (p.mode != PAUSE_MODE && p.mode != CONTINUOUS_MODE) return;
+    if (p.kind == PacketKind::MODE_ACK) {
+      if (modePending_ && p.targetBoot == boot_ && p.request == modeRequest_ && p.mode == mode_) {
+        modePending_ = false;
+        log_(mode_ == PAUSE_MODE ? "[Mode synced: PAUSE | Peer acknowledged]"
+                                : "[Mode synced: CONTINUOUS | Peer acknowledged]");
+      }
+      return;
+    }
+    if (p.targetBoot != 0) return;
+    // The active node owns mode selection. Ignore delayed commands from the
+    // previously active peer after an activation handover.
+    if (localActive()) return;
+    if (p.boot == peerModeBoot_) {
+      if (p.request != peerModeRequest_ && (int32_t)(p.request - peerModeRequest_) <= 0) return;
+      if (p.request == peerModeRequest_) {
+        // Retry after a lost ACK: acknowledge without resetting calibration.
+        if (!peerModeAccepted_ || p.mode != mode_) return;
+        LinkPacket ack = packet(PacketKind::MODE_ACK, p.request, p.boot);
+        ack.mode = p.mode;
+        send_(ack);
+        return;
+      }
+    }
+    peerModeBoot_ = p.boot;
+    peerModeRequest_ = p.request;
+    peerModeAccepted_ = false;
+    modePending_ = false;
+    applyMode(static_cast<CountingMode>(p.mode));
+    peerModeAccepted_ = true;
+    log_("[Mode received from peer]");
+    LinkPacket ack = packet(PacketKind::MODE_ACK, p.request, p.boot);
+    ack.mode = p.mode;
+    send_(ack);
+    return;
+  }
+  if (p.mode != 0) return;
   if (p.kind == PacketKind::DEACTIVATE && p.targetBoot == 0) {
     // If both request activation together, the hip's pending request wins.
     // The wrist cancels its request BEFORE acknowledging the hip. Ignoring
     // the competing request here ensures both cannot accept each other's ACK.
     if (role_ == HIP && waiting()) return;
     state_ = State::STANDBY;
+    modePending_ = false;
     restart_ = false;
     log_(role_ == HIP ? "[Hip in standby for wrist activation]"
                      : "[Wrist in standby for hip activation]");
@@ -99,6 +184,9 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
 }
 
 void NodeSession::update(uint32_t now) {
+  expireMode(now);
+  if (modePending_ && modeAttempts_ < LinkTiming::MAX_ATTEMPTS &&
+      now - modeLastAttempt_ >= LinkTiming::RETRY_MS) requestMode(now);
   if (expire(now) || !waiting()) return;
   if (attempts_ < LinkTiming::MAX_ATTEMPTS && now - lastAttempt_ >= LinkTiming::RETRY_MS) {
     requestStandby(now);
@@ -122,6 +210,8 @@ TelemetryData NodeSession::output(const TelemetryData& local) const {
 
 void NodeSession::status() const {
   log_(role_ == HIP ? "[Role: HIP]" : "[Role: WRIST]");
+  log_(mode_ == PAUSE_MODE ? "[Mode: PAUSE]" : "[Mode: CONTINUOUS]");
+  if (modePending_) log_("[Mode sync pending]");
   if (localActive()) log_("[Active | Other node acknowledged standby at activation]");
   else if (waiting()) log_("[Waiting for peer standby acknowledgement]");
   else if (state_ == State::FAILED) log_("[Activation failed | Inactive | Send ACTIVATE to retry]");
