@@ -1,4 +1,5 @@
 #include "WirelessStreamer.h"
+#include "ExerciseProfiles.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -42,9 +43,10 @@ namespace {
       }
     }
 
-    const int length = snprintf(line, capacity, "Up: %lus | Source: %s | Mode: %s | %s%s\r\n",
+    const int length = snprintf(line, capacity, "Up: %lus | Source: %s | Exercise: %s | Mode: %s | %s%s\r\n",
       (unsigned long)(data.uptimeMs / 1000),
       data.source == WRIST ? "WRIST" : "HIP",
+      exerciseName((ExerciseType)data.exercise),
       data.mode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
       status,
       data.buzzer ? " | FALL ALERT - BUZZER ON" : "");
@@ -54,7 +56,7 @@ namespace {
 }
 
 void printTelemetry(Print& output, const TelemetryData& data) {
-  char line[256];
+  char line[320];
   const size_t length = formatTelemetry(line, sizeof(line), data);
   if (length > 0) {
     output.write((const uint8_t*)line, length);
@@ -171,7 +173,7 @@ void WirelessStreamer::update(const TelemetryData& data, unsigned long now) {
 
   // One complete line creates one queued packet instead of many small packets.
   // BluetoothSerial::write can still wait if its internal queue is full.
-  char line[256];
+  char line[320];
   const size_t length = formatTelemetry(line, sizeof(line), data);
   if (length == 0) {
     return;

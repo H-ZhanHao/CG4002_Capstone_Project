@@ -3,7 +3,7 @@
 namespace {
   constexpr uint32_t MAGIC = 0x45584E32;
   // Deliberately incompatible with the old gateway/telemetry protocol.
-  constexpr uint8_t VERSION = 3;
+  constexpr uint8_t VERSION = 4;
 }
 
 NodeSession::NodeSession(Send send, Log log) : send_(send), log_(log) {}
@@ -20,15 +20,52 @@ void NodeSession::begin(NodeRole role, uint32_t boot, CountingMode mode) {
   peerModeBoot_ = peerModeRequest_ = 0;
   modeAttempts_ = 0;
   modePending_ = peerModeAccepted_ = false;
+  activePeerBoot_ = ledSendSequence_ = 0;
+  ledPeerBoot_ = ledPeerRequest_ = ledReceiveSequence_ = 0;
+  ledStartedAt_ = ledDuration_ = 0;
+  ledReadyPattern_ = false;
+}
+
+void NodeSession::applyLedFeedback(LedFeedback feedback, uint32_t now) {
+  ledStartedAt_ = now;
+  ledReadyPattern_ = feedback == LedFeedback::READY;
+  ledDuration_ = feedback == LedFeedback::READY ? LedTiming::READY_MS
+               : feedback == LedFeedback::REP ? LedTiming::REP_MS : 0;
+}
+
+bool NodeSession::feedbackLedOn(uint32_t now) const {
+  const uint32_t elapsed = now - ledStartedAt_;
+  if (!ledDuration_ || elapsed >= ledDuration_) return false;
+  // Start with a brief OFF interval so all three blinks are visible even if
+  // the active node's calibration LED was already lit. No blocking delays.
+  return !ledReadyPattern_ || (elapsed / LedTiming::READY_STEP_MS) % 2 == 1;
+}
+
+void NodeSession::showLedFeedback(LedFeedback feedback, uint32_t now) {
+  if (!localActive() || !activePeerBoot_) return;
+  if (feedback != LedFeedback::CLEAR && feedback != LedFeedback::READY && feedback != LedFeedback::REP) return;
+  applyLedFeedback(feedback, now);
+  ++ledSendSequence_;
+  if (!ledSendSequence_) ++ledSendSequence_;
+  LinkPacket p = packet(PacketKind::LED_FEEDBACK, request_, activePeerBoot_);
+  p.sequence = ledSendSequence_;
+  p.mode = static_cast<uint8_t>(feedback);
+  send_(p); // Best effort: a missed visual event never stalls local counting.
+}
+
+void NodeSession::clearLedFeedback(uint32_t now) {
+  if (localActive() && ledSendSequence_) showLedFeedback(LedFeedback::CLEAR, now);
+  ledDuration_ = 0;
 }
 
 void NodeSession::applyMode(CountingMode mode) {
   if (mode_ == mode) return;
   mode_ = mode;
+  ledDuration_ = 0;
   if (waiting()) state_ = State::STANDBY;
   restart_ = true;
-  log_(mode == PAUSE_MODE ? "[Mode: PAUSE | Calibration reset; activation unchanged]"
-                         : "[Mode: CONTINUOUS | Calibration reset; activation unchanged]");
+  log_(mode == PAUSE_MODE ? "[Mode: PAUSE | Session restarted; activation unchanged]"
+                         : "[Mode: CONTINUOUS | Session restarted; activation unchanged]");
 }
 
 void NodeSession::setMode(CountingMode mode, uint32_t now) {
@@ -83,6 +120,9 @@ void NodeSession::activate(uint32_t now) {
     log_("[Activation already pending; waiting for peer standby]");
     return;
   }
+  ledDuration_ = 0;
+  activePeerBoot_ = ledSendSequence_ = 0;
+  ledPeerBoot_ = ledPeerRequest_ = ledReceiveSequence_ = 0;
   ++request_;
   if (!request_) ++request_;
   requestedAt_ = now;
@@ -94,6 +134,8 @@ void NodeSession::activate(uint32_t now) {
 }
 
 void NodeSession::standby() {
+  // CLEAR has no pulse duration, so its timestamp does not affect output.
+  clearLedFeedback(0);
   state_ = State::STANDBY;
   modePending_ = false;
   restart_ = false;
@@ -123,6 +165,17 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
   // not activate a request whose timeout has already elapsed.
   expire(now);
   expireMode(now);
+  if (p.kind == PacketKind::LED_FEEDBACK) {
+    if (state_ != State::STANDBY || p.targetBoot != boot_ ||
+        p.boot != ledPeerBoot_ || p.request != ledPeerRequest_ || !p.sequence) return;
+    if (p.mode < static_cast<uint8_t>(LedFeedback::CLEAR) ||
+        p.mode > static_cast<uint8_t>(LedFeedback::REP)) return;
+    if (ledReceiveSequence_ && (int32_t)(p.sequence - ledReceiveSequence_) <= 0) return;
+    ledReceiveSequence_ = p.sequence;
+    applyLedFeedback(static_cast<LedFeedback>(p.mode), now);
+    return; // No acknowledgement, retry or effect on reps / mode / activation.
+  }
+  if (p.sequence != 0) return;
   if (p.kind == PacketKind::SET_MODE || p.kind == PacketKind::MODE_ACK) {
     if (p.mode != PAUSE_MODE && p.mode != CONTINUOUS_MODE) return;
     if (p.kind == PacketKind::MODE_ACK) {
@@ -166,6 +219,13 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
     // The wrist cancels its request BEFORE acknowledging the hip. Ignoring
     // the competing request here ensures both cannot accept each other's ACK.
     if (role_ == HIP && waiting()) return;
+    if (p.boot != ledPeerBoot_ || (int32_t)(p.request - ledPeerRequest_) > 0) {
+      ledPeerBoot_ = p.boot;
+      ledPeerRequest_ = p.request;
+      ledReceiveSequence_ = 0;
+    }
+    ledDuration_ = 0;
+    activePeerBoot_ = ledSendSequence_ = 0;
     state_ = State::STANDBY;
     modePending_ = false;
     restart_ = false;
@@ -177,6 +237,8 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
   } else if (p.kind == PacketKind::STANDBY_ACK && waiting() &&
              p.targetBoot == boot_ && p.request == request_) {
     state_ = State::ACTIVE;
+    activePeerBoot_ = p.boot;
+    ledDuration_ = 0;
     restart_ = true;
     log_(role_ == HIP ? "[Hip active; wrist acknowledged standby. Starting calibration]"
                      : "[Wrist active; hip acknowledged standby. Starting calibration]");

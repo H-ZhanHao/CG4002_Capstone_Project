@@ -82,7 +82,7 @@ namespace GeneralConfig {
   constexpr float STATIONARY_MAX_ACCEL_CHANGE = 0.05f;
 
   constexpr unsigned long CALIBRATION_LED_OFF_MS = 200;
-  constexpr unsigned long REP_LED_DURATION_MS = 200;
+  // Mirrored ready/rep pulse durations are shared in NodeSession.h: LedTiming.
 }
 
 namespace ModeConfig {

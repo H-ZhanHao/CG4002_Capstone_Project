@@ -50,14 +50,23 @@ STANDBY (DEACTIVATE is an alias)
   Stop THIS board's rep counting and cancel a pending activation. Bluetooth,
   ESP-NOW command reception, and hip fall monitoring remain available.
 RESET
-  Clear THIS board's exercise session. An active board restarts calibration;
-  an inactive board stays inactive. Cancels any pending activation.
+  Forget THIS board's calibration for the selected exercise and counting mode,
+  and clear its rep count. An active board restarts calibration; an inactive
+  board stays inactive. Other profiles remain saved. Cancels pending activation.
+EXERCISE:<name>
+  Select PUSHUP, SITUP, SQUAT, LUNGE, LEG_RAISE or JUMPING_JACK on THIS board.
+  Plurals, spaces and hyphens are accepted (e.g. EXERCISE:leg raises).
+  A different selection restarts the baseline and zeros reps, retaining saved
+  movement calibrations. Active stays active; standby stays standby. A pending
+  activation is cancelled. Repeating the current selection only shows status.
+EXERCISES
+  List the six exercise names. Selection is manual and local to each board.
 MODE:PAUSE / MODE:CONTINUOUS (PAUSE / CONTINUOUS also accepted)
   Accepted only on the ACTIVE board. Change its mode and send it to the OTHER
   board over ESP-NOW. Commands typed on an inactive board are rejected without
   changing mode, resetting calibration, or sending a mode packet. The standby
   board still accepts synchronized changes from the active board.
-  An actual mode change resets calibration on each board and cancels pending
+  An actual mode change restarts the session on each board and cancels pending
   activation. Active stays active; inactive stays inactive. Sending the same
   mode again retries synchronization without resetting calibration.
   Wait for "Mode synced" on the sending monitor. If confirmation times out,
@@ -69,14 +78,79 @@ STATUS / HELP
 Type ACTIVATE in the HIP monitor for hip exercises; type ACTIVATE in the WRIST
 monitor for wrist exercises. The other board automatically enters standby.
 Mode changes from the active node's monitor are shared. Every successful activation
-starts fresh calibration. Move into position, hold still for three seconds,
-then perform the existing movement calibration. Counts start at zero afterward.
+starts a fresh baseline. Move into position and hold still for three seconds.
+If this exercise/mode has a saved profile, counting starts at zero immediately
+after that baseline. Otherwise perform two matching calibration reps first.
+
+PER-EXERCISE CALIBRATION
+
+Each board keeps six exercise profiles, each with separate PAUSE and CONTINUOUS
+movement limits. Profiles are saved automatically only after successful movement
+calibration. Switching exercise, switching mode, or handing activation to the
+other board preserves them. Incomplete calibration attempts are not saved.
+The hip defaults to SQUAT; the wrist defaults to JUMPING_JACK. Either board can
+select any exercise. Selecting an exercise does not change mode or active board.
+Choose the mode explicitly; jumping jacks will usually use MODE:CONTINUOUS.
+
+Example, in the chosen board's monitor:
+  EXERCISE:SQUATS
+  ACTIVATE
+  MODE:PAUSE
+  [move into position, hold still, perform two matching calibration reps]
+  EXERCISE:LUNGES
+  [repeat baseline and movement calibration for lunges]
+  EXERCISE:SQUATS
+  [repeat baseline; saved squat limits load and counting starts at zero]
+
+Profiles are local RAM only: reboot/power loss clears all profiles on that board.
+They are not sent over ESP-NOW. Select the exercise separately when using the
+other board; it learns its own calibration for its sensor placement. STATUS
+shows whether the selected exercise/mode has a saved profile; every telemetry
+line includes the exercise name.
+
+Only movement thresholds, duration limits, and (for continuous mode) the learned
+axis/direction are reused. Gravity baseline and gyro bias are measured afresh.
+Use RESET after moving/rotating the sensor, changing wearer or deliberately
+changing movement range/pace. Keep the same placement when reusing a profile.
+All exercises start with the existing shared detector settings; their learned
+limits come from your own reps. No new exercise-specific thresholds are claimed
+to be physically tested, and selecting a name does not recognize exercise form.
+
+MIRRORED LED FEEDBACK
+
+After movement calibration completes or a saved profile loads, BOTH LEDs blink three times quickly to
+signal readiness: 100 ms OFF then 100 ms ON, repeated three times (600 ms total).
+The initial OFF interval separates the pattern from the active calibration LED.
+Each subsequently counted rep flashes BOTH LEDs once for 200 ms. This
+works in either direction: HIP counting can be watched on the wrist LED, and
+WRIST counting can be watched on the hip LED. The peer stays in standby for
+counting; its local rep count and mode are not changed by an LED event.
+
+Earlier baseline/calibration progress indications stay local to the active
+node. No extra command is needed for mirroring. Durations are shared in
+NodeSession.h under LedTiming. LED pulses are timed without blocking delays.
+
+Resetting an active session, changing mode, or entering standby clears the
+feedback locally and sends/uses a peer clear event as appropriate. Activation
+handover clears existing pulses and binds new LED events to the new session.
+Same-mode retries do not reset feedback or calibration.
+
+LED events are best effort, without ACKs or retries. Wireless delay means the
+flashes are approximately synchronized, not simultaneous. Lost packets can
+cause missed remote flashes or a missed clear; any received flash still ends
+after its own 200/600 ms timer. Count validity never depends on LED delivery.
+Duplicate/out-of-order events are ignored using the session and sequence.
+After the standby board reboots, switch activation away and back to establish
+a fresh LED session. Repeating ACTIVATE on an already-active board does not
+perform a new handshake. Neither event traffic nor STATUS proves a live peer.
 
 SIMPLE CONTROL LINK
 
-ESP-NOW carries only 20-byte DEACTIVATE/STANDBY_ACK and SET_MODE/MODE_ACK packets. There
-are no discovery broadcasts, periodic heartbeats, telemetry packets, or remote
-fall/calibration messages. USB/Bluetooth output remains at the original cadence.
+ESP-NOW uses 24-byte DEACTIVATE/STANDBY_ACK, SET_MODE/MODE_ACK and LED_FEEDBACK
+packets. LED_FEEDBACK carries clear, calibration-ready or rep-pulse events,
+bound to an activation session and ordered with a sequence number. There are
+no discovery broadcasts, periodic heartbeats, sensor streams, forwarded counts
+or remote fall messages. USB/Bluetooth output remains at the original cadence.
 
 Activation tries at most five requests, 500 ms apart, with a 2.5-second deadline.
 No ACK means no activation: the requesting node stays inactive and reports
@@ -99,7 +173,8 @@ Wait for acknowledgement before changing modes again. There is no periodic
 mode synchronization: after reboot, the board uses the configured default.
 Resend the desired MODE command from the active node to sync both after either
 board restarts. If neither is active, activate the desired node first.
-Upload BOTH sketches for this protocol update (version 3).
+Upload BOTH sketches for this protocol update (version 4); older versions
+cannot exchange activation/mode/LED packets with the updated firmware.
 
 After selection, counting continues locally even if the other board loses power
 or ESP-NOW reception. STATUS does not claim a peer is currently online because
@@ -122,7 +197,8 @@ BENCH CHECK BEFORE WEARING
   and no changes to either board's mode or calibration.
 - Send MODE:CONTINUOUS from the active monitor: both should show CONTINUOUS and the
   sender should report "Mode synced". The active node stays active and starts
-  calibration again. Switch activation and send MODE:PAUSE from the newly active
+  baseline again, then load that mode's profile or calibrate if none is saved.
+  Switch activation and send MODE:PAUSE from the newly active
   node to check the reverse direction too.
 - Repeat the same MODE command: it should confirm sync without recalibration.
 - With the peer off, a MODE command on the active node should apply locally then report sync
@@ -133,6 +209,19 @@ BENCH CHECK BEFORE WEARING
 - Once a board is active, removing the other board's power must not interrupt
   its own counting/output. A subsequent activation on the other requires an ACK.
 - Hip fall detection/buzzer remains running while its rep counter is in standby.
+- Complete movement calibration on HIP: both LEDs should blink three times quickly.
+  Count several reps: each should cause a 200 ms pulse on both boards, while
+  WRIST output remains STANDBY. Repeat with WRIST active, in both counting modes.
+- Send RESET or change mode during counting: previous feedback should clear,
+  followed by another shared ready flash when calibration completes or a saved
+  profile loads after baseline.
+- Calibrate SQUAT and LUNGE in PAUSE mode, switch back, and confirm each restores
+  its own limits after baseline with zero reps. Repeat in CONTINUOUS mode.
+- RESET SQUAT/PAUSE, then verify LUNGE/PAUSE and SQUAT/CONTINUOUS remain saved.
+- Reboot one board and verify its profiles clear while the other keeps its own.
+- Turn off the standby board after activation: the active board must keep
+  counting and flashing locally. Restore it and switch activation away/back
+  before checking remote LED feedback again.
 
 BUILD / HOST VERIFICATION
 
@@ -143,6 +232,10 @@ Arduino CLI can use the library directly without registration:
 Transport-independent switching tests (no hardware):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/node_session_test.cpp hardware/node/NodeSession.cpp -o .build/node_session_test.exe
   .build/node_session_test.exe
+
+Exercise profile and detector tests (synthetic sensor samples, no hardware):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_profiles_test.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp -o .build/exercise_profiles_test.exe
+  .build/exercise_profiles_test.exe
 
 These checks do not establish Bluetooth/ESP-NOW reliability on physical boards.
 No firmware is uploaded by the build or library-registration steps.

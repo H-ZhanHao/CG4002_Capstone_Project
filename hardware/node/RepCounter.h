@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "ExerciseConfig.h"
+#include "ExerciseProfiles.h"
 
 static_assert(GeneralConfig::REQUIRED_STABLE_REPS >= 2,
               "Calibration requires at least two candidates");
@@ -36,6 +37,8 @@ class RepCounter {
   );
 
   void begin(unsigned long currentTime);
+  PauseCalibration calibration() const;
+  bool restoreCalibration(const PauseCalibration& calibration);
 
   void update(
     float filteredMagnitude,

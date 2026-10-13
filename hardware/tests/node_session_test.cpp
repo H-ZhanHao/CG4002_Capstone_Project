@@ -260,6 +260,111 @@ void onlyActiveNodeCanSelectMode() {
   assert(fromHip.empty() && p.hip.mode() == PAUSE_MODE);
 }
 
+void mirroredLedPulses() {
+  for (int activeHip = 0; activeHip < 2; ++activeHip) {
+    Pair p;
+    auto& active = activeHip ? p.hip : p.wrist;
+    auto& inactive = activeHip ? p.wrist : p.hip;
+    active.activate(0); p.deliver(); active.consumeRestart();
+    inactive.showLedFeedback(LedFeedback::REP, 0);
+    assert(fromHip.empty() && fromWrist.empty());
+    active.showLedFeedback(LedFeedback::READY, 0); p.deliver();
+    // Three distinct 100 ms flashes, starting with 100 ms OFF to separate
+    // readiness from the active node's previously steady calibration LED.
+    for (uint32_t start : {100U, 300U, 500U}) {
+      assert(!active.feedbackLedOn(start - 1) && !inactive.feedbackLedOn(start - 1));
+      assert(active.feedbackLedOn(start) && inactive.feedbackLedOn(start));
+      assert(active.feedbackLedOn(start + 99) && inactive.feedbackLedOn(start + 99));
+      assert(!active.feedbackLedOn(start + 100) && !inactive.feedbackLedOn(start + 100));
+    }
+    assert(active.feedbackLedOn(LedTiming::READY_MS - 1));
+    assert(!active.feedbackLedOn(LedTiming::READY_MS));
+    assert(!inactive.feedbackLedOn(LedTiming::READY_MS));
+    assert(!inactive.localActive() && !inactive.consumeRestart());
+    p.now = 1000;
+    active.showLedFeedback(LedFeedback::REP, p.now); p.deliver();
+    assert(active.feedbackLedOn(p.now) && inactive.feedbackLedOn(p.now));
+    assert(!inactive.feedbackLedOn(p.now + LedTiming::REP_MS));
+    TelemetryData data = {}; data.reps = 9; data.mode = PAUSE_MODE;
+    assert(active.output(data).reps == 9);
+    assert(inactive.output(data).repState == NODE_STANDBY);
+    assert(!active.consumeRestart() && !inactive.consumeRestart());
+    // Drop the next LED packet: local feedback and counting remain independent.
+    p.now = 2000;
+    active.showLedFeedback(LedFeedback::REP, p.now);
+    fromHip.clear(); fromWrist.clear(); p.tick(10000);
+    assert(active.localActive() && active.output(data).reps == 9);
+    assert(fromHip.empty() && fromWrist.empty()); // No LED retries/heartbeats.
+  }
+}
+
+void ledOrderingClearingAndHandover() {
+  Pair p;
+  p.hip.activate(0);
+  const auto oldActivation = fromHip.front();
+  p.deliver(); p.hip.consumeRestart();
+  p.hip.showLedFeedback(LedFeedback::READY, 0);
+  const auto ready = fromHip.front(); fromHip.clear();
+  p.toWrist(ready);
+  p.now = 100;
+  p.hip.showLedFeedback(LedFeedback::REP, p.now);
+  const auto rep = fromHip.front(); fromHip.clear();
+  p.toWrist(rep);
+  p.now = 250;
+  p.toWrist(rep); p.toWrist(ready); // Do not extend/replay pulses.
+  assert(!p.wrist.feedbackLedOn(300));
+  p.hip.clearLedFeedback(p.now); p.deliver(); // RESET path.
+  assert(!p.hip.feedbackLedOn(p.now) && !p.wrist.feedbackLedOn(p.now));
+  p.toWrist(rep); assert(!p.wrist.feedbackLedOn(p.now));
+  p.hip.showLedFeedback(LedFeedback::READY, p.now); p.deliver();
+  p.hip.setMode(CONTINUOUS_MODE, p.now); p.deliver();
+  assert(!p.hip.feedbackLedOn(p.now) && !p.wrist.feedbackLedOn(p.now));
+  p.hip.clearLedFeedback(p.now); p.deliver(); // ExerciseNode's mode restart.
+  p.hip.showLedFeedback(LedFeedback::REP, p.now); p.deliver();
+  p.hip.standby(); p.deliver();
+  assert(!p.wrist.feedbackLedOn(p.now));
+  p.hip.activate(p.now); p.deliver(); // New activation session.
+  p.toWrist(rep); assert(!p.wrist.feedbackLedOn(p.now));
+  p.toWrist(oldActivation); p.deliver(); // Old retry cannot restore old LED binding.
+  p.toWrist(rep); assert(!p.wrist.feedbackLedOn(p.now));
+  p.hip.showLedFeedback(LedFeedback::REP, p.now); p.deliver();
+  assert(p.wrist.feedbackLedOn(p.now));
+  p.wrist.activate(p.now); p.deliver();
+  assert(!p.hip.feedbackLedOn(p.now) && !p.wrist.feedbackLedOn(p.now));
+  p.toWrist(rep); assert(!p.wrist.feedbackLedOn(p.now));
+  p.wrist.showLedFeedback(LedFeedback::REP, p.now); p.deliver();
+  assert(p.hip.feedbackLedOn(p.now));
+}
+
+void ledValidationRebootsAndWrap() {
+  Pair p;
+  p.hip.activate(0); p.deliver();
+  p.hip.showLedFeedback(LedFeedback::READY, 0);
+  const auto ready = fromHip.front(); fromHip.clear();
+  auto bad = ready; bad.targetBoot++; p.toWrist(bad);
+  bad = ready; bad.boot++; p.toWrist(bad);
+  bad = ready; bad.request++; p.toWrist(bad);
+  bad = ready; bad.mode = 99; p.toWrist(bad);
+  bad = ready; bad.sequence = 0; p.toWrist(bad);
+  assert(!p.wrist.feedbackLedOn(p.now));
+  p.toWrist(ready); assert(p.wrist.feedbackLedOn(p.now + 100));
+  p.wrist.begin(WRIST, 201);
+  p.toWrist(ready); assert(!p.wrist.feedbackLedOn(p.now));
+  p.hip.standby(); p.deliver();
+  p.now = UINT32_MAX - 100;
+  p.hip.activate(p.now); p.deliver();
+  p.hip.showLedFeedback(LedFeedback::REP, p.now); p.deliver();
+  assert(p.wrist.feedbackLedOn(p.now + 199));
+  assert(!p.wrist.feedbackLedOn(p.now + 200));
+  p.hip.showLedFeedback(LedFeedback::READY, p.now); p.deliver();
+  for (uint32_t offset : {100U, 300U, 500U}) {
+    assert(p.wrist.feedbackLedOn(p.now + offset));
+    assert(!p.wrist.feedbackLedOn(p.now + offset + 100));
+  }
+  p.wrist.standby();
+  assert(!p.wrist.feedbackLedOn(p.now));
+}
+
 // Exercise arbitrary delivery order, duplicates, drops, local cancellations and
 // reboots. Check exclusion after every event, not only after queues drain.
 void reorderedLossyTraffic() {
@@ -303,6 +408,9 @@ int main() {
   modeSyncAndRetries();
   modeFailuresAndStaleAcks();
   onlyActiveNodeCanSelectMode();
+  mirroredLedPulses();
+  ledOrderingClearingAndHandover();
+  ledValidationRebootsAndWrap();
   reorderedLossyTraffic();
-  puts("PASS: mode sync, duplicate/stale commands, mode timeout/retry, active-only mode selection, exclusive activation, reboots, local output, no heartbeats, timer wrap, 200000 lossy/reordered events");
+  puts("PASS: mirrored LEDs, LED ordering/clear/handover/reboot/loss/timers, mode sync, active-only mode selection, exclusive activation, reboots, local output, no heartbeats, timer wrap, 200000 lossy/reordered events");
 }

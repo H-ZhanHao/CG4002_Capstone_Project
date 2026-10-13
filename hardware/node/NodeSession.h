@@ -8,20 +8,29 @@ namespace LinkTiming {
   constexpr uint32_t REQUEST_TIMEOUT_MS = RETRY_MS * MAX_ATTEMPTS;
 }
 
-enum class PacketKind : uint8_t { DEACTIVATE = 1, STANDBY_ACK, SET_MODE, MODE_ACK };
+namespace LedTiming {
+  constexpr uint32_t READY_STEP_MS = 100;
+  constexpr uint32_t READY_BLINKS = 3;
+  constexpr uint32_t READY_MS = READY_STEP_MS * 2 * READY_BLINKS;
+  constexpr uint32_t REP_MS = 200;
+}
 
-// Only selection and mode commands travel over ESP-NOW. No sensor data or heartbeats.
+enum class LedFeedback : uint8_t { CLEAR = 1, READY, REP };
+enum class PacketKind : uint8_t { DEACTIVATE = 1, STANDBY_ACK, SET_MODE, MODE_ACK, LED_FEEDBACK };
+
+// Selection, mode and LED events only. No sensor samples or heartbeats.
 struct LinkPacket {
   uint32_t magic;
   uint32_t boot;
   uint32_t targetBoot;
   uint32_t request;
+  uint32_t sequence; // LED event order within the activation request; zero for commands.
   uint8_t version;
   PacketKind kind;
   uint8_t role;
-  uint8_t mode; // Zero for activation packets; CountingMode for mode packets.
+  uint8_t mode; // Zero for activation; CountingMode for mode; LedFeedback for LED events.
 };
-static_assert(sizeof(LinkPacket) == 20, "Keep control packets small and fixed-width");
+static_assert(sizeof(LinkPacket) == 24, "Keep control packets small and fixed-width");
 
 // All methods run in loop(), never in the Wi-Fi callbacks.
 class NodeSession {
@@ -39,6 +48,9 @@ class NodeSession {
   void update(uint32_t now);
   void status() const;
   bool consumeRestart();
+  void showLedFeedback(LedFeedback feedback, uint32_t now);
+  void clearLedFeedback(uint32_t now);
+  bool feedbackLedOn(uint32_t now) const;
   bool localActive() const { return state_ == State::ACTIVE; }
   bool waiting() const { return state_ == State::WAITING; }
   TelemetryData output(const TelemetryData& local) const;
@@ -58,6 +70,11 @@ class NodeSession {
   uint32_t peerModeBoot_ = 0, peerModeRequest_ = 0;
   uint8_t modeAttempts_ = 0;
   bool modePending_ = false, peerModeAccepted_ = false;
+  uint32_t activePeerBoot_ = 0, ledSendSequence_ = 0;
+  uint32_t ledPeerBoot_ = 0, ledPeerRequest_ = 0, ledReceiveSequence_ = 0;
+  uint32_t ledStartedAt_ = 0, ledDuration_ = 0;
+  bool ledReadyPattern_ = false;
+  void applyLedFeedback(LedFeedback feedback, uint32_t now);
   void applyMode(CountingMode mode);
   void requestMode(uint32_t now);
   void expireMode(uint32_t now);

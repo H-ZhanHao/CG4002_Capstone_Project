@@ -63,6 +63,44 @@ void ContinuousCounter::begin(
   lastDuration_ = 0;
 }
 
+ContinuousCalibration ContinuousCounter::calibration() const {
+  ContinuousCalibration result;
+  result.valid = calibrated_;
+  result.axis = axis_;
+  result.firstSign = firstSign_;
+  result.startGate = startGate_;
+  result.endGate = endGate_;
+  result.requiredAngle = requiredAngle_;
+  result.requiredPeak = requiredPeak_;
+  result.minDuration = minDuration_;
+  result.maxDuration = maxDuration_;
+  return result;
+}
+
+bool ContinuousCounter::restoreCalibration(const ContinuousCalibration& calibration) {
+  // begin() supplies the newly measured bias and clears all transient state.
+  if (!started_ || !calibration.valid || calibration.axis < 0 || calibration.axis > 2)
+    return false;
+  axis_ = calibration.axis;
+  firstSign_ = calibration.firstSign;
+  startGate_ = calibration.startGate;
+  endGate_ = calibration.endGate;
+  requiredAngle_ = calibration.requiredAngle;
+  requiredPeak_ = calibration.requiredPeak;
+  minDuration_ = calibration.minDuration;
+  maxDuration_ = calibration.maxDuration;
+  calibrated_ = true;
+  calibrationCount_ = 2;
+  repetitions_ = 0;
+  repEvent_ = false;
+  calibrationEvent_ = false;
+  phase_ = WAITING;
+  endSettling_ = false;
+  quietActive_ = false;
+  previousCycleEnded_ = false;
+  return true;
+}
+
 void ContinuousCounter::startCycle(unsigned long now) {
   phase_ = FIRST_DIRECTION;
 

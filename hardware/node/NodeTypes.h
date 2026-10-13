@@ -20,5 +20,5 @@ struct TelemetryData {
   uint8_t positioningSeen;
   uint8_t buzzer;
   uint8_t source;
-  uint8_t reserved;
+  uint8_t exercise;
 };

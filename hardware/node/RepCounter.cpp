@@ -44,6 +44,36 @@ void RepCounter::begin(
   repResult_ = REP_NO_RESULT;
 }
 
+PauseCalibration RepCounter::calibration() const {
+  PauseCalibration result;
+  result.valid = state_ == REP_COUNTING;
+  result.highThreshold = highThreshold_;
+  result.lowThreshold = lowThreshold_;
+  result.requiredPeak = requiredRepPeak_;
+  result.minDuration = minimumRepDuration_;
+  result.maxDuration = maximumRepDuration_;
+  return result;
+}
+
+bool RepCounter::restoreCalibration(const PauseCalibration& calibration) {
+  // A new stationary baseline must finish before movement limits are restored.
+  if (!calibration.valid || state_ != MOVEMENT_CALIBRATION) return false;
+  highThreshold_ = calibration.highThreshold;
+  lowThreshold_ = calibration.lowThreshold;
+  requiredRepPeak_ = calibration.requiredPeak;
+  minimumRepDuration_ = calibration.minDuration;
+  maximumRepDuration_ = calibration.maxDuration;
+  calibrationCount_ = GeneralConfig::REQUIRED_STABLE_REPS;
+  repetitionCount_ = 0;
+  repEvent_ = false;
+  calibrationEvent_ = false;
+  calibrationResult_ = CAL_NO_RESULT;
+  repResult_ = REP_NO_RESULT;
+  resetMovementCycle();
+  state_ = REP_COUNTING;
+  return true;
+}
+
 void RepCounter::update(
   float filteredMagnitude,
   unsigned long currentTime

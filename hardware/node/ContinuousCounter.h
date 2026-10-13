@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "ExerciseConfig.h"
+#include "ExerciseProfiles.h"
 
 class ContinuousCounter {
  public:
@@ -18,6 +19,8 @@ class ContinuousCounter {
   );
 
   bool consumeRepEvent();
+  ContinuousCalibration calibration() const;
+  bool restoreCalibration(const ContinuousCalibration& calibration);
   bool consumeCalibrationEvent();
 
   bool calibrated() const { return calibrated_; }

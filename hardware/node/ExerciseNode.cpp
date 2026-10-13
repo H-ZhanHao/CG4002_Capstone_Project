@@ -25,13 +25,15 @@ ExerciseSettings genericSettings = getGenericSettings();
 
 RepCounter repCounter(genericSettings);
 ContinuousCounter continuousCounter;
+ExerciseProfiles exerciseProfiles;
+ExerciseType activeExercise = SQUAT;
 
 FallDetector fallDetector;
 WirelessStreamer wirelessStreamer;
 
 void linkMessage(const char* text) { wirelessStreamer.message(text); }
 NodeSession nodeSession(NodeRadio::send, linkMessage);
-const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | MODE:PAUSE | MODE:CONTINUOUS | STATUS | HELP. Select Newline, then Send.";
+const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | STATUS | HELP. Select Newline, then Send.";
 
 bool wirelessStarted = false;
 
@@ -56,10 +58,7 @@ float gyroBaselineSum[3] = {};
 float gyroBias[3] = {};
 unsigned int gyroBaselineSamples = 0;
 
-// LED output.
-bool ledActive = false;
-unsigned long ledStartTime = 0;
-
+// Calibration feedback is local; ready/rep pulses are mirrored by NodeSession.
 bool calibrationLedOffPulse = false;
 unsigned long calibrationLedOffStartTime = 0;
 
@@ -121,12 +120,8 @@ void updateOutputTimers(unsigned long now) {
     }
   }
 
-  if (
-    ledActive &&
-    now - ledStartTime >= GeneralConfig::REP_LED_DURATION_MS
-  ) {
-    ledActive = false;
-    setLed(false);
+  if (nodeSession.localActive() && countingStarted) {
+    setLed(nodeSession.feedbackLedOn(now));
   }
 
   if (
@@ -164,15 +159,22 @@ void restartSession(unsigned long now) {
   restartBaseline(now);
   continuousCounter.begin(gyroBias, now, false);
 
-  ledActive = false;
+  nodeSession.clearLedFeedback(now);
   calibrationLedOffPulse = false;
-  ledStartTime = now;
   calibrationLedOffStartTime = now;
   setLed(false);
 
   lastSampleTime = micros();
   lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
   // Reset only the exercise session. Bluetooth and fall monitoring keep running.
+}
+
+void reportExercise() {
+  char message[160];
+  snprintf(message, sizeof(message), "[Exercise: %s | %s | Calibration: %s | Profiles kept on this board until reboot]",
+    exerciseName(activeExercise), activeMode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
+    exerciseProfiles.ready(activeExercise, activeMode) ? "saved" : "needed");
+  wirelessStreamer.message(message);
 }
 
 void processCommand(char* command, unsigned long now) {
@@ -198,12 +200,34 @@ void processCommand(char* command, unsigned long now) {
   }
   if (!strcmp(text, "STATUS")) {
     nodeSession.status();
+    reportExercise();
     wirelessStreamer.message(NodeRadio::ready() ? "[ESP-NOW configured and ready]"
       : "[ESP-NOW unavailable; check peer MAC configuration and USB boot messages]");
     return;
   }
   if (!strcmp(text, "#OVERFLOW")) {
     wirelessStreamer.message("ERROR: Command too long. Send HELP for commands.");
+    return;
+  }
+  if (!strcmp(text, "EXERCISES")) {
+    wirelessStreamer.message("Exercises: PUSHUP | SITUP | SQUAT | LUNGE | LEG_RAISE | JUMPING_JACK. Select with EXERCISE:<name> on this board.");
+    return;
+  }
+  if (!strncmp(text, "EXERCISE:", 9)) {
+    ExerciseType requestedExercise;
+    if (!parseExercise(text + 9, requestedExercise)) {
+      wirelessStreamer.message("ERROR: Unknown exercise. Send EXERCISES for names.");
+      return;
+    }
+    if (requestedExercise != activeExercise) {
+      if (nodeSession.waiting()) nodeSession.standby();
+      activeExercise = requestedExercise;
+      restartSession(now);
+      wirelessStreamer.message(nodeSession.localActive()
+        ? "[Exercise changed; move into position, then hold still for 3 seconds]"
+        : "[Exercise selected; still inactive. Send ACTIVATE to start]");
+    }
+    reportExercise();
     return;
   }
   if (!strcmp(text, "STANDBY") || !strcmp(text, "DEACTIVATE")) {
@@ -226,6 +250,7 @@ void processCommand(char* command, unsigned long now) {
 
   if (!strcmp(text, "RESET")) {
     if (nodeSession.waiting()) nodeSession.standby();
+    exerciseProfiles.clear(activeExercise, activeMode);
     restartSession(now);
     wirelessStreamer.message(nodeSession.localActive()
       ? "[Session reset; move into position, then hold still for 3 seconds]"
@@ -253,6 +278,8 @@ void processCommand(char* command, unsigned long now) {
 
   nodeSession.setMode(requested, now);
 }
+
+void startCounting(unsigned long now);
 
 void updateBaseline(
   const float gyro[3],
@@ -315,23 +342,31 @@ void updateBaseline(
     );
 
     calibrationLedOffPulse = false;
-    ledActive = false;
     setLed(true);
+    const bool restored = activeMode == PAUSE_MODE
+      ? repCounter.restoreCalibration(exerciseProfiles.pause(activeExercise))
+      : continuousCounter.restoreCalibration(exerciseProfiles.continuous(activeExercise));
+    if (restored) {
+      wirelessStreamer.message("[Saved exercise calibration restored; counting starts at zero]");
+      startCounting(now);
+    }
   }
 }
 
-void startCounting() {
+void startCounting(unsigned long now) {
   countingStarted = true;
 
   if (activeMode == PAUSE_MODE) {
     repetitionOffset = repCounter.repetitionCount();
+    exerciseProfiles.pause(activeExercise) = repCounter.calibration();
   } else {
     repetitionOffset = continuousCounter.repetitionCount();
+    exerciseProfiles.continuous(activeExercise) = continuousCounter.calibration();
   }
 
   calibrationLedOffPulse = false;
-  ledActive = false;
-  setLed(false);
+  nodeSession.showLedFeedback(LedFeedback::READY, now);
+  setLed(nodeSession.feedbackLedOn(now));
 }
 
 void reportCalibrationResult(CalibrationResult result) {
@@ -449,7 +484,7 @@ void processMovement(
       (activeMode == PAUSE_MODE && pauseReady) ||
       (activeMode == CONTINUOUS_MODE && continuousReady)
     ) {
-      startCounting();
+      startCounting(now);
       return;
     }
 
@@ -467,8 +502,7 @@ void processMovement(
     (activeMode == CONTINUOUS_MODE && continuousRepEvent);
 
   if (countedRep) {
-    ledActive = true;
-    ledStartTime = now;
+    nodeSession.showLedFeedback(LedFeedback::REP, now);
     setLed(true);
   }
 }
@@ -485,6 +519,7 @@ TelemetryData makeTelemetry() {
 
   data.repState = sessionState();
   data.mode = (int)activeMode;
+  data.exercise = (uint8_t)activeExercise;
   data.gyroAxis = continuousCounter.axis();
   data.pauseMotion = repCounter.motionSignal();
   data.pausePeak = repCounter.currentMovementPeak();
@@ -498,6 +533,7 @@ TelemetryData makeTelemetry() {
 
 void begin(NodeRole role) {
   nodeRole = role;
+  activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
   Serial.begin(115200);
 
   pinMode(GeneralConfig::LED_PIN, OUTPUT);
@@ -547,6 +583,7 @@ void begin(NodeRole role) {
 
   wirelessStreamer.message(commandHelp);
   nodeSession.status();
+  reportExercise();
 
   lastSampleTime = micros();
   lastUsbOutputTime = now;
@@ -576,9 +613,8 @@ void update() {
     restartSession(now);
   }
   if (!nodeSession.localActive()) {
-    ledActive = false;
     calibrationLedOffPulse = false;
-    setLed(false);
+    setLed(nodeSession.feedbackLedOn(now));
   }
 
   const unsigned long sampleTime = micros();
@@ -671,6 +707,7 @@ void update() {
     wirelessStreamer.update(data, now);
     if (wirelessStreamer.consumeConnectionEvent()) {
       nodeSession.status();
+      reportExercise();
       if (!NodeRadio::ready()) wirelessStreamer.message("[ESP-NOW unavailable; configure peer MACs. Send STATUS for details.]");
     }
   }
