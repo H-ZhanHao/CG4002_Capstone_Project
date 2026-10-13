@@ -40,6 +40,9 @@ class NodeSession {
   NodeSession(Send send, Log log);
   void begin(NodeRole role, uint32_t boot, CountingMode mode = PAUSE_MODE);
   void setMode(CountingMode mode, uint32_t now);
+  // Called only for a changed exercise. Queue in standby, sync when active.
+  void selectExerciseMode(CountingMode mode, uint32_t now);
+  CountingMode selectedMode() const { return selectedMode_; }
   CountingMode mode() const { return mode_; }
   bool modePending() const { return modePending_; }
   void activate(uint32_t now);
@@ -66,6 +69,8 @@ class NodeSession {
   uint8_t attempts_ = 0;
   bool restart_ = false;
   CountingMode mode_ = PAUSE_MODE;
+  // Local exercise preference/override survives the peer's synchronized mode.
+  CountingMode selectedMode_ = PAUSE_MODE;
   uint32_t modeRequest_ = 0, modeRequestedAt_ = 0, modeLastAttempt_ = 0;
   uint32_t peerModeBoot_ = 0, peerModeRequest_ = 0;
   uint8_t modeAttempts_ = 0;

@@ -44,6 +44,12 @@ void RepCounter::begin(
   repResult_ = REP_NO_RESULT;
 }
 
+bool RepCounter::loadPreset(const PauseCalibration& preset) {
+  if (!restoreCalibration(preset)) return false;
+  calibrationCount_ = 0; // No movements were used for calibration.
+  return true;
+}
+
 PauseCalibration RepCounter::calibration() const {
   PauseCalibration result;
   result.valid = state_ == REP_COUNTING;

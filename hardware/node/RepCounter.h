@@ -39,6 +39,7 @@ class RepCounter {
   void begin(unsigned long currentTime);
   PauseCalibration calibration() const;
   bool restoreCalibration(const PauseCalibration& calibration);
+  bool loadPreset(const PauseCalibration& preset);
 
   void update(
     float filteredMagnitude,

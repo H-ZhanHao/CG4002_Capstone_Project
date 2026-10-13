@@ -86,14 +86,7 @@ namespace GeneralConfig {
 }
 
 namespace ModeConfig {
-  // Default after power-on or hardware reset. USB/Bluetooth commands
-  // MODE:PAUSE and MODE:CONTINUOUS can change it until the next reboot.
-  constexpr CountingMode REQUESTED_MODE = PAUSE_MODE;
-  static_assert(
-    REQUESTED_MODE == PAUSE_MODE || REQUESTED_MODE == CONTINUOUS_MODE,
-    "Select PAUSE_MODE or CONTINUOUS_MODE"
-  );
-
+  // Exercise defaults live in ExercisePresets.h; MODE commands override them.
   // Stillness gate used during continuous-counter calibration.
   constexpr float QUIET_GYRO_LIMIT = 0.20f;
 }

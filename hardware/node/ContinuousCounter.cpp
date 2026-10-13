@@ -63,6 +63,18 @@ void ContinuousCounter::begin(
   lastDuration_ = 0;
 }
 
+void ContinuousCounter::beginPreset(const float gyroBias[3], unsigned long now,
+                                    const ContinuousCalibration& preset) {
+  begin(gyroBias, now, false);
+  startGate_ = preset.startGate;
+  endGate_ = preset.endGate;
+  requiredAngle_ = preset.requiredAngle;
+  requiredPeak_ = preset.requiredPeak;
+  minDuration_ = preset.minDuration;
+  maxDuration_ = preset.maxDuration;
+  calibrated_ = true; // Count the first valid cycle after axis discovery.
+}
+
 ContinuousCalibration ContinuousCounter::calibration() const {
   ContinuousCalibration result;
   result.valid = calibrated_;

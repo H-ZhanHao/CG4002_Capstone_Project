@@ -18,6 +18,10 @@ class ContinuousCounter {
     unsigned long now
   );
 
+  // Fixed limits with fresh bias and automatic axis/direction discovery.
+  void beginPreset(const float gyroBias[3], unsigned long now,
+                   const ContinuousCalibration& preset);
+
   bool consumeRepEvent();
   ContinuousCalibration calibration() const;
   bool restoreCalibration(const ContinuousCalibration& calibration);

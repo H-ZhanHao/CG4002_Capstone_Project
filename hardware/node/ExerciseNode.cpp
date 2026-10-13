@@ -11,6 +11,7 @@
 #include "ExerciseConfig.h"
 #include "RepCounter.h"
 #include "ContinuousCounter.h"
+#include "ExercisePresets.h"
 #include "FallDetector.h"
 #include "WirelessStreamer.h"
 #include "NodeRadio.h"
@@ -25,7 +26,6 @@ ExerciseSettings genericSettings = getGenericSettings();
 
 RepCounter repCounter(genericSettings);
 ContinuousCounter continuousCounter;
-ExerciseProfiles exerciseProfiles;
 ExerciseType activeExercise = SQUAT;
 
 FallDetector fallDetector;
@@ -37,11 +37,8 @@ const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name
 
 bool wirelessStarted = false;
 
-CountingMode activeMode = ModeConfig::REQUESTED_MODE;
+CountingMode activeMode = PAUSE_MODE;
 bool countingStarted = false;
-
-// Exclude calibration cycles from the displayed count.
-int repetitionOffset = 0;
 
 unsigned long lastSampleTime = 0;
 unsigned long lastUsbOutputTime = 0;
@@ -57,10 +54,6 @@ float previousFilteredMagnitude = 0.0f;
 float gyroBaselineSum[3] = {};
 float gyroBias[3] = {};
 unsigned int gyroBaselineSamples = 0;
-
-// Calibration feedback is local; ready/rep pulses are mirrored by NodeSession.
-bool calibrationLedOffPulse = false;
-unsigned long calibrationLedOffStartTime = 0;
 
 // Buzzer output.
 bool buzzerActive = false;
@@ -78,17 +71,8 @@ int sessionState() {
     return 0;
   }
 
-  return countingStarted ? 2 : 1;
-}
-
-int calibrationProgress() {
-  if (sessionState() == 0) {
-    return 0;
-  }
-
-  return activeMode == PAUSE_MODE
-    ? repCounter.calibrationCount()
-    : continuousCounter.calibrationCount();
+  return countingStarted &&
+    (activeMode == PAUSE_MODE || continuousCounter.axis() >= 0) ? 2 : 1;
 }
 
 int reportedRepetitions() {
@@ -97,29 +81,17 @@ int reportedRepetitions() {
   }
 
   if (activeMode == PAUSE_MODE) {
-    return repCounter.repetitionCount() - repetitionOffset;
+    return repCounter.repetitionCount();
   }
 
   if (activeMode == CONTINUOUS_MODE) {
-    return continuousCounter.repetitionCount() - repetitionOffset;
+    return continuousCounter.repetitionCount();
   }
 
   return 0;
 }
 
 void updateOutputTimers(unsigned long now) {
-  if (
-    calibrationLedOffPulse &&
-    now - calibrationLedOffStartTime >=
-      GeneralConfig::CALIBRATION_LED_OFF_MS
-  ) {
-    calibrationLedOffPulse = false;
-
-    if (nodeSession.localActive() && sessionState() == 1) {
-      setLed(true);
-    }
-  }
-
   if (nodeSession.localActive() && countingStarted) {
     setLed(nodeSession.feedbackLedOn(now));
   }
@@ -145,7 +117,6 @@ void restartBaseline(unsigned long now) {
 
 void restartSession(unsigned long now) {
   countingStarted = false;
-  repetitionOffset = 0;
   filteredMagnitude = 0.0f;
   filterInitialised = false;
   positioningMovementSeen = false;
@@ -160,8 +131,6 @@ void restartSession(unsigned long now) {
   continuousCounter.begin(gyroBias, now, false);
 
   nodeSession.clearLedFeedback(now);
-  calibrationLedOffPulse = false;
-  calibrationLedOffStartTime = now;
   setLed(false);
 
   lastSampleTime = micros();
@@ -171,9 +140,10 @@ void restartSession(unsigned long now) {
 
 void reportExercise() {
   char message[160];
-  snprintf(message, sizeof(message), "[Exercise: %s | %s | Calibration: %s | Profiles kept on this board until reboot]",
-    exerciseName(activeExercise), activeMode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
-    exerciseProfiles.ready(activeExercise, activeMode) ? "saved" : "needed");
+  const CountingMode selectedMode = nodeSession.selectedMode();
+  snprintf(message, sizeof(message), "[Exercise: %s | %s | Preset: %s | No calibration reps]",
+    exerciseName(activeExercise), selectedMode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
+    selectedMode == PAUSE_MODE ? ExercisePresets::get(activeExercise).description : "mock gyro limits");
   wirelessStreamer.message(message);
 }
 
@@ -210,7 +180,9 @@ void processCommand(char* command, unsigned long now) {
     return;
   }
   if (!strcmp(text, "EXERCISES")) {
-    wirelessStreamer.message("Exercises: PUSHUP | SITUP | SQUAT | LUNGE | LEG_RAISE | JUMPING_JACK. Select with EXERCISE:<name> on this board.");
+    wirelessStreamer.message(nodeRole == HIP
+      ? "HIP exercises: PUSHUP | SQUAT | LUNGE | LEG_RAISE. Select with EXERCISE:<name>. SITUP/JUMPING_JACK use WRIST."
+      : "WRIST exercises: SITUP | JUMPING_JACK. Select with EXERCISE:<name>. Other exercises use HIP.");
     return;
   }
   if (!strncmp(text, "EXERCISE:", 9)) {
@@ -219,10 +191,15 @@ void processCommand(char* command, unsigned long now) {
       wirelessStreamer.message("ERROR: Unknown exercise. Send EXERCISES for names.");
       return;
     }
+    if (!ExercisePresets::allowed(nodeRole, requestedExercise)) {
+      wirelessStreamer.message(nodeRole == HIP
+        ? "ERROR: This exercise uses WRIST. Select it and send ACTIVATE in the ExerciseWrist monitor."
+        : "ERROR: This exercise uses HIP. Select it and send ACTIVATE in the ExerciseHip monitor.");
+      return;
+    }
     if (requestedExercise != activeExercise) {
-      if (nodeSession.waiting()) nodeSession.standby();
       activeExercise = requestedExercise;
-      restartSession(now);
+      nodeSession.selectExerciseMode(ExercisePresets::defaultMode(activeExercise), now);
       wirelessStreamer.message(nodeSession.localActive()
         ? "[Exercise changed; move into position, then hold still for 3 seconds]"
         : "[Exercise selected; still inactive. Send ACTIVATE to start]");
@@ -250,7 +227,6 @@ void processCommand(char* command, unsigned long now) {
 
   if (!strcmp(text, "RESET")) {
     if (nodeSession.waiting()) nodeSession.standby();
-    exerciseProfiles.clear(activeExercise, activeMode);
     restartSession(now);
     wirelessStreamer.message(nodeSession.localActive()
       ? "[Session reset; move into position, then hold still for 3 seconds]"
@@ -335,70 +311,23 @@ void updateBaseline(
         gyroBaselineSum[i] / gyroBaselineSamples;
     }
 
-    continuousCounter.begin(
-      gyroBias,
-      now,
-      false
-    );
-
-    calibrationLedOffPulse = false;
-    setLed(true);
-    const bool restored = activeMode == PAUSE_MODE
-      ? repCounter.restoreCalibration(exerciseProfiles.pause(activeExercise))
-      : continuousCounter.restoreCalibration(exerciseProfiles.continuous(activeExercise));
-    if (restored) {
-      wirelessStreamer.message("[Saved exercise calibration restored; counting starts at zero]");
-      startCounting(now);
+    if (activeMode == PAUSE_MODE) {
+      if (!repCounter.loadPreset(ExercisePresets::pause(activeExercise))) return;
+    } else {
+      continuousCounter.beginPreset(gyroBias, now, ExercisePresets::continuous(activeExercise));
     }
+    wirelessStreamer.message(activeMode == PAUSE_MODE
+      ? "[Fixed preset loaded; counting starts at zero. Pause briefly between reps.]"
+      : "[Mock gyro preset loaded; start moving to find the axis. Initial movement may not count.]");
+    startCounting(now);
   }
 }
 
 void startCounting(unsigned long now) {
   countingStarted = true;
 
-  if (activeMode == PAUSE_MODE) {
-    repetitionOffset = repCounter.repetitionCount();
-    exerciseProfiles.pause(activeExercise) = repCounter.calibration();
-  } else {
-    repetitionOffset = continuousCounter.repetitionCount();
-    exerciseProfiles.continuous(activeExercise) = continuousCounter.calibration();
-  }
-
-  calibrationLedOffPulse = false;
   nodeSession.showLedFeedback(LedFeedback::READY, now);
   setLed(nodeSession.feedbackLedOn(now));
-}
-
-void reportCalibrationResult(CalibrationResult result) {
-  if (result == CAL_NO_RESULT) {
-    return;
-  }
-
-  const char* reason = "";
-  switch (result) {
-    case CAL_TOO_SHORT: reason = "REJECTED: movement too short"; break;
-    case CAL_TOO_LONG: reason = "REJECTED: timeout; no completed rep with a pause"; break;
-    case CAL_TOO_WEAK: reason = "REJECTED: movement peak too weak"; break;
-    case CAL_MISMATCH: reason = "REJECTED PAIR: peaks or durations differ; keeping latest rep"; break;
-    case CAL_ACCEPTED: reason = "First candidate accepted; repeat at the same pace"; break;
-    case CAL_FINISHED: reason = "Two matching candidates accepted; counting starts at zero"; break;
-    default: return;
-  }
-
-  char message[192];
-  snprintf(message, sizeof(message), "CAL: %s | Peak: %.2f m/s2 | Time: %.2f s",
-    reason, repCounter.lastCompletedPeak(),
-    repCounter.lastCompletedDuration() / 1000.0f);
-  wirelessStreamer.message(message);
-
-  if (result == CAL_FINISHED) {
-    snprintf(message, sizeof(message),
-      "PAUSE limits: Start > %.2f | Peak >= %.2f m/s2 | Time: %.2f-%.2f s (includes end pause)",
-      repCounter.highThreshold(), repCounter.requiredRepPeak(),
-      repCounter.minimumRepDuration() / 1000.0f,
-      repCounter.maximumRepDuration() / 1000.0f);
-    wirelessStreamer.message(message);
-  }
 }
 
 void reportRepResult(RepResult result) {
@@ -452,7 +381,6 @@ void processMovement(
 
   if (activeMode == PAUSE_MODE) {
     repCounter.update(filteredMagnitude, now);
-    reportCalibrationResult(repCounter.consumeCalibrationResult());
     reportRepResult(repCounter.consumeRepResult());
   }
 
@@ -460,42 +388,11 @@ void processMovement(
     continuousCounter.update(gyro, stationary, now);
   }
 
-  // Always consume each event separately.
-  const bool pauseCalibrationEvent =
-    repCounter.consumeCalibrationEvent();
-
-  const bool continuousCalibrationEvent =
-    continuousCounter.consumeCalibrationEvent();
-
   const bool pauseRepEvent =
     repCounter.consumeRepEvent();
 
   const bool continuousRepEvent =
     continuousCounter.consumeRepEvent();
-
-  if (!countingStarted) {
-    const bool pauseReady =
-      repCounter.state() == REP_COUNTING;
-
-    const bool continuousReady =
-      continuousCounter.calibrated();
-
-    if (
-      (activeMode == PAUSE_MODE && pauseReady) ||
-      (activeMode == CONTINUOUS_MODE && continuousReady)
-    ) {
-      startCounting(now);
-      return;
-    }
-
-    if (pauseCalibrationEvent || continuousCalibrationEvent) {
-      calibrationLedOffPulse = true;
-      calibrationLedOffStartTime = now;
-      setLed(false);
-    }
-
-    return;
-  }
 
   const bool countedRep =
     (activeMode == PAUSE_MODE && pauseRepEvent) ||
@@ -512,13 +409,12 @@ TelemetryData makeTelemetry() {
 
   data.uptimeMs = millis();
   data.reps = reportedRepetitions();
-  data.calibrationReps = calibrationProgress();
-  data.calibrationTarget = activeMode == PAUSE_MODE
-    ? GeneralConfig::REQUIRED_STABLE_REPS
-    : 2;
+  data.calibrationReps = 0;
+  data.calibrationTarget = 0;
 
   data.repState = sessionState();
   data.mode = (int)activeMode;
+  if (!nodeSession.localActive()) data.mode = (int)nodeSession.selectedMode();
   data.exercise = (uint8_t)activeExercise;
   data.gyroAxis = continuousCounter.axis();
   data.pauseMotion = repCounter.motionSignal();
@@ -534,6 +430,7 @@ TelemetryData makeTelemetry() {
 void begin(NodeRole role) {
   nodeRole = role;
   activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
+  activeMode = ExercisePresets::defaultMode(activeExercise);
   Serial.begin(115200);
 
   pinMode(GeneralConfig::LED_PIN, OUTPUT);
@@ -613,7 +510,6 @@ void update() {
     restartSession(now);
   }
   if (!nodeSession.localActive()) {
-    calibrationLedOffPulse = false;
     setLed(nodeSession.feedbackLedOn(now));
   }
 

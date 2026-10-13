@@ -247,7 +247,8 @@ void onlyActiveNodeCanSelectMode() {
   p.toWrist(oldMode); // Old peer command cannot change the newly active node.
   assert(p.wrist.mode() == PAUSE_MODE && !p.wrist.consumeRestart());
   p.hip.setMode(PAUSE_MODE, 0);
-  assert(fromHip.empty() && p.hip.mode() == CONTINUOUS_MODE);
+  // Wrist activation has now automatically synchronized its selected PAUSE.
+  assert(fromHip.empty() && p.hip.mode() == PAUSE_MODE);
   p.wrist.setMode(PAUSE_MODE, 0); p.deliver();
   assert(p.hip.mode() == PAUSE_MODE && !p.wrist.modePending());
   p.wrist.setMode(CONTINUOUS_MODE, 0); fromWrist.clear();
@@ -258,6 +259,83 @@ void onlyActiveNodeCanSelectMode() {
   p.tick(p.now + LinkTiming::REQUEST_TIMEOUT_MS);
   p.hip.setMode(CONTINUOUS_MODE, p.now); // Failed activation is not active.
   assert(fromHip.empty() && p.hip.mode() == PAUSE_MODE);
+}
+
+void exerciseDefaultsAndOverrides() {
+  Pair p;
+  p.wrist.begin(WRIST, 200, CONTINUOUS_MODE); // Default wrist exercise: jacks.
+  p.hip.activate(0); p.deliver();
+  p.hip.consumeRestart(); p.wrist.consumeRestart();
+  assert(p.wrist.mode() == PAUSE_MODE); // Peer sync is separate from preference.
+  assert(p.wrist.selectedMode() == CONTINUOUS_MODE);
+  p.wrist.activate(0); p.deliver();
+  assert(p.wrist.mode() == CONTINUOUS_MODE && p.hip.mode() == CONTINUOUS_MODE);
+  assert(p.wrist.consumeRestart() && !p.wrist.consumeRestart());
+  p.hip.consumeRestart();
+  assert(p.hip.selectedMode() == PAUSE_MODE && !p.wrist.modePending());
+
+  // Active exercise change to sit-ups: default mode and one restart.
+  p.wrist.selectExerciseMode(PAUSE_MODE, 0); p.deliver();
+  assert(p.wrist.localActive() && p.wrist.mode() == PAUSE_MODE);
+  assert(p.wrist.consumeRestart() && !p.wrist.consumeRestart());
+  p.hip.consumeRestart();
+  p.wrist.selectExerciseMode(PAUSE_MODE, 0); p.deliver();
+  assert(p.wrist.consumeRestart() && !p.wrist.consumeRestart());
+  assert(!p.hip.consumeRestart()); // Same mode does not restart the peer.
+
+  // Manual override persists across handover and RESET (no preference change).
+  p.wrist.setMode(CONTINUOUS_MODE, 0); p.deliver();
+  assert(p.wrist.selectedMode() == CONTINUOUS_MODE);
+  p.hip.activate(0); p.deliver();
+  assert(p.wrist.mode() == PAUSE_MODE && p.wrist.selectedMode() == CONTINUOUS_MODE);
+  p.wrist.setMode(PAUSE_MODE, 0); // Inactive manual command cannot erase override.
+  assert(p.wrist.selectedMode() == CONTINUOUS_MODE && fromWrist.empty());
+  p.wrist.activate(0); p.deliver();
+  assert(p.wrist.mode() == CONTINUOUS_MODE);
+
+  p.hip.activate(0); p.deliver();
+  p.wrist.consumeRestart();
+  p.wrist.selectExerciseMode(PAUSE_MODE, 0); // Changed exercise in standby.
+  assert(!p.wrist.localActive() && !p.wrist.waiting());
+  assert(p.wrist.selectedMode() == PAUSE_MODE && fromWrist.empty());
+  assert(p.wrist.consumeRestart() && !p.wrist.consumeRestart());
+  p.hip.setMode(CONTINUOUS_MODE, 0); p.deliver();
+  assert(p.wrist.mode() == CONTINUOUS_MODE && p.wrist.selectedMode() == PAUSE_MODE);
+  p.wrist.activate(0); p.deliver();
+  assert(p.wrist.mode() == PAUSE_MODE && p.hip.mode() == PAUSE_MODE);
+}
+
+void queuedExerciseModeFailures() {
+  Pair p;
+  p.wrist.selectExerciseMode(CONTINUOUS_MODE, 0);
+  assert(p.wrist.mode() == PAUSE_MODE && !p.wrist.modePending());
+  assert(fromWrist.empty()); // Selecting in standby sends no mode packets.
+  p.wrist.consumeRestart();
+  p.wrist.activate(0);
+  p.toHip(fromWrist.front()); fromWrist.clear();
+  const auto staleAck = fromHip.front(); fromHip.clear();
+  p.wrist.selectExerciseMode(PAUSE_MODE, 0); // Cancels pending activation.
+  p.wrist.consumeRestart();
+  p.toWrist(staleAck);
+  assert(!p.wrist.localActive() && !p.wrist.waiting() && fromWrist.empty());
+  assert(!p.wrist.consumeRestart());
+
+  p.wrist.selectExerciseMode(CONTINUOUS_MODE, 0);
+  p.wrist.activate(0); fromWrist.clear();
+  p.tick(LinkTiming::REQUEST_TIMEOUT_MS);
+  assert(!p.wrist.localActive() && !p.wrist.modePending() && fromWrist.empty());
+  assert(p.wrist.selectedMode() == CONTINUOUS_MODE); // Retained for retry.
+  p.wrist.activate(p.now);
+  p.toHip(fromWrist.front()); fromWrist.clear();
+  p.toWrist(fromHip.front()); fromHip.clear();
+  assert(p.wrist.localActive() && p.wrist.mode() == CONTINUOUS_MODE);
+  assert(p.wrist.modePending() && fromWrist.size() == 1);
+  assert(fromWrist.front().kind == PacketKind::SET_MODE);
+  assert(p.wrist.consumeRestart() && !p.wrist.consumeRestart());
+  fromWrist.clear(); // Lost automatic sync; retry succeeds without a restart.
+  p.tick(p.now + LinkTiming::RETRY_MS); p.deliver();
+  assert(!p.wrist.modePending() && !p.wrist.consumeRestart());
+  assert(p.hip.mode() == CONTINUOUS_MODE);
 }
 
 void mirroredLedPulses() {
@@ -408,6 +486,8 @@ int main() {
   modeSyncAndRetries();
   modeFailuresAndStaleAcks();
   onlyActiveNodeCanSelectMode();
+  exerciseDefaultsAndOverrides();
+  queuedExerciseModeFailures();
   mirroredLedPulses();
   ledOrderingClearingAndHandover();
   ledValidationRebootsAndWrap();

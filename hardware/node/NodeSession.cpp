@@ -16,6 +16,7 @@ void NodeSession::begin(NodeRole role, uint32_t boot, CountingMode mode) {
   state_ = State::STANDBY;
   restart_ = false;
   mode_ = mode;
+  selectedMode_ = mode;
   modeRequest_ = modeRequestedAt_ = modeLastAttempt_ = 0;
   peerModeBoot_ = peerModeRequest_ = 0;
   modeAttempts_ = 0;
@@ -74,6 +75,7 @@ void NodeSession::setMode(CountingMode mode, uint32_t now) {
     log_("[Mode command rejected: use the active node's monitor, or ACTIVATE this node first]");
     return;
   }
+  selectedMode_ = mode;
   applyMode(mode);
   ++modeRequest_;
   if (!modeRequest_) ++modeRequest_;
@@ -82,6 +84,16 @@ void NodeSession::setMode(CountingMode mode, uint32_t now) {
   modePending_ = true;
   log_("[Mode sync requested; waiting for peer acknowledgement]");
   requestMode(now);
+}
+
+void NodeSession::selectExerciseMode(CountingMode mode, uint32_t now) {
+  if (mode != PAUSE_MODE && mode != CONTINUOUS_MODE) return;
+  if (waiting()) standby();
+  selectedMode_ = mode;
+  if (localActive()) setMode(mode, now);
+  // An exercise change resets the counter even when its mode is unchanged.
+  // Coalesce the exercise and mode changes into one baseline restart.
+  restart_ = true;
 }
 
 void NodeSession::requestMode(uint32_t now) {
@@ -113,7 +125,7 @@ LinkPacket NodeSession::packet(PacketKind kind, uint32_t request, uint32_t targe
 void NodeSession::activate(uint32_t now) {
   expire(now);
   if (localActive()) {
-    log_("[Already active; send RESET to restart calibration]");
+    log_("[Already active; send RESET to clear reps and restart baseline]");
     return;
   }
   if (waiting()) {
@@ -240,8 +252,11 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
     activePeerBoot_ = p.boot;
     ledDuration_ = 0;
     restart_ = true;
-    log_(role_ == HIP ? "[Hip active; wrist acknowledged standby. Starting calibration]"
-                     : "[Wrist active; hip acknowledged standby. Starting calibration]");
+    log_(role_ == HIP ? "[Hip active; wrist acknowledged standby. Starting baseline]"
+                     : "[Wrist active; hip acknowledged standby. Starting baseline]");
+    // Apply only after the peer acknowledges standby. Even equal modes must
+    // synchronize: the peer may have rebooted or missed the previous update.
+    setMode(selectedMode_, now);
   }
 }
 
@@ -272,7 +287,12 @@ TelemetryData NodeSession::output(const TelemetryData& local) const {
 
 void NodeSession::status() const {
   log_(role_ == HIP ? "[Role: HIP]" : "[Role: WRIST]");
-  log_(mode_ == PAUSE_MODE ? "[Mode: PAUSE]" : "[Mode: CONTINUOUS]");
+  if (localActive()) {
+    log_(mode_ == PAUSE_MODE ? "[Mode: PAUSE]" : "[Mode: CONTINUOUS]");
+  } else {
+    log_(selectedMode_ == PAUSE_MODE ? "[Mode on activation: PAUSE]"
+                                   : "[Mode on activation: CONTINUOUS]");
+  }
   if (modePending_) log_("[Mode sync pending]");
   if (localActive()) log_("[Active | Other node acknowledged standby at activation]");
   else if (waiting()) log_("[Waiting for peer standby acknowledgement]");

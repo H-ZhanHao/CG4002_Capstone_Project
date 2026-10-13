@@ -19,20 +19,7 @@ namespace {
         ? "Hold still for 3 seconds"
         : "Move into your starting position");
     } else if (data.repState == 1) {
-      const char* instruction = data.mode == PAUSE_MODE
-        ? "Repeat evenly; pause between reps"
-        : data.gyroAxis < 0
-          ? "Start moving to learn the movement axis"
-          : "Repeat evenly at a steady pace";
-      if (data.mode == PAUSE_MODE) {
-        snprintf(status, sizeof(status),
-          "CALIBRATING: %d/%d | Motion: %.2f | Peak: %.2f m/s2 | Reps: -- | %s",
-          data.calibrationReps, data.calibrationTarget,
-          data.pauseMotion, data.pausePeak, instruction);
-      } else {
-        snprintf(status, sizeof(status), "CALIBRATING: %d/%d | Reps: -- | %s",
-          data.calibrationReps, data.calibrationTarget, instruction);
-      }
+      snprintf(status, sizeof(status), "FINDING AXIS | Reps: 0 | Start moving; initial movement may not count");
     } else {
       if (data.mode == PAUSE_MODE) {
         snprintf(status, sizeof(status),
