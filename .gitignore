@@ -1,1 +1,6 @@
 .build/
+.pio/
+sdkconfig.node*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/.browse.c_cpp.db*

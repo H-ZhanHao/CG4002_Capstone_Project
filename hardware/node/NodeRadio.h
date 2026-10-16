@@ -2,7 +2,7 @@
 
 #include "NodeSession.h"
 
-// Callbacks only copy packets to queues. Session logic and printing stay in loop().
+// Callbacks only copy packets to queues. Session logic stays in the main task.
 namespace NodeRadio {
   bool begin(NodeRole role);
   bool ready();

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
 #include "ExerciseConfig.h"
 #include "ExerciseProfiles.h"
 

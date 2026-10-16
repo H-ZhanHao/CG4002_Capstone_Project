@@ -1,10 +1,9 @@
 #pragma once
 
-#include <Arduino.h>
-#include <BluetoothSerial.h>
+#include "NodePlatform.h"
 #include "ExerciseConfig.h"
 
-void printTelemetry(Print& output, const TelemetryData& data);
+void printTelemetry(NodeStream& output, const TelemetryData& data);
 
 class WirelessStreamer {
  public:
@@ -22,7 +21,8 @@ class WirelessStreamer {
     bool overflow = false;
   };
 
-  BluetoothSerial bluetooth_;
+  BluetoothSpp bluetooth_;
+  uint32_t bluetoothSession_ = 0;
   unsigned long lastOutputTime_;
   bool wasConnected_ = false;
   bool started_ = false;
@@ -30,6 +30,6 @@ class WirelessStreamer {
   CommandBuffer usbInput_;
   CommandBuffer bluetoothInput_;
 
-  bool readCommand(Stream& input, CommandBuffer& buffer,
+  bool readCommand(NodeStream& input, CommandBuffer& buffer,
                    char* destination, size_t capacity);
 };

@@ -1,11 +1,11 @@
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
-#include <Wire.h>
+#include "Mpu6050.h"
+#include "NodePlatform.h"
 #include <math.h>
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
 #include <esp_system.h>
+#include <esp_random.h>
 
 #include "ExerciseNode.h"
 #include "ExerciseConfig.h"
@@ -19,8 +19,13 @@
 
 namespace ExerciseNode {
 
+using NodePlatform::millis;
+using NodePlatform::micros;
+using NodePlatform::delayMs;
+using NodePlatform::writePin;
+
 NodeRole nodeRole = HIP;
-Adafruit_MPU6050 mpu;
+Mpu6050 mpu;
 
 ExerciseSettings genericSettings = getGenericSettings();
 
@@ -60,7 +65,7 @@ bool buzzerActive = false;
 unsigned long buzzerStartTime = 0;
 
 void setLed(bool on) {
-  digitalWrite(
+  writePin(
     GeneralConfig::LED_PIN,
     on ? GeneralConfig::LED_ON : GeneralConfig::LED_OFF
   );
@@ -100,7 +105,7 @@ void updateOutputTimers(unsigned long now) {
     buzzerActive &&
     now - buzzerStartTime >= FallConfig::BUZZER_DURATION_MS
   ) {
-    digitalWrite(FallConfig::BUZZER_PIN, LOW);
+    writePin(FallConfig::BUZZER_PIN, 0);
     buzzerActive = false;
   }
 }
@@ -431,45 +436,41 @@ void begin(NodeRole role) {
   nodeRole = role;
   activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
   activeMode = ExercisePresets::defaultMode(activeExercise);
-  Serial.begin(115200);
+  usbConsole.begin(115200);
 
-  pinMode(GeneralConfig::LED_PIN, OUTPUT);
+  NodePlatform::outputPin(GeneralConfig::LED_PIN);
   setLed(false);
 
   if (nodeRole == HIP) {
-    pinMode(FallConfig::BUZZER_PIN, OUTPUT);
-    digitalWrite(FallConfig::BUZZER_PIN, LOW);
+    NodePlatform::outputPin(FallConfig::BUZZER_PIN);
+    writePin(FallConfig::BUZZER_PIN, 0);
   }
 
-  delay(1000);
-  Serial.println(nodeRole == HIP ? "[BOOT] Hip restarting; standby until ACTIVATE."
+  delayMs(1000);
+  usbConsole.println(nodeRole == HIP ? "[BOOT] Hip restarting; standby until ACTIVATE."
                                 : "[BOOT] Wrist restarting; standby until ACTIVATE.");
 
   // Print the STA MAC even during initial provisioning (before MPU checks).
-  if (!NodeRadio::begin(nodeRole)) Serial.println("[ESP-NOW unavailable; activation will be refused]");
+  if (!NodeRadio::begin(nodeRole)) usbConsole.println("[ESP-NOW unavailable; activation will be refused]");
 
   if (!mpu.begin()) {
-    Serial.println("ERROR: MPU6050 not found. Check the sensor wiring.");
+    usbConsole.println("ERROR: MPU6050 not found. Check the sensor wiring.");
 
     while (true) {
       setLed(true);
-      delay(200);
+      delayMs(200);
       setLed(false);
-      delay(200);
+      delayMs(200);
     }
   }
-
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
   const char* bluetoothName = nodeRole == HIP
     ? NodeConfig::HIP_BLUETOOTH_NAME : NodeConfig::WRIST_BLUETOOTH_NAME;
   wirelessStarted = wirelessStreamer.begin(bluetoothName);
-  if (wirelessStarted) Serial.printf("[Bluetooth: %s | Ready]\n", bluetoothName);
+  if (wirelessStarted) usbConsole.printf("[Bluetooth: %s | Ready]\n", bluetoothName);
 
   if (!wirelessStarted) {
-    Serial.println("WARNING: Bluetooth unavailable. USB output is still active.");
+    usbConsole.println("WARNING: Bluetooth unavailable. USB output is still active.");
   }
 
   const unsigned long now = millis();
@@ -524,33 +525,23 @@ void update() {
 
   lastSampleTime = sampleTime;
 
-  sensors_event_t accelerationEvent;
-  sensors_event_t gyroscopeEvent;
-  sensors_event_t temperatureEvent;
-
+  float acceleration[3];
+  float gyro[3];
   const unsigned long readStarted = millis();
-  mpu.getEvent(
-    &accelerationEvent,
-    &gyroscopeEvent,
-    &temperatureEvent
-  );
+  if (!mpu.read(acceleration, gyro)) {
+    // Do not feed invalid or stale samples into the motion/fall detectors.
+    static unsigned long lastSensorError = 0;
+    if (millis() - lastSensorError >= 1000) {
+      usbConsole.println("[MPU6050 read failed; check wiring]");
+      lastSensorError = millis();
+    }
+    return;
+  }
 
   now = millis();
   if (now - readStarted >= 100) {
-    Serial.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
+    usbConsole.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
   }
-
-  const float acceleration[3] = {
-    accelerationEvent.acceleration.x,
-    accelerationEvent.acceleration.y,
-    accelerationEvent.acceleration.z
-  };
-
-  const float gyro[3] = {
-    gyroscopeEvent.gyro.x,
-    gyroscopeEvent.gyro.y,
-    gyroscopeEvent.gyro.z
-  };
 
   const float rawMagnitude = sqrtf(
     acceleration[0] * acceleration[0] +
@@ -567,7 +558,7 @@ void update() {
   if (nodeRole == HIP) fallDetector.update(rawMagnitude, now);
 
   if (fallDetector.consumeFallEvent()) {
-    digitalWrite(FallConfig::BUZZER_PIN, HIGH);
+    writePin(FallConfig::BUZZER_PIN, 1);
     buzzerActive = true;
     buzzerStartTime = now;
   }
@@ -595,10 +586,10 @@ void update() {
 
   if (now - lastUsbOutputTime >= GeneralConfig::OUTPUT_INTERVAL_MS) {
     lastUsbOutputTime = now;
-    printTelemetry(Serial, data);
+    printTelemetry(usbConsole, data);
   }
 
-  // Show USB status before attempting a potentially blocking Bluetooth write.
+  // Bluetooth output is queued without blocking sensor sampling.
   if (wirelessStarted) {
     wirelessStreamer.update(data, now);
     if (wirelessStreamer.consumeConnectionEvent()) {

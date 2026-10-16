@@ -1,10 +1,10 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
 #include "NodeTypes.h"
 
 namespace NodeConfig {
-  // Roles are fixed in hip/hip.ino and wrist/wrist.ino; no role edits needed here.
+  // Roles are selected by the PlatformIO environment; no role edits needed here.
 
   // Enter each board's Wi-Fi STA MAC, printed on its USB monitor at startup.
   // Bluetooth MAC addresses are different. Zero addresses disable the peer link
@@ -57,9 +57,13 @@ inline ExerciseSettings getGenericSettings() {
 }
 
 namespace GeneralConfig {
-  constexpr int LED_PIN = LED_BUILTIN;
-  constexpr int LED_ON = HIGH;
-  constexpr int LED_OFF = LOW;
+  // Original FireBeetle ESP32 GPIO numbers (not printed D-pin numbers).
+  constexpr int LED_PIN = 2;
+  constexpr int LED_ON = 1;
+  constexpr int LED_OFF = 0;
+  constexpr int I2C_SDA_PIN = 21;
+  constexpr int I2C_SCL_PIN = 22;
+  constexpr uint8_t MPU6050_ADDRESS = 0x68;
 
   constexpr unsigned long SAMPLE_INTERVAL_US = 20000;
   // Same USB/Bluetooth output cadence as the remote baseline.
@@ -121,7 +125,7 @@ namespace ContinuousConfig {
 }
 
 namespace FallConfig {
-  constexpr int BUZZER_PIN = D3;
+  constexpr int BUZZER_PIN = 26; // FireBeetle D3
 
   constexpr float FREE_FALL_THRESHOLD = 4.0f;
   constexpr unsigned long FREE_FALL_MIN_TIME_MS = 100;
