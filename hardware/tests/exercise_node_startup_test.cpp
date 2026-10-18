@@ -17,6 +17,7 @@ static std::deque<int> input;
 static std::string output;
 static std::deque<LinkPacket> incoming;
 static bool peerOnline = true;
+static bool sensorHealthy = true;
 static float accelZ = 9.81f, gyroX = 0.0f;
 static unsigned int readyEvents = 0, repEvents = 0, sampleReads = 0;
 static void peerSend(const LinkPacket& packet) { incoming.push_back(packet); }
@@ -61,6 +62,7 @@ void BluetoothSpp::service() {}
 bool Mpu6050::begin() { return true; }
 bool Mpu6050::read(float acceleration[3], float gyro[3]) {
   ++sampleReads;
+  if (!sensorHealthy) return false;
   acceleration[0] = acceleration[1] = gyro[1] = gyro[2] = 0;
   acceleration[2] = accelZ;
   gyro[0] = gyroX;
@@ -171,5 +173,64 @@ int main() {
   assert(readyEvents == readyBeforeSwitch + 1); // Exercise/mode restart coalesced.
   pauseRep();
   assert(data().reps == 1);
+
+  // Both board roles retain samples while their counters are in standby.
+  static SensorSample window[SensorHistoryConfig::CAPACITY];
+  for (NodeRole role : {HIP, WRIST}) {
+    ExerciseNode::begin(role);
+    const size_t capacity = SensorHistoryConfig::CAPACITY;
+    assert(ExerciseNode::copySensorWindow((uint32_t)now, window, capacity).status == SensorWindowStatus::EMPTY);
+    step(10);
+    output.clear();
+    command("WINDOW");
+    assert(output.find("INSUFFICIENT_HISTORY") != std::string::npos);
+    step(250, 10.0f, 0.5f);
+    auto captured = ExerciseNode::copySensorWindow((uint32_t)now, window, capacity);
+    assert(captured.status == SensorWindowStatus::READY && captured.count == 251);
+    assert(window[captured.count - 1].acceleration[2] == 10.0f);
+    assert(window[captured.count - 1].gyro[0] == 0.5f);
+    assert(data().reps == 0);
+    output.clear();
+    command("BUFFER");
+    command("WINDOW");
+    assert(output.find(role == HIP ? "[BUFFER | HIP" : "[BUFFER | WRIST") != std::string::npos);
+    assert(output.find(" | READY | ") != std::string::npos);
+    assert(output.find("samples=251") != std::string::npos);
+
+    // Counter commands neither clear history nor skip scheduled sensor reads.
+    const uint32_t anchor = (uint32_t)now;
+    command("ACTIVATE");
+    command("RESET");
+    command(role == HIP ? "EXERCISE:LUNGE" : "EXERCISE:SITUP");
+    command("MODE:CONTINUOUS");
+    command("STANDBY");
+    assert(ExerciseNode::copySensorWindow(anchor, window, capacity).status == SensorWindowStatus::READY);
+    captured = ExerciseNode::copySensorWindow((uint32_t)now, window, capacity);
+    assert(captured.status == SensorWindowStatus::READY && captured.maxGapMs == 20);
+    assert(captured.count == 251);
+    char historicalCommand[32];
+    snprintf(historicalCommand, sizeof(historicalCommand), "WINDOW:%lu", (unsigned long)anchor);
+    output.clear();
+    command(historicalCommand);
+    assert(output.find(" | READY | ") != std::string::npos);
+    for (const char* bad : {"WINDOW:", "WINDOW:-1", "WINDOW:4294967296", "WINDOW:12X"}) {
+      output.clear();
+      command(bad);
+      assert(output.find("ERROR: Use WINDOW") != std::string::npos);
+    }
+
+    // Failed reads leave a visible gap rather than stale/zero samples.
+    sensorHealthy = false;
+    const uint32_t beforeFailure = (uint32_t)now;
+    step(10);
+    assert(ExerciseNode::copySensorWindow((uint32_t)now, window, capacity).status == SensorWindowStatus::END_NOT_AVAILABLE);
+    sensorHealthy = true;
+    step(1);
+    captured = ExerciseNode::copySensorWindow((uint32_t)now, window, capacity);
+    assert(captured.status == SensorWindowStatus::SAMPLE_GAP && captured.maxGapMs == 220);
+    for (size_t i = 0; i < captured.count; ++i)
+      assert(window[i].timestampMs <= beforeFailure || window[i].timestampMs == (uint32_t)now);
+  }
   puts("Node startup, activation, reset, exercise/mode switching and LED tests passed");
+  puts("Both node buffers, diagnostics, independent sampling and sensor-failure tests passed");
 }

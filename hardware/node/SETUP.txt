@@ -49,6 +49,55 @@ Each monitor shows only its own board. Counts and exercise selection are not
 forwarded. Both boards must be powered for a new activation: the other board
 must acknowledge standby. Bluetooth pairing alone does not activate counting.
 
+LOCAL SENSOR HISTORY (STEP 2, BEFORE COMMS INTEGRATION)
+
+Both HIP and WRIST continuously retain successful MPU6050 reads, including while
+their counters are in standby or waiting for activation. Each sample contains
+local uptime in milliseconds (timestamped at read start), acceleration XYZ in
+m/s2 including gravity, and gyro XYZ in rad/s. Values are saved before exercise
+filtering or gyro correction. Failed reads do not insert zero or stale samples.
+
+SensorHistoryConfig in SensorHistory.h sets a 5000 ms window and 8000 ms retention.
+At the configured 50 Hz this uses 401 ring slots, about 11 KB. The manual window
+command has a separate static scratch snapshot of the same size; neither array
+uses the main task stack. Data is in RAM only and is lost on reboot. ACTIVATE,
+STANDBY, RESET, exercise changes and mode changes preserve this history and the
+sampling cadence. There is no peak detector or automatic transmission yet.
+
+Bench inspection, on each board's USB or Bluetooth serial monitor:
+1. Send BUFFER after boot. It reports the node, stored sample count, oldest/newest
+   timestamps, covered span and newest sample age (all times in milliseconds).
+2. Send WINDOW before five seconds of samples are available. Expect EMPTY or
+   INSUFFICIENT_HISTORY. No samples are padded or invented.
+3. After at least five seconds of successful sampling, send WINDOW again. It
+   copies [latest sample time - 5000, latest sample time] and prints a summary.
+   READY means enough history with no gap greater than 40 ms. SAMPLE_GAP means
+   the actual samples were copied, but at least one interval/edge gap exceeds
+   40 ms. max_gap_ms reports the largest gap; smaller jitter is not resampled.
+   At exactly 50 Hz with both endpoints included, there are 251 samples. With
+   real timing jitter or a t0 between samples, counts/endpoints can differ.
+4. To simulate a delayed trigger, note newest_ms from BUFFER and send
+   WINDOW:<that timestamp>, for example WINDOW:12000. This selects [7000,12000]
+   regardless of when the command arrives, provided those times are retained.
+   At nominal cadence, the extra history allows up to three seconds of delay.
+   END_NOT_AVAILABLE means t0 is newer than the last successful sample.
+   INSUFFICIENT_HISTORY means the requested history is unavailable/expired.
+5. RESET or change the exercise, then repeat WINDOW. The history should remain.
+   Repeat in standby on each board; no peer connection is required for buffering.
+
+WINDOW prints metadata only, avoiding a large serial dump that could delay the
+sampling loop. It does not start counting, send ESP-NOW triggers, or send samples
+to Ultra96. WINDOW without a timestamp anchors to the latest successful sample;
+check BUFFER's age_ms to spot stale data after sensor failures.
+
+For later integration, ExerciseNode::copySensorWindow(t0, destination, capacity)
+copies samples in chronological order. Call it from the same main loop as update().
+The caller owns the copy; subsequent ring writes cannot change it. OUTPUT_TOO_SMALL
+reports the required count without writing a partial result. No transport format,
+one-second sliding scheduler or clock synchronization is added in this step.
+Timestamps are local to each board and wrap modulo 2^32 milliseconds; comparisons
+assume timestamps less than 2^31 ms apart. Reboot starts a new local time reference.
+
 WIRELESS MONITORS ON WINDOWS
 
 1. Power both boards. Pair ExerciseHip and ExerciseWrist in Windows Bluetooth
@@ -142,7 +191,7 @@ ACTIVATE
   use RESET for a new set. The peer acknowledgement is still required.
 STANDBY (DEACTIVATE is an alias)
   Stop this board's counting and cancel pending activation. Bluetooth, ESP-NOW
-  commands and hip fall monitoring remain available.
+  commands, sensor history and hip fall monitoring remain available.
 RESET
   Clear reps. If active, immediately reload the fixed preset. If inactive,
   stay inactive. Cancel pending activation. No preset values are erased.
@@ -167,6 +216,11 @@ MODE:PAUSE / MODE:CONTINUOUS (PAUSE / CONTINUOUS also accepted)
 STATUS / HELP
   Show activation/radio status and exercise/mode/preset, or the command list.
   "ESP-NOW configured and ready" does not prove that the peer is currently online.
+BUFFER
+  Show local sensor history size, timestamps, span and age; counting is unchanged.
+WINDOW / WINDOW:<t0_ms>
+  Copy and summarize the inclusive five-second window ending at the latest sample
+  or the supplied local unsigned 32-bit timestamp. See LOCAL SENSOR HISTORY above.
 
 FIXED PRESETS
 
@@ -249,6 +303,8 @@ BENCH AND WEARABLE CHECKS
 - No "Hold still" or "Move into your starting position" prompt should appear.
 - Reboot returns defaults/standby; fixed presets remain available after activation.
 - STANDBY stops counting; hip fall monitoring remains running.
+- BUFFER/WINDOW work in standby on both boards, even when the peer is offline.
+- Counter RESET/exercise changes preserve history; only reboot clears it.
 - Compare counts/LEDs against full physical reps; mocks require tuning.
 
 BUILD / HOST VERIFICATION
@@ -274,8 +330,12 @@ Transport-independent node switching/LED tests:
   .build/node_session_test.exe
 
 Firmware startup tests with fake sensor/radio/console hardware:
-  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp -o .build/exercise_node_startup_test.exe
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
+
+Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/sensor_history_test.cpp hardware/node/SensorHistory.cpp -o .build/sensor_history_test.exe
+  .build/sensor_history_test.exe
 
 Host tests use synthetic samples. They do not establish physical counting accuracy
 or Bluetooth/ESP-NOW reliability. Compiling does not upload firmware to the boards.

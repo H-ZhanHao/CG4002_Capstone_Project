@@ -25,6 +25,7 @@ using NodePlatform::writePin;
 
 NodeRole nodeRole = HIP;
 Mpu6050 mpu;
+SensorHistory sensorHistory;
 
 ExerciseSettings genericSettings = getGenericSettings();
 
@@ -37,7 +38,7 @@ WirelessStreamer wirelessStreamer;
 
 void linkMessage(const char* text) { wirelessStreamer.message(text); }
 NodeSession nodeSession(NodeRadio::send, linkMessage);
-const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | STATUS | HELP. Select Newline, then Send.";
+const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STATUS | HELP. Select Newline, then Send.";
 
 bool wirelessStarted = false;
 
@@ -121,9 +122,54 @@ void restartSession(unsigned long now) {
     startCounting(now);
   }
 
-  lastSampleTime = micros();
   lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
-  // Reset only the exercise session. Bluetooth and fall monitoring keep running.
+  // Reset only counting. Sensor history and sampling cadence keep running.
+}
+
+SensorWindowResult copySensorWindow(uint32_t endMs, SensorSample* destination, size_t capacity) {
+  return sensorHistory.extract(endMs, destination, capacity);
+}
+
+void reportBuffer(unsigned long now) {
+  char line[200];
+  if (!sensorHistory.size()) {
+    wirelessStreamer.message("[BUFFER | EMPTY | Waiting for a successful sensor sample]");
+    return;
+  }
+  snprintf(line, sizeof(line),
+    "[BUFFER | %s | samples=%u/%u | oldest_ms=%lu | newest_ms=%lu | span_ms=%lu | age_ms=%lu]",
+    nodeRole == HIP ? "HIP" : "WRIST",
+    (unsigned int)sensorHistory.size(), (unsigned int)SensorHistoryConfig::CAPACITY,
+    (unsigned long)sensorHistory.oldestMs(), (unsigned long)sensorHistory.newestMs(),
+    (unsigned long)(uint32_t)(sensorHistory.newestMs() - sensorHistory.oldestMs()),
+    (unsigned long)(uint32_t)((uint32_t)now - sensorHistory.newestMs()));
+  wirelessStreamer.message(line);
+}
+
+void reportWindow(uint32_t endMs) {
+  // Static scratch storage keeps the snapshot off the ESP-IDF main task stack.
+  // Only a small summary is printed; never dump hundreds of samples in update().
+  static SensorSample snapshot[SensorHistoryConfig::CAPACITY];
+  const SensorWindowResult result = copySensorWindow(endMs, snapshot, SensorHistoryConfig::CAPACITY);
+  char line[220];
+  snprintf(line, sizeof(line),
+    "[WINDOW | %s | %s | start_ms=%lu | t0_ms=%lu | samples=%u | first_ms=%lu | last_ms=%lu | max_gap_ms=%lu]",
+    nodeRole == HIP ? "HIP" : "WRIST", sensorWindowStatusName(result.status),
+    (unsigned long)result.startMs, (unsigned long)result.endMs, (unsigned int)result.count,
+    (unsigned long)result.firstMs, (unsigned long)result.lastMs, (unsigned long)result.maxGapMs);
+  wirelessStreamer.message(line);
+}
+
+bool parseTimestamp(const char* text, uint32_t& value) {
+  if (!*text) return false;
+  value = 0;
+  for (; *text; ++text) {
+    if (*text < '0' || *text > '9') return false;
+    const uint32_t digit = (uint32_t)(*text - '0');
+    if (value > (UINT32_MAX - digit) / 10) return false;
+    value = value * 10 + digit;
+  }
+  return true;
 }
 
 void reportExercise() {
@@ -161,6 +207,23 @@ void processCommand(char* command, unsigned long now) {
     reportExercise();
     wirelessStreamer.message(NodeRadio::ready() ? "[ESP-NOW configured and ready]"
       : "[ESP-NOW unavailable; check peer MAC configuration and USB boot messages]");
+    return;
+  }
+  if (!strcmp(text, "BUFFER")) {
+    reportBuffer(now);
+    return;
+  }
+  if (!strcmp(text, "WINDOW")) {
+    reportWindow(sensorHistory.newestMs());
+    return;
+  }
+  if (!strncmp(text, "WINDOW:", 7)) {
+    uint32_t endMs;
+    if (!parseTimestamp(text + 7, endMs)) {
+      wirelessStreamer.message("ERROR: Use WINDOW or WINDOW:<t0_ms>, an unsigned 32-bit local timestamp.");
+      return;
+    }
+    reportWindow(endMs);
     return;
   }
   if (!strcmp(text, "#OVERFLOW")) {
@@ -348,6 +411,7 @@ TelemetryData makeTelemetry() {
 
 void begin(NodeRole role) {
   nodeRole = role;
+  sensorHistory.clear(); // Boot only; counter resets must preserve sensor history.
   activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
   activeMode = ExercisePresets::defaultMode(activeExercise);
   usbConsole.begin(115200);
@@ -453,6 +517,11 @@ void update() {
   }
 
   now = millis();
+  SensorSample sample = {};
+  sample.timestampMs = (uint32_t)readStarted;
+  memcpy(sample.acceleration, acceleration, sizeof(acceleration));
+  memcpy(sample.gyro, gyro, sizeof(gyro));
+  sensorHistory.push(sample); // Runs on both boards, including standby/activation failure.
   if (now - readStarted >= 100) {
     usbConsole.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
   }
