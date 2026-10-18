@@ -14,19 +14,15 @@ namespace {
       snprintf(status, sizeof(status), "ACTIVATION FAILED | Reps: -- | Check other node; send ACTIVATE to retry");
     } else if (data.repState == NODE_STANDBY) {
       snprintf(status, sizeof(status), "STANDBY | Reps: -- | Send ACTIVATE to start");
-    } else if (data.repState == 0) {
-      snprintf(status, sizeof(status), "BASELINE | %s", data.positioningSeen
-        ? "Hold still for 3 seconds"
-        : "Move into your starting position");
     } else if (data.repState == 1) {
       snprintf(status, sizeof(status), "FINDING AXIS | Reps: 0 | Start moving; initial movement may not count");
     } else {
       if (data.mode == PAUSE_MODE) {
         snprintf(status, sizeof(status),
-          "COUNTING | Reps: %d | Motion: %.2f | Peak: %.2f m/s2",
-          data.reps, data.pauseMotion, data.pausePeak);
+          "COUNTING | Reps: %ld | Motion: %.2f | Peak: %.2f m/s2",
+          static_cast<long>(data.reps), data.pauseMotion, data.pausePeak);
       } else {
-        snprintf(status, sizeof(status), "COUNTING | Reps: %d", data.reps);
+        snprintf(status, sizeof(status), "COUNTING | Reps: %ld", static_cast<long>(data.reps));
       }
     }
 

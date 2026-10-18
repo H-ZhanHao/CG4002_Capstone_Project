@@ -207,7 +207,7 @@ bool BluetoothSpp::begin(const char* deviceName) {
   }
   esp_spp_cfg_t config = {};
   config.mode = ESP_SPP_MODE_CB;
-  config.enable_l2cap_etrm = false;
+  config.enable_l2cap_ertm = false;
   config.tx_buffer_size = 0; // Only used in VFS mode.
   if (esp_spp_enhanced_init(&config) != ESP_OK) return false;
   const EventBits_t result = xEventGroupWaitBits(bluetoothStartup, SPP_READY | SPP_FAILED,

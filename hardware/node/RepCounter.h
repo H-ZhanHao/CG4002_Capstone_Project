@@ -37,6 +37,8 @@ class RepCounter {
   );
 
   void begin(unsigned long currentTime);
+  // Start at zero with nominal gravity and fixed limits; no baseline samples.
+  bool beginPreset(unsigned long currentTime, const PauseCalibration& preset);
   PauseCalibration calibration() const;
   bool restoreCalibration(const PauseCalibration& calibration);
   bool loadPreset(const PauseCalibration& preset);

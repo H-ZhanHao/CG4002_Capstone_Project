@@ -71,6 +71,12 @@ namespace GeneralConfig {
 
   constexpr float FILTER_ALPHA = 0.20f;
 
+  // Nominal sensor references: preset startup never waits for stillness.
+  // These are assumptions, not measured offsets; verify with the worn sensors.
+  constexpr float GRAVITY_MPS2 = 9.81f;
+  constexpr float GYRO_BIAS_RAD_S[3] = {0.0f, 0.0f, 0.0f};
+
+  // Retained for the legacy calibration API/tests, not firmware startup.
   constexpr unsigned long BASELINE_TIME_MS = 3000;
   constexpr int REQUIRED_STABLE_REPS = 2;
 
@@ -80,10 +86,6 @@ namespace GeneralConfig {
   constexpr unsigned long QUIET_TIME_MS = 350;
   // Includes the quiet period that completes a movement.
   constexpr unsigned long MIN_REP_GAP_MS = 300;
-
-  constexpr float POSITIONING_MOVEMENT_GYRO = 0.30f;
-  constexpr float STATIONARY_MAX_GYRO = 0.15f;
-  constexpr float STATIONARY_MAX_ACCEL_CHANGE = 0.05f;
 
   constexpr unsigned long CALIBRATION_LED_OFF_MS = 200;
   // Mirrored ready/rep pulse durations are shared in NodeSession.h: LedTiming.

@@ -15,7 +15,7 @@ void RepCounter::begin(
   baselineStartTime_ = currentTime;
   baselineSum_ = 0.0;
   baselineSamples_ = 0;
-  baselineMagnitude_ = 9.81;
+  baselineMagnitude_ = GeneralConfig::GRAVITY_MPS2;
   motionSignal_ = 0.0;
 
   calibrationCount_ = 0;
@@ -44,6 +44,16 @@ void RepCounter::begin(
   repResult_ = REP_NO_RESULT;
 }
 
+bool RepCounter::beginPreset(unsigned long currentTime, const PauseCalibration& preset) {
+  begin(currentTime);
+  if (!preset.valid) return false;
+  // Supply the nominal baseline instead of measuring it from moving samples.
+  state_ = MOVEMENT_CALIBRATION;
+  // The first movement needs no inter-rep gap, even immediately after boot.
+  lastMovementEndTime_ = currentTime - GeneralConfig::MIN_REP_GAP_MS;
+  return loadPreset(preset);
+}
+
 bool RepCounter::loadPreset(const PauseCalibration& preset) {
   if (!restoreCalibration(preset)) return false;
   calibrationCount_ = 0; // No movements were used for calibration.
@@ -62,7 +72,7 @@ PauseCalibration RepCounter::calibration() const {
 }
 
 bool RepCounter::restoreCalibration(const PauseCalibration& calibration) {
-  // A new stationary baseline must finish before movement limits are restored.
+  // A measured or explicitly supplied baseline must precede movement limits.
   if (!calibration.valid || state_ != MOVEMENT_CALIBRATION) return false;
   highThreshold_ = calibration.highThreshold;
   lowThreshold_ = calibration.lowThreshold;

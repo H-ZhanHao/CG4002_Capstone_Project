@@ -4,7 +4,6 @@
 #include <ctype.h>
 #include <string.h>
 #include <stdio.h>
-#include <esp_system.h>
 #include <esp_random.h>
 
 #include "ExerciseNode.h"
@@ -51,15 +50,6 @@ unsigned long lastUsbOutputTime = 0;
 float filteredMagnitude = 0.0f;
 bool filterInitialised = false;
 
-bool positioningMovementSeen = false;
-bool previousMagnitudeAvailable = false;
-float previousFilteredMagnitude = 0.0f;
-
-// Gyro bias measured during the stationary baseline.
-float gyroBaselineSum[3] = {};
-float gyroBias[3] = {};
-unsigned int gyroBaselineSamples = 0;
-
 // Buzzer output.
 bool buzzerActive = false;
 unsigned long buzzerStartTime = 0;
@@ -72,10 +62,6 @@ void setLed(bool on) {
 }
 
 int sessionState() {
-  if (repCounter.state() == BASELINE_CALIBRATION) {
-    return 0;
-  }
-
   return countingStarted &&
     (activeMode == PAUSE_MODE || continuousCounter.axis() >= 0) ? 2 : 1;
 }
@@ -110,33 +96,30 @@ void updateOutputTimers(unsigned long now) {
   }
 }
 
-void restartBaseline(unsigned long now) {
-  repCounter.begin(now);
-
-  gyroBaselineSamples = 0;
-
-  for (int i = 0; i < 3; ++i) {
-    gyroBaselineSum[i] = 0.0f;
-  }
-}
+void startCounting(unsigned long now);
 
 void restartSession(unsigned long now) {
   countingStarted = false;
   filteredMagnitude = 0.0f;
   filterInitialised = false;
-  positioningMovementSeen = false;
-  previousMagnitudeAvailable = false;
-  previousFilteredMagnitude = 0.0f;
-
-  for (int i = 0; i < 3; ++i) {
-    gyroBias[i] = 0.0f;
-  }
-
-  restartBaseline(now);
-  continuousCounter.begin(gyroBias, now, false);
-
   nodeSession.clearLedFeedback(now);
   setLed(false);
+
+  if (!repCounter.beginPreset(now, ExercisePresets::pause(activeExercise))) {
+    nodeSession.standby();
+    wirelessStreamer.message("ERROR: Invalid exercise preset; counting remains inactive.");
+    return;
+  }
+  continuousCounter.beginPreset(GeneralConfig::GYRO_BIAS_RAD_S, now,
+                                ExercisePresets::continuous(activeExercise));
+
+  // Standby may prepare presets, but only acknowledged activation starts counting.
+  if (nodeSession.localActive()) {
+    wirelessStreamer.message(activeMode == PAUSE_MODE
+      ? "[Preset loaded; counting starts at zero without standstill. Pause briefly between reps.]"
+      : "[Gyro preset loaded; no standstill. Keep moving to find the axis; initial movement may not count.]");
+    startCounting(now);
+  }
 
   lastSampleTime = micros();
   lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
@@ -146,7 +129,7 @@ void restartSession(unsigned long now) {
 void reportExercise() {
   char message[160];
   const CountingMode selectedMode = nodeSession.selectedMode();
-  snprintf(message, sizeof(message), "[Exercise: %s | %s | Preset: %s | No calibration reps]",
+  snprintf(message, sizeof(message), "[Exercise: %s | %s | Preset: %s | No standstill or calibration reps]",
     exerciseName(activeExercise), selectedMode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
     selectedMode == PAUSE_MODE ? ExercisePresets::get(activeExercise).description : "mock gyro limits");
   wirelessStreamer.message(message);
@@ -206,7 +189,7 @@ void processCommand(char* command, unsigned long now) {
       activeExercise = requestedExercise;
       nodeSession.selectExerciseMode(ExercisePresets::defaultMode(activeExercise), now);
       wirelessStreamer.message(nodeSession.localActive()
-        ? "[Exercise changed; move into position, then hold still for 3 seconds]"
+        ? "[Exercise changed; restarting with its preset, no standstill required]"
         : "[Exercise selected; still inactive. Send ACTIVATE to start]");
     }
     reportExercise();
@@ -234,7 +217,7 @@ void processCommand(char* command, unsigned long now) {
     if (nodeSession.waiting()) nodeSession.standby();
     restartSession(now);
     wirelessStreamer.message(nodeSession.localActive()
-      ? "[Session reset; move into position, then hold still for 3 seconds]"
+      ? "[Session reset; preset reloaded, no standstill required]"
       : "[Session reset; still inactive. Send ACTIVATE to start]");
     return;
   }
@@ -258,74 +241,6 @@ void processCommand(char* command, unsigned long now) {
   }
 
   nodeSession.setMode(requested, now);
-}
-
-void startCounting(unsigned long now);
-
-void updateBaseline(
-  const float gyro[3],
-  float gyroMagnitude,
-  unsigned long now
-) {
-  const bool hadPrevious = previousMagnitudeAvailable;
-
-  float change = 0.0f;
-
-  if (hadPrevious) {
-    change = fabsf(
-      filteredMagnitude - previousFilteredMagnitude
-    );
-  }
-
-  previousFilteredMagnitude = filteredMagnitude;
-  previousMagnitudeAvailable = true;
-
-  if (!positioningMovementSeen) {
-    if (
-      gyroMagnitude >
-      GeneralConfig::POSITIONING_MOVEMENT_GYRO
-    ) {
-      positioningMovementSeen = true;
-    }
-
-    restartBaseline(now);
-    return;
-  }
-
-  const bool stationary =
-    hadPrevious &&
-    gyroMagnitude < GeneralConfig::STATIONARY_MAX_GYRO &&
-    change < GeneralConfig::STATIONARY_MAX_ACCEL_CHANGE;
-
-  if (!stationary) {
-    restartBaseline(now);
-    return;
-  }
-
-  ++gyroBaselineSamples;
-
-  for (int i = 0; i < 3; ++i) {
-    gyroBaselineSum[i] += gyro[i];
-  }
-
-  repCounter.update(filteredMagnitude, now);
-
-  if (repCounter.state() == MOVEMENT_CALIBRATION) {
-    for (int i = 0; i < 3; ++i) {
-      gyroBias[i] =
-        gyroBaselineSum[i] / gyroBaselineSamples;
-    }
-
-    if (activeMode == PAUSE_MODE) {
-      if (!repCounter.loadPreset(ExercisePresets::pause(activeExercise))) return;
-    } else {
-      continuousCounter.beginPreset(gyroBias, now, ExercisePresets::continuous(activeExercise));
-    }
-    wirelessStreamer.message(activeMode == PAUSE_MODE
-      ? "[Fixed preset loaded; counting starts at zero. Pause briefly between reps.]"
-      : "[Mock gyro preset loaded; start moving to find the axis. Initial movement may not count.]");
-    startCounting(now);
-  }
 }
 
 void startCounting(unsigned long now) {
@@ -369,7 +284,7 @@ void processMovement(
   float correctedGyroSquared = 0.0f;
 
   for (int i = 0; i < 3; ++i) {
-    const float corrected = gyro[i] - gyroBias[i];
+    const float corrected = gyro[i] - GeneralConfig::GYRO_BIAS_RAD_S[i];
     correctedGyroSquared += corrected * corrected;
   }
 
@@ -425,7 +340,6 @@ TelemetryData makeTelemetry() {
   data.pauseMotion = repCounter.motionSignal();
   data.pausePeak = repCounter.currentMovementPeak();
 
-  data.positioningSeen = positioningMovementSeen;
   data.buzzer = buzzerActive;
   data.source = nodeRole;
 
@@ -549,12 +463,6 @@ void update() {
     acceleration[2] * acceleration[2]
   );
 
-  const float gyroMagnitude = sqrtf(
-    gyro[0] * gyro[0] +
-    gyro[1] * gyro[1] +
-    gyro[2] * gyro[2]
-  );
-
   if (nodeRole == HIP) fallDetector.update(rawMagnitude, now);
 
   if (fallDetector.consumeFallEvent()) {
@@ -563,7 +471,7 @@ void update() {
     buzzerStartTime = now;
   }
 
-  if (nodeSession.localActive()) {
+  if (nodeSession.localActive() && countingStarted) {
     if (!filterInitialised) {
       filteredMagnitude = rawMagnitude;
       filterInitialised = true;
@@ -574,11 +482,7 @@ void update() {
           filteredMagnitude;
     }
 
-    if (repCounter.state() == BASELINE_CALIBRATION) {
-      updateBaseline(gyro, gyroMagnitude, now);
-    } else {
-      processMovement(gyro, now);
-    }
+    processMovement(gyro, now);
   }
 
   const TelemetryData local = makeTelemetry();
