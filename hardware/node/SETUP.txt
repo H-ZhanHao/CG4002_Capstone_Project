@@ -62,7 +62,8 @@ At the configured 50 Hz this uses 401 ring slots, about 11 KB. The manual window
 command has a separate static scratch snapshot of the same size; neither array
 uses the main task stack. Data is in RAM only and is lost on reboot. ACTIVATE,
 STANDBY, RESET, exercise changes and mode changes preserve this history and the
-sampling cadence. There is no peak detector or automatic transmission yet.
+sampling cadence. Generic peak detection is described below; automatic window
+transmission is not implemented yet.
 
 Bench inspection, on each board's USB or Bluetooth serial monitor:
 1. Send BUFFER after boot. It reports the node, stored sample count, oldest/newest
@@ -79,7 +80,8 @@ Bench inspection, on each board's USB or Bluetooth serial monitor:
 4. To simulate a delayed trigger, note newest_ms from BUFFER and send
    WINDOW:<that timestamp>, for example WINDOW:12000. This selects [7000,12000]
    regardless of when the command arrives, provided those times are retained.
-   At nominal cadence, the extra history allows up to three seconds of delay.
+   At nominal cadence, the extra history allows up to three seconds of delay,
+   shared between peak confirmation and any later trigger/transport handling.
    END_NOT_AVAILABLE means t0 is newer than the last successful sample.
    INSUFFICIENT_HISTORY means the requested history is unavailable/expired.
 5. RESET or change the exercise, then repeat WINDOW. The history should remain.
@@ -97,6 +99,64 @@ reports the required count without writing a partial result. No transport format
 one-second sliding scheduler or clock synchronization is added in this step.
 Timestamps are local to each board and wrap modulo 2^32 milliseconds; comparisons
 assume timestamps less than 2^31 ms apart. Reboot starts a new local time reference.
+
+GENERIC MOVEMENT PEAKS (STEP 3, BEFORE COMMS INTEGRATION)
+
+Both nodes detect movement independently, including standby, failed activation
+and active counting. No exercise selection or standstill calibration is needed.
+The detector does not recognize an exercise, validate a rep, activate counting,
+change LEDs, send peer trigger packets or transmit sensor windows to Ultra96.
+Walking, handling the board and other non-exercise motion may also trigger it.
+
+GenericPeakDetector.h contains provisional, shared movement thresholds, separate
+from ExercisePresets.h. Tune them with recordings from the actual wearer/mounting:
+  Acceleration gate: abs(|acceleration XYZ| - 9.81) >= 0.50 m/s2.
+  Rotation gate: |gyro XYZ| >= 0.60 rad/s, assuming zero gyro bias.
+Either channel can trigger, including rotation with little acceleration change.
+A three-sample median filter rejects isolated spikes. The larger of the two
+normalized signals must remain above its gate for at least 60 ms. A peak is
+confirmed once the score falls at least 25% from its maximum for at least 40 ms.
+The filtered peak can lag the raw sensor maximum by a sample; t0 is the timestamp
+of the highest filtered score, not the later time at which the decline confirms it.
+On a flat maximum, the first sample at that maximum supplies t0.
+
+After a confirmed peak, both filtered signals must drop below 45% of their gates
+for 80 ms to rearm. New excursions during the one-second trigger cooldown are
+ignored until the signals settle again. This is trigger debounce during motion,
+not a three-second startup wait. Sustained motion may produce only one trigger;
+the later streaming session will continue independently of subsequent peaks.
+Candidates older than 2500 ms are discarded. Invalid values or sample gaps over
+100 ms discard the partial peak/filter state, without removing the cooldown.
+Counter RESET, exercise/mode changes and activation preserve the detector state.
+
+Bench inspection, with either node powered and its serial monitor open:
+1. Leave counting in standby. Small sensor noise should not print PEAK events.
+2. Move the board through an acceleration or rotation peak. A confirmed movement
+   automatically prints metadata such as:
+     [PEAK | HIP | t0_ms=8240 | confirmed_ms=8340 | accel=1.60 m/s2 | gyro=0.10 rad/s]
+   This is a USB/Bluetooth diagnostic line, not a comms packet or a sensor window.
+3. Send WINDOW:8240 using the actual printed t0, promptly enough to retain its
+   history. Expect READY when five seconds of healthy samples cover that time.
+   The returned end time is t0, not confirmed_ms or the time the command arrived.
+4. A peak during the first five seconds is still detected, but WINDOW can report
+   INSUFFICIENT_HISTORY. No missing pre-boot samples are invented. Waiting for
+   initial history does not require the wearer to stand still.
+5. Repeat on WRIST, including rotation resembling jumping-jack arm movement.
+   Verify that standby counts remain inactive and peaks cause no LED feedback.
+   Try walking too: triggers are possible; exercise recognition belongs to comms.
+
+For later integration, call ExerciseNode::consumeGenericPeak(event) immediately
+after update(), in the same main loop. It returns the first unconsumed event once;
+copySensorWindow(event.peakMs, ...) then obtains the corresponding local window.
+Only one pending event is retained. Later peaks are logged but do not overwrite
+that first event; there is no event queue yet. Consuming does not reset cooldown.
+The event does not freeze history: delaying consumption can let its window expire.
+Early/expired/gapped windows must be handled using copySensorWindow's status.
+Reboot clears the detector and pending event. These local timestamps still need
+cross-board coordination before either node can trigger both pipelines.
+
+The remaining steps add the one-second sliding-window scheduler, shared trigger
+coordination, and actual comms transport/feedback. No port is opened by a peak.
 
 WIRELESS MONITORS ON WINDOWS
 
@@ -305,6 +365,8 @@ BENCH AND WEARABLE CHECKS
 - STANDBY stops counting; hip fall monitoring remains running.
 - BUFFER/WINDOW work in standby on both boards, even when the peer is offline.
 - Counter RESET/exercise changes preserve history; only reboot clears it.
+- PEAK diagnostics appear on either board in standby without activating counting.
+- Verify generic trigger sensitivity on the worn sensors, including walking/noise.
 - Compare counts/LEDs against full physical reps; mocks require tuning.
 
 BUILD / HOST VERIFICATION
@@ -330,12 +392,16 @@ Transport-independent node switching/LED tests:
   .build/node_session_test.exe
 
 Firmware startup tests with fake sensor/radio/console hardware:
-  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp -o .build/exercise_node_startup_test.exe
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
 
 Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/sensor_history_test.cpp hardware/node/SensorHistory.cpp -o .build/sensor_history_test.exe
   .build/sensor_history_test.exe
+
+Generic peak tests (noise, axes, timing, rearm, cooldown, gaps, rollover):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/generic_peak_detector_test.cpp hardware/node/GenericPeakDetector.cpp -o .build/generic_peak_detector_test.exe
+  .build/generic_peak_detector_test.exe
 
 Host tests use synthetic samples. They do not establish physical counting accuracy
 or Bluetooth/ESP-NOW reliability. Compiling does not upload firmware to the boards.

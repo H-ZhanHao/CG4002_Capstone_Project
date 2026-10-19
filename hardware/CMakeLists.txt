@@ -4,6 +4,7 @@ idf_component_register(
         "node/ContinuousCounter.cpp"
         "node/ExerciseNode.cpp"
         "node/FallDetector.cpp"
+        "node/GenericPeakDetector.cpp"
         "node/Mpu6050.cpp"
         "node/NodePlatform.cpp"
         "node/NodeRadio.cpp"

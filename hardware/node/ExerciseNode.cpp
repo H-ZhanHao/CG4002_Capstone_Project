@@ -26,6 +26,9 @@ using NodePlatform::writePin;
 NodeRole nodeRole = HIP;
 Mpu6050 mpu;
 SensorHistory sensorHistory;
+GenericPeakDetector genericPeakDetector;
+GenericPeakEvent pendingGenericPeak;
+bool genericPeakPending = false;
 
 ExerciseSettings genericSettings = getGenericSettings();
 
@@ -128,6 +131,29 @@ void restartSession(unsigned long now) {
 
 SensorWindowResult copySensorWindow(uint32_t endMs, SensorSample* destination, size_t capacity) {
   return sensorHistory.extract(endMs, destination, capacity);
+}
+
+bool consumeGenericPeak(GenericPeakEvent& event) {
+  if (!genericPeakPending) return false;
+  event = pendingGenericPeak;
+  genericPeakPending = false;
+  return true;
+}
+
+void detectGenericPeak(const SensorSample& sample) {
+  GenericPeakEvent event;
+  if (!genericPeakDetector.update(sample, event)) return;
+  if (!genericPeakPending) {
+    pendingGenericPeak = event;
+    genericPeakPending = true;
+  }
+  // Diagnostic metadata only; no window payload, activation or peer trigger.
+  char line[192];
+  snprintf(line, sizeof(line),
+    "[PEAK | %s | t0_ms=%lu | confirmed_ms=%lu | accel=%.2f m/s2 | gyro=%.2f rad/s]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)event.peakMs,
+    (unsigned long)event.detectedMs, event.accelerationMps2, event.gyroRadS);
+  wirelessStreamer.message(line);
 }
 
 void reportBuffer(unsigned long now) {
@@ -412,6 +438,8 @@ TelemetryData makeTelemetry() {
 void begin(NodeRole role) {
   nodeRole = role;
   sensorHistory.clear(); // Boot only; counter resets must preserve sensor history.
+  genericPeakDetector.reset();
+  genericPeakPending = false;
   activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
   activeMode = ExercisePresets::defaultMode(activeExercise);
   usbConsole.begin(115200);
@@ -522,6 +550,7 @@ void update() {
   memcpy(sample.acceleration, acceleration, sizeof(acceleration));
   memcpy(sample.gyro, gyro, sizeof(gyro));
   sensorHistory.push(sample); // Runs on both boards, including standby/activation failure.
+  detectGenericPeak(sample); // Independent of exercise, activation and counting mode.
   if (now - readStarted >= 100) {
     usbConsole.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
   }

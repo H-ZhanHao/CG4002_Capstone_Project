@@ -20,6 +20,7 @@ static bool peerOnline = true;
 static bool sensorHealthy = true;
 static float accelZ = 9.81f, gyroX = 0.0f;
 static unsigned int readyEvents = 0, repEvents = 0, sampleReads = 0;
+static unsigned int radioPackets = 0;
 static void peerSend(const LinkPacket& packet) { incoming.push_back(packet); }
 static void ignoreLog(const char*) {}
 static NodeSession peer(peerSend, ignoreLog);
@@ -76,6 +77,7 @@ bool begin(NodeRole role) {
 }
 bool ready() { return true; }
 void send(const LinkPacket& packet) {
+  ++radioPackets;
   if (packet.kind == PacketKind::LED_FEEDBACK) {
     readyEvents += packet.mode == static_cast<uint8_t>(LedFeedback::READY);
     repEvents += packet.mode == static_cast<uint8_t>(LedFeedback::REP);
@@ -107,6 +109,12 @@ static void command(const char* text) {
 }
 static TelemetryData data() { return ExerciseNode::makeTelemetry(); }
 static void pauseRep() { step(25, 11.4f); step(45); }
+static void genericPulse(bool gyroOnly = false) {
+  const float values[] = {0, .4f, .8f, 1.2f, 1.6f, 2, 2.4f, 2.4f,
+                         2, 1.5f, 1, .5f, 0, 0, 0, 0, 0, 0};
+  for (float value : values)
+    step(1, 9.81f + (gyroOnly ? 0 : value), gyroOnly ? value : 0);
+}
 
 int main() {
   ExerciseNode::begin(HIP);
@@ -231,6 +239,67 @@ int main() {
     for (size_t i = 0; i < captured.count; ++i)
       assert(window[i].timestampMs <= beforeFailure || window[i].timestampMs == (uint32_t)now);
   }
+  // Both nodes detect in standby with no peer, without activating or sending radio packets.
+  for (NodeRole role : {HIP, WRIST}) {
+    peerOnline = false;
+    ExerciseNode::begin(role);
+    GenericPeakEvent event;
+    assert(!ExerciseNode::consumeGenericPeak(event));
+    step(260);
+    output.clear();
+    const unsigned int packetsBefore = radioPackets, ledsBefore = readyEvents + repEvents;
+    genericPulse();
+    const uint32_t firstFinished = (uint32_t)now;
+    // Preserve the first unconsumed trigger across commands and later peaks.
+    command("RESET");
+    command(role == HIP ? "EXERCISE:LUNGE" : "EXERCISE:SITUP");
+    command("STANDBY");
+    step(60);
+    genericPulse(true);
+    assert(ExerciseNode::consumeGenericPeak(event));
+    assert(event.detectedMs <= firstFinished && event.peakMs < event.detectedMs);
+    assert(!ExerciseNode::consumeGenericPeak(event));
+    auto captured = ExerciseNode::copySensorWindow(event.peakMs, window, SensorHistoryConfig::CAPACITY);
+    assert(captured.status == SensorWindowStatus::READY && captured.lastMs == event.peakMs);
+    assert(output.find(role == HIP ? "[PEAK | HIP" : "[PEAK | WRIST") != std::string::npos);
+    assert(data().reps == 0 && output.find("STANDBY | Reps: --") != std::string::npos);
+    assert(output.find("COUNTING | Reps:") == std::string::npos);
+    assert(radioPackets == packetsBefore && readyEvents + repEvents == ledsBefore);
+
+    // Detection remains independent of the active exercise counter.
+    peerOnline = true;
+    command("ACTIVATE");
+    step(60);
+    genericPulse(true); // Both selected exercises are in acceleration-based PAUSE mode.
+    assert(ExerciseNode::consumeGenericPeak(event));
+    assert(event.gyroRadS > 2 && data().reps == 0 && data().repState == 2);
+
+    // An early peak is observable; it cannot manufacture five seconds of history.
+    ExerciseNode::begin(role);
+    assert(!ExerciseNode::consumeGenericPeak(event));
+    step(5);
+    genericPulse(true);
+    assert(ExerciseNode::consumeGenericPeak(event));
+    assert(ExerciseNode::copySensorWindow(event.peakMs, window, SensorHistoryConfig::CAPACITY).status
+           == SensorWindowStatus::INSUFFICIENT_HISTORY);
+
+    // Failed reads cannot confirm a peak that started before the interruption.
+    step(60);
+    step(8, 12.0f);
+    sensorHealthy = false;
+    step(10);
+    sensorHealthy = true;
+    step(10);
+    assert(!ExerciseNode::consumeGenericPeak(event));
+    genericPulse();
+    assert(ExerciseNode::consumeGenericPeak(event));
+    // Reboot drops an unconsumed event.
+    step(60);
+    genericPulse();
+    ExerciseNode::begin(role);
+    assert(!ExerciseNode::consumeGenericPeak(event));
+  }
   puts("Node startup, activation, reset, exercise/mode switching and LED tests passed");
   puts("Both node buffers, diagnostics, independent sampling and sensor-failure tests passed");
+  puts("Both node peak triggers, window timestamps and counting/radio independence tests passed");
 }
