@@ -95,8 +95,9 @@ check BUFFER's age_ms to spot stale data after sensor failures.
 For later integration, ExerciseNode::copySensorWindow(t0, destination, capacity)
 copies samples in chronological order. Call it from the same main loop as update().
 The caller owns the copy; subsequent ring writes cannot change it. OUTPUT_TOO_SMALL
-reports the required count without writing a partial result. No transport format,
-one-second sliding scheduler or clock synchronization is added in this step.
+reports the required count without writing a partial result. The local scheduler
+below uses this same extraction behaviour. Transport and clock synchronization
+are not implemented yet.
 Timestamps are local to each board and wrap modulo 2^32 milliseconds; comparisons
 assume timestamps less than 2^31 ms apart. Reboot starts a new local time reference.
 
@@ -124,7 +125,7 @@ After a confirmed peak, both filtered signals must drop below 45% of their gates
 for 80 ms to rearm. New excursions during the one-second trigger cooldown are
 ignored until the signals settle again. This is trigger debounce during motion,
 not a three-second startup wait. Sustained motion may produce only one trigger;
-the later streaming session will continue independently of subsequent peaks.
+the local window session continues independently of subsequent peaks.
 Candidates older than 2500 ms are discarded. Invalid values or sample gaps over
 100 ms discard the partial peak/filter state, without removing the cooldown.
 Counter RESET, exercise/mode changes and activation preserve the detector state.
@@ -145,18 +146,103 @@ Bench inspection, with either node powered and its serial monitor open:
    Verify that standby counts remain inactive and peaks cause no LED feedback.
    Try walking too: triggers are possible; exercise recognition belongs to comms.
 
-For later integration, call ExerciseNode::consumeGenericPeak(event) immediately
-after update(), in the same main loop. It returns the first unconsumed event once;
-copySensorWindow(event.peakMs, ...) then obtains the corresponding local window.
-Only one pending event is retained. Later peaks are logged but do not overwrite
-that first event; there is no event queue yet. Consuming does not reset cooldown.
-The event does not freeze history: delaying consumption can let its window expire.
-Early/expired/gapped windows must be handled using copySensorWindow's status.
-Reboot clears the detector and pending event. These local timestamps still need
-cross-board coordination before either node can trigger both pipelines.
+The local scheduler receives each fresh peak directly. consumeGenericPeak(event)
+remains an optional diagnostic observer: it returns the first unconsumed event
+once without consuming a prepared window or resetting detector cooldown. Later
+peaks are logged without replacing that pending observation. Reboot clears it.
+Do not use this diagnostic observer to drive a second window scheduler.
 
-The remaining steps add the one-second sliding-window scheduler, shared trigger
-coordination, and actual comms transport/feedback. No port is opened by a peak.
+LOCAL SLIDING WINDOWS (STEP 4, BEFORE COMMS INTEGRATION)
+
+Each node starts ARMED. Its first local generic peak starts its own window session.
+Sequence 0 is copied immediately when the peak is confirmed, before diagnostic
+output: [t0 - 5000, t0]. Following endpoints are t0 + 1000, t0 + 2000, etc.
+Each window is still five seconds long. Later peaks do not restart the timeline.
+No further peaks are needed for windows to continue. HIP and WRIST are independent
+here; a peak on one does not yet start the other. Timestamps are still local.
+
+Windows use actual samples, including both endpoints when present. At exactly
+50 Hz that is 251 samples; no padding, interpolation or fixed-size resampling is
+performed. If t0 falls between samples, each copied sample stays within the
+requested interval. Endpoint times remain on the t0-based grid despite loop jitter.
+The scheduler waits up to 100 ms for a successful read to cover a due endpoint;
+after that it records END_NOT_AVAILABLE/EMPTY rather than waiting indefinitely.
+It runs even when reads fail or the main loop is between scheduled sensor reads.
+
+An early peak still starts a session at its original t0. Its first windows may
+report EMPTY/INSUFFICIENT_HISTORY with no sample payload. Later windows become
+usable once enough history exists, without requiring a new peak. SAMPLE_GAP
+includes real samples with a gap flag. Consumers must check each window's status.
+If the loop stalls, at most the three most recent due slots are caught up, one
+per update; older slots increment skipped. Sequence numbers retain their original
+positions, so missing windows remain visible. The cadence never shifts to now.
+
+There is a FIFO queue of three snapshots (about 21 KB), in addition to the 11 KB
+history ring and 7 KB shared diagnostic scratch. All large arrays are static.
+Each snapshot holds 252 samples at the configured 50 Hz: 251 inclusive samples
+plus one for boundary timing jitter. If an interval exceeds that capacity, its
+record reports OUTPUT_TOO_SMALL with no payload; samples are never truncated.
+New ring samples cannot change queued/copied snapshots. A full queue preserves
+its existing windows, including sequence 0, and drops each new due window with
+QUEUE_FULL and an incremented dropped counter. Sampling/counting continue.
+There is no comms consumer yet, so unattended testing fills the queue after three
+records. STREAM:NEXT removes one record for bench inspection; it prints metadata
+only. Future comms must consume the queue regularly. This is not lossless storage.
+USB diagnostics have a 2 KB transmit buffer to reduce normal logging delays;
+excessive output can still block if that buffer fills.
+
+Commands (USB or Bluetooth, one command per line):
+  STREAM                  Show ARMED/RUNNING/STOPPED, session/t0, queue and loss counts.
+  STREAM:STOP             Stop preparation, clear the queue, disable automatic start.
+  STREAM:ARM              Wait for the next fresh peak if stopped. A running session
+                          keeps its current anchor. Does not reset the peak detector.
+  STREAM:START            Start now using the latest sample timestamp, without a peak.
+  STREAM:START:<t0_ms>    Start from a supplied past/current local timestamp. A future
+                          t0 or an already-running session is rejected unchanged.
+  STREAM:NEXT             Copy/remove the oldest queued record and print its summary.
+                          This is a diagnostic consumer, not transmission to Ultra96.
+
+There is no automatic inactivity timeout yet: preparation continues until STOP.
+Counter ACTIVATE, STANDBY, RESET, exercise/mode changes and peer LED events do not
+stop or restart the window session. STREAM controls do not activate/stop counting.
+STOP preserves the sensor history; START begins a new local session with sequence
+zero. ARM requires a new peak rather than replaying a previous pending observation.
+Reboot clears everything and returns to ARMED. Session numbers are local to a boot.
+
+Typical automatic output after a peak (example values, exact cadence assumed):
+  [PEAK | HIP | t0_ms=8240 | confirmed_ms=8340 | accel=1.60 m/s2 | gyro=0.10 rad/s]
+  [STREAM | HIP | RUNNING | session=1 | t0_ms=8240 | next_end_ms=9240 | queue=1 | dropped=0 | skipped=0 | local_only]
+  [FRAME | HIP | session=1 | seq=0 | READY | start_ms=3240 | end_ms=8240 | samples=251 | queue=1 | dropped=0 | skipped=0]
+  [FRAME | HIP | session=1 | seq=1 | READY | start_ms=4240 | end_ms=9240 | samples=251 | queue=2 | dropped=0 | skipped=0]
+FRAME means prepared locally, never sent. FRAME TAKEN means removed by STREAM:NEXT.
+If the queue fills, expect QUEUE_FULL on following intervals until records are taken.
+
+Bench check on each board independently:
+1. Power the node and leave counting in standby. STREAM should report ARMED.
+2. Allow at least five seconds of samples, then move through a peak. Expect seq=0
+   and then a window attempt each second, even if you stop moving.
+3. STREAM:NEXT displays/removes the oldest snapshot. Repeat about once per second
+   to emulate a consumer; otherwise observe queue=3 followed by QUEUE_FULL.
+4. STREAM:STOP clears the queue. Further peaks are still logged but cannot start
+   windows until STREAM:ARM or an explicit STREAM:START.
+5. Test STREAM:START without movement. Stop before trying another anchor/session.
+6. Counter reset/exercise changes should preserve the current t0 and sequence.
+
+Integration hooks in ExerciseNode.h (same main loop as update(), never a radio callback):
+  startWindowStream(t0) / stopWindowStream() / armWindowStream()
+  windowStreamStatus()
+  takeSensorWindow(destination)
+Allocate the ScheduledWindow destination statically/on the heap on ESP32, not on
+the main task stack. takeSensorWindow returns false without changing the output
+when empty. On true it copies and removes exactly one record; the caller owns it.
+Only samples[0 .. info.window.count) is valid, and only if window.copied() is true.
+SAMPLE_GAP still needs the consumer's policy; unavailable-history records have no
+sample payload. Taking is not an acknowledgement of delivery; a future transport
+must retain its own copy if it needs retries. The manual NEXT command consumes
+the same queue, so do not use it alongside the real comms consumer.
+
+The remaining steps add shared trigger/clock coordination and actual comms
+transport/feedback. No port is opened and no sensor payload is transmitted here.
 
 WIRELESS MONITORS ON WINDOWS
 
@@ -281,6 +367,9 @@ BUFFER
 WINDOW / WINDOW:<t0_ms>
   Copy and summarize the inclusive five-second window ending at the latest sample
   or the supplied local unsigned 32-bit timestamp. See LOCAL SENSOR HISTORY above.
+STREAM / STREAM:START[:t0_ms] / STREAM:STOP / STREAM:ARM / STREAM:NEXT
+  Control or inspect local window preparation independently of counting. See
+  LOCAL SLIDING WINDOWS for queue behaviour, diagnostic consumption and limitations.
 
 FIXED PRESETS
 
@@ -366,6 +455,9 @@ BENCH AND WEARABLE CHECKS
 - BUFFER/WINDOW work in standby on both boards, even when the peer is offline.
 - Counter RESET/exercise changes preserve history; only reboot clears it.
 - PEAK diagnostics appear on either board in standby without activating counting.
+- The first peak starts that board's local window timeline; later peaks preserve t0.
+- STREAM:STOP clears/disables the window queue; STREAM:ARM waits for a new peak.
+- With no consumer, queue=3/QUEUE_FULL must appear while sensor sampling continues.
 - Verify generic trigger sensitivity on the worn sensors, including walking/noise.
 - Compare counts/LEDs against full physical reps; mocks require tuning.
 
@@ -392,7 +484,7 @@ Transport-independent node switching/LED tests:
   .build/node_session_test.exe
 
 Firmware startup tests with fake sensor/radio/console hardware:
-  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp -o .build/exercise_node_startup_test.exe
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
 
 Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):
@@ -402,6 +494,10 @@ Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollov
 Generic peak tests (noise, axes, timing, rearm, cooldown, gaps, rollover):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/generic_peak_detector_test.cpp hardware/node/GenericPeakDetector.cpp -o .build/generic_peak_detector_test.exe
   .build/generic_peak_detector_test.exe
+
+Local window scheduler tests (anchoring, snapshots, overflow, catch-up, gaps, rollover):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/window_scheduler_test.cpp hardware/node/WindowScheduler.cpp hardware/node/SensorHistory.cpp -o .build/window_scheduler_test.exe
+  .build/window_scheduler_test.exe
 
 Host tests use synthetic samples. They do not establish physical counting accuracy
 or Bluetooth/ESP-NOW reliability. Compiling does not upload firmware to the boards.

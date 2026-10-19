@@ -65,7 +65,9 @@ void UsbConsole::begin(int baud) {
   config.source_clk = UART_SCLK_DEFAULT;
   ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &config));
   ESP_ERROR_CHECK(uart_set_pin(UART_NUM_0, 1, 3, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-  ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 1024, 0, 0, nullptr, 0));
+  // Queue normal telemetry/peak/window bursts instead of waiting for UART wire time.
+  // Excessive console output can still block once this finite buffer fills.
+  ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 1024, 2048, 0, nullptr, 0));
 }
 
 int UsbConsole::read() {

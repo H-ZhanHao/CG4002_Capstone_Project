@@ -29,6 +29,9 @@ SensorHistory sensorHistory;
 GenericPeakDetector genericPeakDetector;
 GenericPeakEvent pendingGenericPeak;
 bool genericPeakPending = false;
+WindowScheduler windowScheduler;
+// Shared diagnostic scratch: keep full sensor windows off the ESP-IDF task stack.
+ScheduledWindow windowScratch;
 
 ExerciseSettings genericSettings = getGenericSettings();
 
@@ -41,7 +44,8 @@ WirelessStreamer wirelessStreamer;
 
 void linkMessage(const char* text) { wirelessStreamer.message(text); }
 NodeSession nodeSession(NodeRadio::send, linkMessage);
-const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STATUS | HELP. Select Newline, then Send.";
+const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STREAM | STATUS | HELP. Select Newline, then Send.";
+const char* streamCommandHelp = "Windows: STREAM | STREAM:START[:t0_ms] | STREAM:STOP | STREAM:ARM | STREAM:NEXT. Local preparation only; no comms transmission.";
 
 bool wirelessStarted = false;
 
@@ -140,6 +144,50 @@ bool consumeGenericPeak(GenericPeakEvent& event) {
   return true;
 }
 
+WindowStreamStatus windowStreamStatus() { return windowScheduler.status(); }
+bool takeSensorWindow(ScheduledWindow& destination) { return windowScheduler.take(destination); }
+
+void reportStreamStatus() {
+  const WindowStreamStatus status = windowScheduler.status();
+  const char* state = status.state == WindowStreamState::RUNNING ? "RUNNING"
+    : status.state == WindowStreamState::ARMED ? "ARMED" : "STOPPED";
+  char line[216];
+  snprintf(line, sizeof(line),
+    "[STREAM | %s | %s | session=%lu | t0_ms=%lu | next_end_ms=%lu | queue=%u | dropped=%lu | skipped=%lu | local_only]",
+    nodeRole == HIP ? "HIP" : "WRIST", state, (unsigned long)status.session,
+    (unsigned long)status.triggerMs, (unsigned long)status.nextEndMs, (unsigned int)status.queued,
+    (unsigned long)status.dropped, (unsigned long)status.skipped);
+  wirelessStreamer.message(line);
+}
+
+void reportPreparedWindow() {
+  const WindowPreparation& prepared = windowScheduler.lastPreparation();
+  const WindowStreamStatus status = windowScheduler.status();
+  const SensorWindowResult& window = prepared.info.window;
+  char line[216];
+  snprintf(line, sizeof(line),
+    "[FRAME | %s | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u | queue=%u | dropped=%lu | skipped=%lu]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)prepared.info.session,
+    (unsigned long)prepared.info.sequence, prepared.queued ? sensorWindowStatusName(window.status) : "QUEUE_FULL",
+    (unsigned long)window.startMs, (unsigned long)window.endMs, (unsigned int)window.count,
+    (unsigned int)status.queued, (unsigned long)status.dropped, (unsigned long)status.skipped);
+  wirelessStreamer.message(line);
+}
+
+bool startWindowStream(uint32_t t0) {
+  if (!windowScheduler.start(t0, (uint32_t)millis(), sensorHistory)) return false;
+  reportStreamStatus();
+  reportPreparedWindow();
+  return true;
+}
+
+void stopWindowStream() { windowScheduler.stop(); }
+void armWindowStream() { windowScheduler.arm(); }
+
+void serviceWindowStream() {
+  if (windowScheduler.update((uint32_t)millis(), sensorHistory)) reportPreparedWindow();
+}
+
 void detectGenericPeak(const SensorSample& sample) {
   GenericPeakEvent event;
   if (!genericPeakDetector.update(sample, event)) return;
@@ -147,6 +195,9 @@ void detectGenericPeak(const SensorSample& sample) {
     pendingGenericPeak = event;
     genericPeakPending = true;
   }
+  // Freeze sequence zero before any diagnostic output can delay the main loop.
+  const bool started = windowScheduler.status().state == WindowStreamState::ARMED &&
+    windowScheduler.start(event.peakMs, (uint32_t)millis(), sensorHistory);
   // Diagnostic metadata only; no window payload, activation or peer trigger.
   char line[192];
   snprintf(line, sizeof(line),
@@ -154,6 +205,10 @@ void detectGenericPeak(const SensorSample& sample) {
     nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)event.peakMs,
     (unsigned long)event.detectedMs, event.accelerationMps2, event.gyroRadS);
   wirelessStreamer.message(line);
+  if (started) {
+    reportStreamStatus();
+    reportPreparedWindow();
+  }
 }
 
 void reportBuffer(unsigned long now) {
@@ -173,10 +228,8 @@ void reportBuffer(unsigned long now) {
 }
 
 void reportWindow(uint32_t endMs) {
-  // Static scratch storage keeps the snapshot off the ESP-IDF main task stack.
   // Only a small summary is printed; never dump hundreds of samples in update().
-  static SensorSample snapshot[SensorHistoryConfig::CAPACITY];
-  const SensorWindowResult result = copySensorWindow(endMs, snapshot, SensorHistoryConfig::CAPACITY);
+  const SensorWindowResult result = copySensorWindow(endMs, windowScratch.samples, WindowSchedulerConfig::SAMPLE_CAPACITY);
   char line[220];
   snprintf(line, sizeof(line),
     "[WINDOW | %s | %s | start_ms=%lu | t0_ms=%lu | samples=%u | first_ms=%lu | last_ms=%lu | max_gap_ms=%lu]",
@@ -226,13 +279,58 @@ void processCommand(char* command, unsigned long now) {
 
   if (!strcmp(text, "HELP")) {
     wirelessStreamer.message(commandHelp);
+    wirelessStreamer.message(streamCommandHelp);
     return;
   }
   if (!strcmp(text, "STATUS")) {
     nodeSession.status();
     reportExercise();
+    reportStreamStatus();
     wirelessStreamer.message(NodeRadio::ready() ? "[ESP-NOW configured and ready]"
       : "[ESP-NOW unavailable; check peer MAC configuration and USB boot messages]");
+    return;
+  }
+  if (!strcmp(text, "STREAM")) {
+    reportStreamStatus();
+    return;
+  }
+  if (!strcmp(text, "STREAM:STOP")) {
+    stopWindowStream();
+    reportStreamStatus();
+    return;
+  }
+  if (!strcmp(text, "STREAM:ARM")) {
+    armWindowStream();
+    reportStreamStatus();
+    return;
+  }
+  if (!strcmp(text, "STREAM:START") || !strncmp(text, "STREAM:START:", 13)) {
+    uint32_t t0 = sensorHistory.newestMs();
+    if (text[12] == ':' && !parseTimestamp(text + 13, t0)) {
+      wirelessStreamer.message("ERROR: Use STREAM:START or STREAM:START:<t0_ms>, an unsigned 32-bit local timestamp.");
+      return;
+    }
+    if (text[12] != ':' && !sensorHistory.size()) {
+      wirelessStreamer.message("ERROR: No sensor samples yet; use STREAM:ARM to wait for a peak.");
+      return;
+    }
+    if (!startWindowStream(t0))
+      wirelessStreamer.message("ERROR: Stream already running or t0 is in the future. STREAM:STOP before starting a new session.");
+    return;
+  }
+  if (!strcmp(text, "STREAM:NEXT")) {
+    if (!takeSensorWindow(windowScratch)) {
+      wirelessStreamer.message("[FRAME TAKEN | EMPTY]");
+      return;
+    }
+    char line[192];
+    const ScheduledWindowInfo& info = windowScratch.info;
+    snprintf(line, sizeof(line),
+      "[FRAME TAKEN | %s | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u]",
+      nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)info.session, (unsigned long)info.sequence,
+      sensorWindowStatusName(info.window.status), (unsigned long)info.window.startMs,
+      (unsigned long)info.window.endMs, (unsigned int)info.window.count);
+    wirelessStreamer.message(line);
     return;
   }
   if (!strcmp(text, "BUFFER")) {
@@ -440,6 +538,7 @@ void begin(NodeRole role) {
   sensorHistory.clear(); // Boot only; counter resets must preserve sensor history.
   genericPeakDetector.reset();
   genericPeakPending = false;
+  windowScheduler.reset();
   activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
   activeMode = ExercisePresets::defaultMode(activeExercise);
   usbConsole.begin(115200);
@@ -486,6 +585,8 @@ void begin(NodeRole role) {
   fallDetector.begin(now);
 
   wirelessStreamer.message(commandHelp);
+  wirelessStreamer.message(streamCommandHelp);
+  reportStreamStatus();
   nodeSession.status();
   reportExercise();
 
@@ -526,6 +627,7 @@ void update() {
     sampleTime - lastSampleTime <
     GeneralConfig::SAMPLE_INTERVAL_US
   ) {
+    serviceWindowStream();
     return;
   }
 
@@ -541,6 +643,7 @@ void update() {
       usbConsole.println("[MPU6050 read failed; check wiring]");
       lastSensorError = millis();
     }
+    serviceWindowStream();
     return;
   }
 
@@ -551,6 +654,7 @@ void update() {
   memcpy(sample.gyro, gyro, sizeof(gyro));
   sensorHistory.push(sample); // Runs on both boards, including standby/activation failure.
   detectGenericPeak(sample); // Independent of exercise, activation and counting mode.
+  serviceWindowStream();
   if (now - readStarted >= 100) {
     usbConsole.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
   }

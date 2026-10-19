@@ -299,7 +299,145 @@ int main() {
     ExerciseNode::begin(role);
     assert(!ExerciseNode::consumeGenericPeak(event));
   }
+  // The scheduler receives fresh peaks directly; observing a peak cannot consume its window.
+  static ScheduledWindow scheduled, firstWindow;
+  for (NodeRole role : {HIP, WRIST}) {
+    ExerciseNode::begin(role);
+    peerOnline = false;
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    step(260);
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
+    output.clear();
+    const unsigned int beforePackets = radioPackets, beforeLeds = readyEvents + repEvents;
+    genericPulse();
+    const auto started = ExerciseNode::windowStreamStatus();
+    assert(started.state == WindowStreamState::RUNNING && started.queued == 1);
+    GenericPeakEvent peak;
+    assert(ExerciseNode::consumeGenericPeak(peak));
+    assert(started.triggerMs == peak.peakMs && started.nextEndMs == peak.peakMs + 1000);
+    assert(ExerciseNode::takeSensorWindow(firstWindow));
+    assert(firstWindow.info.sequence == 0 && firstWindow.info.window.status == SensorWindowStatus::READY);
+    assert(firstWindow.info.window.endMs == peak.peakMs && firstWindow.info.window.count == 251);
+    assert(output.find(role == HIP ? "[FRAME | HIP" : "[FRAME | WRIST") != std::string::npos);
+    assert(data().reps == 0 && radioPackets == beforePackets && readyEvents + repEvents == beforeLeds);
+
+    // No new peak is required. Service follows the original t0, even in standby.
+    while ((uint32_t)now + 20 < started.nextEndMs) step(1);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    step(1);
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    assert(scheduled.info.sequence == 1 && scheduled.info.window.endMs == started.nextEndMs);
+    assert(scheduled.info.window.startMs == peak.peakMs - 4000);
+    assert(firstWindow.info.window.endMs == peak.peakMs); // Caller-owned snapshot remains unchanged.
+    command("RESET");
+    command("STANDBY");
+    command(role == HIP ? "EXERCISE:LUNGE" : "EXERCISE:SITUP");
+    command("STREAM:ARM"); // Re-arming a running stream must not move its anchor.
+    const auto unchanged = ExerciseNode::windowStreamStatus();
+    assert(unchanged.session == started.session && unchanged.triggerMs == started.triggerMs);
+    genericPulse(true);
+    assert(ExerciseNode::windowStreamStatus().triggerMs == started.triggerMs);
+
+    // A missing consumer fills a bounded queue. The sensor ring still advances.
+    step(250);
+    assert(ExerciseNode::windowStreamStatus().queued == 3 && ExerciseNode::windowStreamStatus().dropped > 0);
+    assert(output.find("QUEUE_FULL") != std::string::npos);
+    const auto endBeforeStop = ExerciseNode::windowStreamStatus().nextEndMs;
+    output.clear();
+    command("STREAM:NEXT");
+    assert(output.find("[FRAME TAKEN | ") != std::string::npos);
+    assert(ExerciseNode::windowStreamStatus().queued == 2);
+    assert(ExerciseNode::windowStreamStatus().nextEndMs == endBeforeStop);
+    command("STREAM:STOP");
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::STOPPED);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    step(60);
+    genericPulse();
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::STOPPED);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    command("STREAM:ARM");
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
+    step(60);
+    genericPulse(true);
+    assert(ExerciseNode::windowStreamStatus().session == started.session + 1);
+    assert(ExerciseNode::takeSensorWindow(scheduled) && scheduled.info.sequence == 0);
+    assert(scheduled.info.triggerMs != started.triggerMs);
+
+    // Manual start permits bench testing without a movement; invalid anchors do not start.
+    command("STREAM:STOP");
+    for (const char* bad : {"STREAM:START:", "STREAM:START:-1", "STREAM:START:4294967296", "STREAM:START:12X"}) {
+      output.clear();
+      command(bad);
+      assert(output.find("ERROR: Use STREAM:START") != std::string::npos);
+      assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::STOPPED);
+    }
+    assert(!ExerciseNode::startWindowStream((uint32_t)now + 1000));
+    const uint32_t manualT0 = (uint32_t)now;
+    command("STREAM:START");
+    assert(ExerciseNode::takeSensorWindow(scheduled) && scheduled.info.triggerMs == manualT0);
+    assert(scheduled.info.window.status == SensorWindowStatus::READY);
+    command("STREAM:START");
+    assert(ExerciseNode::windowStreamStatus().triggerMs == manualT0);
+
+    // Failed reads still service deadlines; recovery yields real samples with a gap flag.
+    sensorHealthy = false;
+    step(55);
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    assert(scheduled.info.sequence == 1 && scheduled.info.window.status == SensorWindowStatus::END_NOT_AVAILABLE);
+    sensorHealthy = true;
+    step(50);
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    assert(scheduled.info.sequence == 2 && scheduled.info.window.status == SensorWindowStatus::SAMPLE_GAP);
+    assert(scheduled.info.window.maxGapMs >= 1100);
+
+    // Stream controls do not stop an already activated counter or send peer packets.
+    peerOnline = true;
+    command("ACTIVATE");
+    const unsigned int packetsAfterActivation = radioPackets;
+    command("STREAM:STOP");
+    assert(data().repState == 2);
+    command("STREAM:START");
+    assert(data().repState == 2 && radioPackets == packetsAfterActivation);
+    command("STREAM:STOP");
+
+    // Endpoint time can arrive between sensor reads: the non-sampling path services it.
+    step(10);
+    const uint32_t failingT0 = (uint32_t)now - 11;
+    assert(ExerciseNode::startWindowStream(failingT0));
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    sensorHealthy = false;
+    step(54); // The failed endpoint is now 91 ms overdue.
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    now += 9; // 100 ms endpoint wait elapsed, less than the 20 ms sampling interval.
+    const unsigned int readsBeforeTimer = sampleReads;
+    ExerciseNode::update();
+    assert(sampleReads == readsBeforeTimer);
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    assert(scheduled.info.window.status == SensorWindowStatus::END_NOT_AVAILABLE);
+    sensorHealthy = true;
+
+    // An early trigger keeps its anchor and produces explicit unavailable-history records.
+    ExerciseNode::begin(role);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    step(5);
+    genericPulse();
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    assert(scheduled.info.sequence == 0 && scheduled.info.window.status == SensorWindowStatus::INSUFFICIENT_HISTORY);
+    const uint32_t earlyT0 = scheduled.info.triggerMs;
+    for (int second = 0; second < 6; ++second) {
+      step(50);
+      assert(ExerciseNode::takeSensorWindow(scheduled));
+      assert(scheduled.info.triggerMs == earlyT0);
+    }
+    assert(scheduled.info.window.status == SensorWindowStatus::READY);
+    assert(data().reps == 0);
+    ExerciseNode::begin(role);
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+  }
   puts("Node startup, activation, reset, exercise/mode switching and LED tests passed");
   puts("Both node buffers, diagnostics, independent sampling and sensor-failure tests passed");
   puts("Both node peak triggers, window timestamps and counting/radio independence tests passed");
+  puts("Both node automatic windows, stream controls, queue overflow and outage scheduling tests passed");
 }
