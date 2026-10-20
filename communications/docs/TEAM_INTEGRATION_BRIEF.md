@@ -26,7 +26,7 @@ The laptop bridges the private router network and the Ultra96 route through VPN/
 
 | Component | Behaviour |
 |---|---|
-| ESP32 firmware | Captures a local MPU6050 at 100 Hz after scheduled START; queues samples and sends framed binary messages. Handles handshake, clock sync, START/STOP, status and reconnects. |
+| ESP32 firmware | Continuously captures a local MPU6050 at 50 Hz into bounded history, detects a generic peak, and flushes history before live `PHYSICAL_DATA`. Handles handshake, clock sync, START_FLUSH/STOP, status and reconnects. |
 | `laptop/tcp_relay.py` | Copies bytes in both directions, with an independent upstream connection per client. Used separately for sensor traffic and phone traffic. Does not interpret messages or terminate TLS. |
 | `laptop/interactive_hub_relay.py` | Alternative sensor relay for keyboard-triggered tests, benchmarks and file transfers. This version terminates ESP32 TLS on the laptop before forwarding protocol frames through SSH. |
 | `ultra96/server.py` | Handles nodes concurrently, authenticates HELLO, assigns sessions, validates/decodes sensor frames, tracks stream health, synchronizes clocks, coordinates capture, and feeds a shared neutral sliding-window assembler. It does not yet feed an AI model. |
@@ -39,30 +39,36 @@ The sensor connection enters Ultra96 at port **5000**. The gateway listens on **
 
 1. Each node connects through the laptop and sends HELLO. Ultra96 validates its identity and allocates a fresh Session ID.
 2. Ultra96 performs five clock-sync exchanges per node and estimates each node's clock offset using the three lowest-delay usable rounds.
-3. Once both nodes have clock mappings, Ultra96 schedules a common START four seconds ahead. Both nodes acknowledge that they have armed it, then begin capture with sample sequence zero.
-4. Each node normally produces one sample every 10 ms. Capture timestamps and sequences are preserved through transport, so buffered samples still describe their original capture time.
+3. Once both nodes have fresh clock mappings, either node may report the first generic peak with `ACTIVITY_TRIGGER`. Ultra96 maps that peak and sends `START_FLUSH` to both nodes.
+4. Each node normally produces one sample every 20 ms. It sends the preceding five seconds oldest-first, catches up to the live edge, and then sends each new sample once. Capture timestamps and sequences are assigned at acquisition and preserved through buffering.
 5. Ultra96 refreshes clock mappings every 60 seconds. It applies small consistent corrections directly, slews toward larger ones and rejects poor measurements while retaining the previous mapping.
 
-If either START acknowledgement is missing after three seconds, Ultra96 sends STOP to both and requires a manual `start`. The server terminal also accepts `stop` to pause capture and `start` to resume when both nodes are ready.
+If either START_FLUSH acknowledgement is missing after three seconds, Ultra96 sends STOP to both and requires a manual `start`. The server terminal also accepts `stop` to disarm trigger handling and `start` to re-arm it when both nodes are ready. Continuous bounded acquisition remains separate from transmission.
 
 If a node disconnects, Ultra96 stops the surviving node. Reconnection requires a new session and synchronization before another common START. Firmware uses bounded buffering and reconnect backoff; delivery should not be treated as lossless through an outage. AI must handle sequence gaps and capture restarts.
 
 ## 4. For the AI teammate: receiving samples on Ultra96
 
-**Integration point:** `process_data()` in `ultra96/server.py`, called from each node's connection worker after frame assembly. It already decodes:
+**Integration point:** `process_physical_data()` in `ultra96/server.py`, called from each node's connection worker after frame assembly. It decodes:
 
 | Data | Meaning |
 |---|---|
 | `node_id`, `session_id` | Sensor identity and current connection session |
-| `sequence` | Per-source sample sequence; resets to zero on scheduled START, including within an existing session |
+| `sequence` | Capture sequence assigned once at acquisition; it does not reset at trigger/flush |
 | `timestamp_us` | ESP32 monotonic capture time, in microseconds |
 | `coordinator_timestamp_us` | Capture time mapped into Ultra96's monotonic clock; unavailable if no mapping exists |
-| `ax, ay, az, gx, gy, gz` | Six signed 16-bit raw sensor values |
-| `battery_mv`, `status`, `flags` | Battery reading and sample/transport conditions |
+| `ax, ay, az` | Three float32 acceleration values in m/s² |
+| `gx, gy, gz` | Three float32 angular-rate values in rad/s |
+| `status`, `flags` | Sensor validity, historical/mock/overflow and transport conditions |
 
-The wire format is a 24-byte header plus a 16-byte DATA payload, in network byte order. The payload is `!hhhhhhHH`: six signed axes, then unsigned battery and status. The AI code should consume decoded samples rather than implement another network parser.
+The physical wire format is a 24-byte common header plus a 26-byte
+`PHYSICAL_DATA` payload, all in network byte order. The payload is
+`!ffffffH`; capture timestamp and sequence remain in the header and there is no
+battery field. The version-1 raw `DATA` (`!hhhhhhHH`), TEST and benchmark
+formats remain available for their existing demo paths. AI code should consume
+decoded samples rather than implement another network parser.
 
-`process_data()` now returns a neutral decoded sample for ordinary mapped DATA.
+Both physical and legacy decode paths return the neutral decoded-sample type.
 The shared in-process adapter combines Node 1 and Node 2 into configurable,
 overlapping capture-time windows and reports sample counts, sequence gaps, and
 provisional cross-node timestamp skew. Benchmark and unmapped DATA are not
@@ -108,7 +114,7 @@ The gateway permits **one connected visualizer** and uses a latest-only pending 
 
 ## 7. What we need to integrate next
 
-1. Replace mock IMU production and confirm sensor identities, units and timing.
+1. Run the physical profiles with both MPU6050s and validate units, generic peak sensitivity, clock alignment and sustained 50 Hz timing.
 2. Connect the neutral completed-window adapter to AI and agree on tensor shape, scaling, missing-window policy, and backpressure.
 3. Publish real inference results through port 9100, with demo publishers disabled and a freshness cadence agreed with Unity.
 4. Connect `UpdateReceived` to the final Unity visuals and test both sensor reconnects and phone reconnects end to end.

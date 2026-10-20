@@ -27,14 +27,16 @@ Start it with the defaults:
 python server.py
 ```
 
-The server synchronizes both node clocks and normally schedules START
-automatically when both mappings are ready. Its terminal also accepts `start`
-and `stop`. A START must receive `CONTROL_ACK` from both nodes within three
-seconds; otherwise the server sends STOP to both and requires a manual `start`
-before capture can be attempted again.
+The physical path continuously captures on both nodes. After HELLO, the server
+synchronizes both clocks; only then does it accept an `ACTIVITY_TRIGGER` from
+either node. It maps the reported peak into the Ultra96 clock and sends one
+`START_FLUSH` to each node. Both commands must receive `CONTROL_ACK` within
+three seconds. The server then opens its assembler at five seconds before the
+common peak. A timeout sends STOP to both and requires a manual `start` to
+re-arm trigger handling. The terminal also accepts `start` and `stop`.
 
-After START is confirmed, the server assembles provisional two-node windows
-using mapped capture timestamps. The defaults are a 100 Hz expected rate, a
+After START_FLUSH is confirmed, the server assembles provisional two-node windows
+using mapped capture timestamps. The defaults are a 50 Hz expected rate, a
 five-second window, and a one-second hop. This complete example makes both the
 window and rotating-log settings explicit:
 
@@ -43,7 +45,7 @@ python server.py \
   --log-file /tmp/comms/logs/server.log \
   --log-max-mb 10 \
   --log-backups 5 \
-  --sample-rate-hz 100 \
+  --sample-rate-hz 50 \
   --window-seconds 5 \
   --hop-seconds 1
 ```
@@ -55,15 +57,16 @@ The server options are:
 | `--log-file` | `/tmp/comms/logs/server.log` | Active plain-text server log. |
 | `--log-max-mb` | `10` | Maximum size of each log file before rotation. |
 | `--log-backups` | `5` | Number of older rotated log files retained. Use `0` to retain none. |
-| `--sample-rate-hz` | `100` | Expected sampling rate used for window quality checks. |
+| `--sample-rate-hz` | `50` | Expected sampling rate used for window quality checks. |
 | `--window-seconds` | `5.0` | Duration of each assembled window. |
 | `--hop-seconds` | `1.0` | Time between consecutive window starts. |
 
 `--sample-rate-hz` changes only the expected sample count used for window
 quality checks and the server's sample-interval diagnostics; it does not
-change the ESP32 sampling rate. Normal DATA intervals may vary by 10% around
-the configured rate before a warning is emitted. To keep the terminal
-readable, one normal DATA summary is printed per node per second. Window and hop
+change the ESP32 sampling rate. The physical firmware currently advertises and
+produces 50 Hz. Normal sample intervals may vary by 10% around the configured
+rate before a warning is emitted. To keep the terminal readable, one normal
+sample summary is printed per node per second. Window and hop
 values must be positive, and the hop cannot exceed the window. Completed or
 rejected windows are summarized as `WINDOW_READY` or `WINDOW_REJECTED` without
 printing their sample contents. This is a neutral adapter for later AI

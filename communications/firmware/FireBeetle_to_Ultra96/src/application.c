@@ -8,6 +8,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "protocol.h"
+#include "app_config.h"
+#include "physical_pipeline.h"
 #include "sensor_source.h"
 #include "psa/crypto.h"
 
@@ -28,6 +30,7 @@ typedef enum {
 typedef struct {
     application_command_type_t type;
     uint32_t session_id;
+    uint32_t boot_id;
     size_t frame_length;
     uint64_t received_at_us;
     uint8_t frame[PROTOCOL_MAX_FRAME_SIZE];
@@ -53,9 +56,10 @@ typedef struct {
 
 typedef struct {
     bool valid;
+    uint8_t message_type;
     uint32_t sequence;
     size_t payload_length;
-    uint8_t payload[PROTOCOL_START_PAYLOAD_SIZE];
+    uint8_t payload[PROTOCOL_START_FLUSH_PAYLOAD_SIZE];
     protocol_control_ack_t ack;
 } control_cache_entry_t;
 
@@ -348,7 +352,8 @@ static bool replay_control_if_cached(
     control_cache_entry_t *cache)
 {
     if (!cache->valid || cache->sequence != header->sequence) return false;
-    if (cache->payload_length != header->payload_length ||
+    if (cache->message_type != header->message_type ||
+        cache->payload_length != header->payload_length ||
         memcmp(cache->payload, command->frame + PROTOCOL_HEADER_SIZE,
             header->payload_length) != 0) {
         enqueue_error(command->session_id, header->sequence,
@@ -365,6 +370,7 @@ static void cache_control_result(
 {
     memset(cache, 0, sizeof(*cache));
     cache->valid = true;
+    cache->message_type = header->message_type;
     cache->sequence = header->sequence;
     cache->payload_length = header->payload_length;
     if (header->payload_length > 0) {
@@ -421,6 +427,39 @@ static void process_start(
         (long long)local_start_us);
 }
 
+static void process_start_flush(
+    const application_command_t *command, const protocol_header_t *header,
+    control_state_t *state)
+{
+    protocol_start_flush_t flush;
+    if (header->node_id != 0 || header->flags != 0 ||
+        !protocol_decode_start_flush_payload(
+            command->frame + PROTOCOL_HEADER_SIZE, header->payload_length,
+            &flush) || flush.trigger_node_id < 1 || flush.trigger_node_id > 2) {
+        enqueue_error(command->session_id, header->sequence,
+            PROTOCOL_ERROR_INVALID_FRAME, PROTOCOL_MESSAGE_TYPE_START_FLUSH);
+        return;
+    }
+    if (replay_control_if_cached(command, header, &state->start)) return;
+    uint64_t effective_local_us = 0;
+#if APP_PHYSICAL_INTEGRATION
+    uint8_t result = physical_pipeline_start_flush(
+        command->session_id, header->sequence, &flush, &effective_local_us);
+#else
+    uint8_t result = PROTOCOL_CONTROL_RESULT_INVALID_STATE;
+#endif
+    protocol_control_ack_t ack = {
+        .command_type = PROTOCOL_MESSAGE_TYPE_START_FLUSH,
+        .result = result,
+        .command_sequence = header->sequence,
+        .effective_local_us = effective_local_us,
+    };
+    state->capture_requested = result == PROTOCOL_CONTROL_RESULT_APPLIED ||
+        result == PROTOCOL_CONTROL_RESULT_DUPLICATE;
+    cache_control_result(command, header, &state->start, &ack);
+    enqueue_control_ack(command->session_id, header->sequence, &ack);
+}
+
 static void process_stop(
     const application_command_t *command, const protocol_header_t *header,
     control_state_t *state)
@@ -441,7 +480,12 @@ static void process_stop(
         .command_sequence = header->sequence,
         .effective_local_us = (uint64_t)stopped_at_us,
     };
+#if APP_PHYSICAL_INTEGRATION
+    ack.result = physical_pipeline_stop_flush(
+        command->session_id, &ack.effective_local_us);
+#else
     (void)sensor_source_stop(configured_local_node_id);
+#endif
     state->capture_requested = false;
     cache_control_result(command, header, &state->stop, &ack);
     enqueue_control_ack(command->session_id, header->sequence, &ack);
@@ -542,6 +586,11 @@ static void process_frame(
         return;
     }
 
+    if (header.message_type == PROTOCOL_MESSAGE_TYPE_START_FLUSH) {
+        process_start_flush(command, &header, control_state);
+        return;
+    }
+
     if (header.message_type == PROTOCOL_MESSAGE_TYPE_STOP) {
         process_stop(command, &header, control_state);
         return;
@@ -591,6 +640,19 @@ static void application_task(void *argument)
     while (true) {
         application_command_t command;
         if (xQueueReceive(command_queue, &command, pdMS_TO_TICKS(250)) != pdPASS) {
+#if APP_PHYSICAL_INTEGRATION
+            physical_trigger_event_t trigger;
+            if (active_session_id != 0 &&
+                physical_pipeline_receive_trigger(&trigger, 0)) {
+                memset(&application_response_workspace, 0,
+                    sizeof(application_response_workspace));
+                application_response_workspace.type =
+                    APPLICATION_RESPONSE_ACTIVITY_TRIGGER;
+                application_response_workspace.session_id = active_session_id;
+                application_response_workspace.trigger_event = trigger;
+                (void)enqueue_response(&application_response_workspace);
+            }
+#endif
             if (file_transfer.active &&
                 esp_timer_get_time() - file_transfer.last_activity_us >=
                     (int64_t)FILE_TRANSFER_TIMEOUT_MS * 1000) {
@@ -617,7 +679,12 @@ static void application_task(void *argument)
             next_cache_index = 0;
             reset_file_transfer(&file_transfer);
             memset(&control_state, 0, sizeof(control_state));
+#if APP_PHYSICAL_INTEGRATION
+            (void)physical_pipeline_begin_session(
+                command.session_id, command.boot_id);
+#else
             (void)sensor_source_stop(configured_local_node_id);
+#endif
             ESP_LOGI(TAG, "Application session started: %lu",
                 (unsigned long)active_session_id);
             continue;
@@ -633,7 +700,11 @@ static void application_task(void *argument)
                         (unsigned long)file_transfer.next_offset);
                 reset_file_transfer(&file_transfer);
                 memset(&control_state, 0, sizeof(control_state));
+#if APP_PHYSICAL_INTEGRATION
+                physical_pipeline_end_session(command.session_id);
+#else
                 (void)sensor_source_stop(configured_local_node_id);
+#endif
                 ESP_LOGI(TAG, "Application session ended");
             }
             continue;
@@ -687,12 +758,14 @@ esp_err_t application_start(uint8_t local_node_id)
 }
 
 /* Queue an explicit boundary that clears replay, benchmark, and file state. */
-bool application_begin_session(uint32_t session_id)
+bool application_begin_session(uint32_t session_id, uint32_t boot_id)
 {
     application_command_t command = {
         .type = APPLICATION_COMMAND_BEGIN_SESSION, .session_id = session_id,
+        .boot_id = boot_id,
     };
-    if (session_id == 0 || command_queue == NULL || response_queue == NULL) return false;
+    if (session_id == 0 || boot_id == 0 || command_queue == NULL ||
+        response_queue == NULL) return false;
     xQueueReset(command_queue);
     xQueueReset(response_queue);
     return xQueueSend(command_queue, &command, 0) == pdPASS;

@@ -5,7 +5,7 @@
 
 #include "mpu6050_imu.h"
 
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
@@ -48,19 +48,20 @@ typedef struct {
 
 static mpu6050_source_t sources[7];
 static portMUX_TYPE source_state_lock = portMUX_INITIALIZER_UNLOCKED;
-static bool i2c_installed = false;
+static i2c_master_bus_handle_t i2c_bus;
+static i2c_master_dev_handle_t i2c_device;
 
 static esp_err_t write_register(uint8_t reg, uint8_t value)
 {
     uint8_t bytes[2] = {reg, value};
-    return i2c_master_write_to_device(MPU6050_I2C_PORT, MPU6050_ADDRESS,
-        bytes, sizeof(bytes), pdMS_TO_TICKS(MPU6050_IO_TIMEOUT_MS));
+    return i2c_master_transmit(i2c_device, bytes, sizeof(bytes),
+        MPU6050_IO_TIMEOUT_MS);
 }
 
 static esp_err_t read_registers(uint8_t reg, uint8_t *data, size_t length)
 {
-    return i2c_master_write_read_device(MPU6050_I2C_PORT, MPU6050_ADDRESS,
-        &reg, 1, data, length, pdMS_TO_TICKS(MPU6050_IO_TIMEOUT_MS));
+    return i2c_master_transmit_receive(i2c_device, &reg, 1, data, length,
+        MPU6050_IO_TIMEOUT_MS);
 }
 
 static int16_t signed_be(const uint8_t *bytes)
@@ -70,21 +71,29 @@ static int16_t signed_be(const uint8_t *bytes)
 
 static esp_err_t initialize_sensor(void)
 {
-    if (!i2c_installed) {
-        i2c_config_t config = {
-            .mode = I2C_MODE_MASTER,
+    if (i2c_bus == NULL) {
+        i2c_master_bus_config_t bus_config = {
+            .i2c_port = MPU6050_I2C_PORT,
             .sda_io_num = MPU6050_SDA_GPIO,
             .scl_io_num = MPU6050_SCL_GPIO,
-            .sda_pullup_en = GPIO_PULLUP_ENABLE,
-            .scl_pullup_en = GPIO_PULLUP_ENABLE,
-            .master.clk_speed = MPU6050_I2C_HZ,
-            .clk_flags = 0,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
         };
-        ESP_RETURN_ON_ERROR(i2c_param_config(MPU6050_I2C_PORT, &config),
+        ESP_RETURN_ON_ERROR(i2c_new_master_bus(&bus_config, &i2c_bus),
             TAG, "I2C configuration failed");
-        ESP_RETURN_ON_ERROR(i2c_driver_install(MPU6050_I2C_PORT,
-            I2C_MODE_MASTER, 0, 0, 0), TAG, "I2C driver install failed");
-        i2c_installed = true;
+        i2c_device_config_t device_config = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = MPU6050_ADDRESS,
+            .scl_speed_hz = MPU6050_I2C_HZ,
+        };
+        esp_err_t add_result = i2c_master_bus_add_device(
+            i2c_bus, &device_config, &i2c_device);
+        if (add_result != ESP_OK) {
+            (void)i2c_del_master_bus(i2c_bus);
+            i2c_bus = NULL;
+            return add_result;
+        }
     }
 
     uint8_t identity = 0;

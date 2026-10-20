@@ -38,6 +38,11 @@
 #define APP_USE_MOCK_IMU 0
 #endif
 
+/* Continuous physical-unit history/trigger/flush integration. */
+#ifndef APP_PHYSICAL_INTEGRATION
+#define APP_PHYSICAL_INTEGRATION 0
+#endif
+
 #if APP_NODE_ROLE != APP_ROLE_HUB && APP_NODE_ROLE != APP_ROLE_LEAF
 #error "APP_NODE_ROLE must be APP_ROLE_HUB or APP_ROLE_LEAF"
 #endif

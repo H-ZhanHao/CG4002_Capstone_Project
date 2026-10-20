@@ -37,6 +37,7 @@
 #include "application.h"
 #include "sensor_source.h"
 #include "protocol.h"
+#include "physical_pipeline.h"
 
 #define BENCHMARK_MAX_BATCH_FRAMES 16
 
@@ -89,6 +90,7 @@ static protocol_hello_t hello_message;
 static uint8_t active_node_mask = 0;
 static tcp_client_overflow_count_fn_t get_overflow_count = NULL;
 static bool tls_enabled = false;
+static bool physical_samples_enabled = false;
 static const char *tls_ca_certificate = NULL;
 static const char *tls_server_identity = NULL;
 /* Singleton transport task owns this bounded buffer; keep it off its TLS-heavy stack. */
@@ -751,6 +753,17 @@ static void record_data_sent(
     state->latest_status = sample->status;
 }
 
+static void record_physical_data_sent(
+    source_transport_state_t states[7],
+    const protocol_physical_sample_t *sample, int64_t sent_at_us)
+{
+    if (sample->node_id < 1 || sample->node_id > 6) return;
+    source_transport_state_t *state = &states[sample->node_id];
+    state->last_data_sent_us = sent_at_us;
+    state->latest_battery_mv = 0;
+    state->latest_status = sample->status;
+}
+
 /* Report active sources that have produced no DATA for the heartbeat interval. */
 static bool send_due_heartbeats(
     transport_connection_t *connection,
@@ -776,8 +789,11 @@ static bool send_due_heartbeats(
             .sequence = state->heartbeat_sequence,
             .timestamp_us = (uint64_t)now_us,
             .battery_mv = state->latest_battery_mv,
-            .status = state->latest_status |
-                PROTOCOL_STATUS_SOURCE_UNAVAILABLE,
+            /* Physical nodes intentionally retain samples without publishing
+             * before START_FLUSH. That quiet period is not sensor failure. */
+            .status = physical_samples_enabled
+                ? state->latest_status
+                : state->latest_status | PROTOCOL_STATUS_SOURCE_UNAVAILABLE,
             .overflow_count = get_overflow_count == NULL
                 ? 0
                 : get_overflow_count(node_id),
@@ -883,7 +899,7 @@ static void tcp_client_task(void *argument)
             tls_enabled ? "TLS" : "TCP");
 
         uint8_t hello_packet[PROTOCOL_HELLO_PACKET_SIZE];
-        uint8_t packet[PROTOCOL_DATA_PACKET_SIZE];
+        uint8_t packet[PROTOCOL_PHYSICAL_DATA_PACKET_SIZE];
         receive_buffer_t receive_buffer = {0};
         uint32_t session_id = 0;
 
@@ -929,10 +945,12 @@ static void tcp_client_task(void *argument)
 
         initialize_source_states(source_states, connected_since_us);
 
+#if !APP_PHYSICAL_INTEGRATION
         (void)sensor_source_stop(hello_message.hub_node_id);
+#endif
         xQueueReset(input_queue);
 
-        if (!application_begin_session(session_id)) {
+        if (!application_begin_session(session_id, hello_message.boot_id)) {
             ESP_LOGE(TAG, "Could not begin application session");
             connection_ok = false;
         }
@@ -1023,6 +1041,20 @@ static void tcp_client_task(void *argument)
                     );
                     connection_ok = send_complete(
                         &connection, ack_packet, sizeof(ack_packet));
+                    continue;
+                }
+
+                if (application_response->type ==
+                    APPLICATION_RESPONSE_ACTIVITY_TRIGGER) {
+                    uint8_t trigger_packet[PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE];
+                    const physical_trigger_event_t *event =
+                        &application_response->trigger_event;
+                    protocol_encode_activity_trigger(
+                        trigger_packet, hello_message.hub_node_id, session_id,
+                        event->sequence, event->detected_timestamp_us,
+                        &event->trigger);
+                    connection_ok = send_complete(
+                        &connection, trigger_packet, sizeof(trigger_packet));
                     continue;
                 }
 
@@ -1118,31 +1150,36 @@ static void tcp_client_task(void *argument)
                     benchmark.send_failures++;
                 }
             } else {
-            imu_sample_t sample;
-            bool sample_available = xQueueReceive(
-                input_queue,
-                &sample,
-                pdMS_TO_TICKS(SAMPLE_QUEUE_POLL_MS)
-            ) == pdPASS;
-
-            if (sample_available) {
-                protocol_encode_data(packet, &sample, session_id);
-
-                connection_ok = send_complete(
-                    &connection,
-                    packet,
-                    sizeof(packet)
-                );
-
-                if (connection_ok) {
-                    record_data_sent(
-                        source_states,
-                        &sample,
-                        esp_timer_get_time()
-                    );
+            if (physical_samples_enabled) {
+                protocol_physical_sample_t sample;
+                bool available = xQueueReceive(input_queue, &sample,
+                    pdMS_TO_TICKS(SAMPLE_QUEUE_POLL_MS)) == pdPASS;
+                if (available) {
+                    connection_ok = protocol_encode_physical_data(
+                        packet, &sample, session_id) &&
+                        send_complete(&connection, packet,
+                            PROTOCOL_PHYSICAL_DATA_PACKET_SIZE);
+                    if (connection_ok) record_physical_data_sent(
+                        source_states, &sample, esp_timer_get_time());
+                    if (connection_ok && (sample.sequence % 50) == 0) {
+                        ESP_LOGI(TAG,
+                            "Sent PHYSICAL_DATA node=%u sequence=%lu queue=%u",
+                            sample.node_id, (unsigned long)sample.sequence,
+                            (unsigned int)uxQueueMessagesWaiting(input_queue));
+                    }
                 }
-
-                if (connection_ok && (sample.sequence % 50) == 0) {
+            } else {
+                imu_sample_t sample;
+                bool sample_available = xQueueReceive(
+                    input_queue, &sample,
+                    pdMS_TO_TICKS(SAMPLE_QUEUE_POLL_MS)) == pdPASS;
+                if (sample_available) {
+                    protocol_encode_data(packet, &sample, session_id);
+                    connection_ok = send_complete(
+                        &connection, packet, PROTOCOL_DATA_PACKET_SIZE);
+                    if (connection_ok) record_data_sent(
+                        source_states, &sample, esp_timer_get_time());
+                    if (connection_ok && (sample.sequence % 50) == 0) {
                     ESP_LOGI(
                         TAG,
                         "Sent: node=%u sequence=%lu "
@@ -1154,6 +1191,7 @@ static void tcp_client_task(void *argument)
                         (unsigned long)esp_get_free_heap_size(),
                         (unsigned long)esp_get_minimum_free_heap_size()
                     );
+                }
                 }
             }
             }
@@ -1204,7 +1242,9 @@ static void tcp_client_task(void *argument)
         if (benchmark.active) {
             benchmark.active = false;
         }
+#if !APP_PHYSICAL_INTEGRATION
         (void)sensor_source_stop(hello_message.hub_node_id);
+#endif
         xQueueReset(input_queue);
         transport_close(&connection);
 
@@ -1256,6 +1296,7 @@ esp_err_t tcp_client_start(const tcp_client_config_t *config)
     active_node_mask = config->active_node_mask;
     get_overflow_count = config->get_overflow_count;
     tls_enabled = config->use_tls;
+    physical_samples_enabled = config->physical_samples;
     tls_ca_certificate = config->tls_ca_certificate;
     tls_server_identity = config->tls_server_identity;
 

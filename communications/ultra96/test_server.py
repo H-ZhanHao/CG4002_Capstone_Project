@@ -7,6 +7,7 @@ import os
 import struct
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 
@@ -103,7 +104,7 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
         self.assertEqual(
             (defaults.sample_rate_hz, defaults.window_seconds,
              defaults.hop_seconds),
-            (100, 5.0, 1.0))
+            (50, 5.0, 1.0))
         explicit = server.parse_args([
             "--sample-rate-hz", "100", "--window-seconds", "4.5",
             "--hop-seconds", "0.5"])
@@ -194,6 +195,151 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
             build_control_ack(node, server.MESSAGE_TYPE_START, sequence), node)
         coordinator.unregister(node)
         self.assertIn("Node 1 disconnected", assembler.stopped)
+
+
+class PhysicalIntegrationTest(unittest.TestCase):
+    def build_physical(self, node_id=1, session_id=101, sequence=7,
+                       timestamp_us=7_000_000, status=None, values=None):
+        if status is None:
+            status = server.STATUS_SENSOR_VALID | server.STATUS_HISTORICAL
+        if values is None:
+            values = (1.0, -2.0, 0.5, -0.25, 3.0, 0.0)
+        payload = struct.pack("!ffffffH", *values, status)
+        return server.build_header(
+            server.MESSAGE_TYPE_PHYSICAL_DATA, node_id=node_id,
+            payload_length=len(payload), session_id=session_id,
+            sequence=sequence, timestamp_us=timestamp_us) + payload
+
+    def build_trigger(self, connection, sequence=9, peak_us=7_000_000,
+                      arm_generation=1, detected_us=7_060_000):
+        payload = struct.pack(
+            "!IIQ", connection.boot_id, arm_generation, peak_us)
+        return server.build_header(
+            server.MESSAGE_TYPE_ACTIVITY_TRIGGER,
+            node_id=connection.node_id, payload_length=len(payload),
+            session_id=connection.session_id, sequence=sequence,
+            timestamp_us=detected_us) + payload
+
+    def test_physical_data_matches_c_golden_and_rejects_invalid_values(self):
+        frame = self.build_physical(
+            sequence=0x01020304,
+            timestamp_us=0x0102030405060708,
+            status=server.STATUS_SENSOR_VALID | server.STATUS_HISTORICAL)
+        self.assertEqual(frame.hex(),
+            "a55a01120100001a00000065010203040102030405060708"
+            "3f800000c00000003f000000be80000040400000000000000003")
+        mapping = server.ClockMapping(100, 20, 1)
+        decoded = server.process_physical_data(
+            frame, {}, 101, 1 << 1, mapping, 50)
+        self.assertEqual(decoded.battery_mv, 0)
+        self.assertEqual(decoded.coordinator_timestamp_us,
+                         0x0102030405060708 - 100)
+        nan_frame = self.build_physical(values=(float("nan"), 0, 0, 0, 0, 0))
+        with self.assertRaises(server.ProtocolError):
+            server.process_physical_data(
+                nan_frame, {}, 101, 1 << 1, mapping, 50)
+        with self.assertRaises(server.ProtocolError):
+            server.process_physical_data(
+                self.build_physical(session_id=999), {}, 101, 1 << 1,
+                mapping, 50)
+
+    def test_physical_replay_duplicate_and_timestamp_regression_rejected(self):
+        mapping = server.ClockMapping(0, 20, 1)
+        state = {}
+        first = self.build_physical(sequence=10, timestamp_us=1_000_000)
+        server.process_physical_data(first, state, 101, 1 << 1, mapping, 50)
+        with self.assertRaises(server.ProtocolError):
+            server.process_physical_data(first, state, 101, 1 << 1, mapping, 50)
+        with self.assertRaises(server.ProtocolError):
+            server.process_physical_data(
+                self.build_physical(sequence=11, timestamp_us=999_999),
+                state, 101, 1 << 1, mapping, 50)
+
+    def test_two_node_trigger_maps_one_t0_and_duplicate_is_idempotent(self):
+        assembler = RecordingAssembler()
+        coordinator = server.CaptureCoordinator(
+            window_assembler=assembler, auto_start=True, physical_mode=True)
+        sock1, sock2 = RecordingSocket(), RecordingSocket()
+        node1 = server.NodeControlConnection(
+            sock1, 1, 101, coordinator, boot_id=0x11111111)
+        node2 = server.NodeControlConnection(
+            sock2, 2, 202, coordinator, boot_id=0x22222222)
+        now_us = time.monotonic_ns() // 1000
+        node1.mapping = server.ClockMapping(100, 20, now_us)
+        node2.mapping = server.ClockMapping(-200, 20, now_us)
+        coordinator.register(node1)
+        coordinator.register(node2)
+        trigger = self.build_trigger(node1)
+        self.assertTrue(server.process_activity_trigger(trigger, node1))
+        self.assertEqual(server.unpack_header(sock1.frames[-1])[2],
+                         server.MESSAGE_TYPE_START_FLUSH)
+        left = struct.unpack("!QqIB3xI", sock1.frames[-1][server.HEADER_SIZE:])
+        right = struct.unpack("!QqIB3xI", sock2.frames[-1][server.HEADER_SIZE:])
+        self.assertEqual(left[0], right[0])
+        self.assertEqual((left[1], right[1]), (100, -200))
+        frame_counts = (len(sock1.frames), len(sock2.frames))
+        self.assertFalse(server.process_activity_trigger(trigger, node1))
+        self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)
+        command_sequence = server.unpack_header(sock1.frames[-1])[7]
+        server.process_control_ack(build_control_ack(
+            node1, server.MESSAGE_TYPE_START_FLUSH, command_sequence), node1)
+        server.process_control_ack(build_control_ack(
+            node2, server.MESSAGE_TYPE_START_FLUSH, command_sequence), node2)
+        self.assertEqual(
+            assembler.started,
+            [(command_sequence, left[0] - server.PHYSICAL_HISTORY_DURATION_US)])
+
+    def test_physical_stop_disarms_triggers_until_manual_start(self):
+        coordinator = server.CaptureCoordinator(
+            auto_start=True, physical_mode=True)
+        sock1, sock2 = RecordingSocket(), RecordingSocket()
+        node1 = server.NodeControlConnection(
+            sock1, 1, 101, coordinator, boot_id=0x11111111)
+        node2 = server.NodeControlConnection(
+            sock2, 2, 202, coordinator, boot_id=0x22222222)
+        now_us = time.monotonic_ns() // 1000
+        node1.mapping = server.ClockMapping(100, 20, now_us)
+        node2.mapping = server.ClockMapping(-200, 20, now_us)
+        coordinator.register(node1)
+        coordinator.register(node2)
+
+        coordinator.request_stop()
+        trigger = self.build_trigger(node1)
+        frame_counts = (len(sock1.frames), len(sock2.frames))
+        self.assertFalse(server.process_activity_trigger(trigger, node1))
+        self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)
+
+        coordinator.request_start()
+        self.assertTrue(server.process_activity_trigger(trigger, node1))
+        self.assertEqual(server.unpack_header(sock1.frames[-1])[2],
+                         server.MESSAGE_TYPE_START_FLUSH)
+
+    def test_five_seconds_history_then_live_builds_one_two_node_window(self):
+        config = server.WindowConfig(
+            sample_rate_hz=50, window_us=5_000_000, hop_us=1_000_000)
+        assembler = server.WindowAssembler(config)
+        assembler.start_run(12, 2_000_000)
+        mappings = {1: server.ClockMapping(100, 10, 1),
+                    2: server.ClockMapping(-200, 10, 1)}
+        states = {1: {}, 2: {}}
+        completed = []
+        for index in range(251):
+            coordinator_us = 2_000_000 + index * 20_000
+            for node_id, session_id in ((1, 101), (2, 202)):
+                local_us = coordinator_us + mappings[node_id].node_minus_coordinator_us
+                status = server.STATUS_SENSOR_VALID
+                if index < 250:
+                    status |= server.STATUS_HISTORICAL
+                decoded = server.process_physical_data(
+                    self.build_physical(
+                        node_id=node_id, session_id=session_id, sequence=index,
+                        timestamp_us=local_us, status=status),
+                    states[node_id], session_id, 1 << node_id,
+                    mappings[node_id], 50)
+                completed.extend(assembler.submit(decoded))
+        self.assertEqual(len(completed), 1)
+        self.assertTrue(completed[0].quality.accepted)
+        self.assertEqual(completed[0].quality.sample_counts, {1: 250, 2: 250})
 
 
 class ClockSynchronizationTest(unittest.TestCase):
@@ -925,7 +1071,7 @@ class TestResponseTest(unittest.TestCase):
                 server.STATUS_MOCK_DATA | server.STATUS_TEST_REQUEST_PROCESSED),
             "mock_data|test_request_processed",
         )
-        self.assertEqual(server.describe_status(0x0001), "unknown_0x0001")
+        self.assertEqual(server.describe_status(0x0001), "sensor_valid")
 
     def test_node_lines_use_orange_for_one_and_blue_for_two(self):
         self.assertEqual(

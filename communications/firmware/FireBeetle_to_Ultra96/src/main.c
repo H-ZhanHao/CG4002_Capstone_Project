@@ -25,6 +25,7 @@
 #include "hub_router.h"
 #include "imu_source.h"
 #include "protocol.h"
+#include "physical_pipeline.h"
 #include "sensor_source.h"
 #include "tcp_client.h"
 #include "wifi_manager.h"
@@ -79,7 +80,9 @@ static const char *TAG = "application";
 #if APP_NODE_ROLE == APP_ROLE_HUB
 #if !APP_WIFI_ASSOCIATION_ONLY
 static QueueHandle_t hub_outbound_queue = NULL;
+#if !APP_PHYSICAL_INTEGRATION
 static QueueHandle_t hub_router_input_queue = NULL;
+#endif
 #endif
 #if !APP_HUB_LOCAL_ONLY && !APP_WIFI_ASSOCIATION_ONLY
 static bool hub_espnow_started = false;
@@ -161,7 +164,8 @@ static void wifi_connected(void *context)
         .firmware_major = 1,
         .firmware_minor = 0,
         .firmware_patch = 0,
-        .supported_sampling_rates = PROTOCOL_SAMPLE_RATE_100_HZ,
+        .supported_sampling_rates = APP_PHYSICAL_INTEGRATION
+            ? PROTOCOL_SAMPLE_RATE_50_HZ : PROTOCOL_SAMPLE_RATE_100_HZ,
         .assigned_node_mask = ASSIGNED_NODE_MASK,
         .active_node_mask = ACTIVE_NODE_MASK,
         .device_token = DEVELOPMENT_DEVICE_TOKEN,
@@ -174,7 +178,10 @@ static void wifi_connected(void *context)
         .tls_ca_certificate = NULL,
         .tls_server_identity = NULL,
 #endif
-        .get_overflow_count = hub_router_get_dropped_count_for_node,
+        .get_overflow_count = APP_PHYSICAL_INTEGRATION
+            ? physical_pipeline_get_overwrite_count
+            : hub_router_get_dropped_count_for_node,
+        .physical_samples = APP_PHYSICAL_INTEGRATION,
     };
 
     esp_err_t result = tcp_client_start(&tcp_config);
@@ -226,16 +233,22 @@ static void start_hub(void)
         return;
     }
 
-    hub_outbound_queue = xQueueCreate(
-        HUB_OUTBOUND_QUEUE_LENGTH,
-        sizeof(imu_sample_t)
-    );
+    hub_outbound_queue = xQueueCreate(HUB_OUTBOUND_QUEUE_LENGTH,
+        APP_PHYSICAL_INTEGRATION ? sizeof(protocol_physical_sample_t)
+                                 : sizeof(imu_sample_t));
 
     if (hub_outbound_queue == NULL) {
         ESP_LOGE(TAG, "Could not create Hub outbound queue");
         return;
     }
 
+#if APP_PHYSICAL_INTEGRATION
+    result = physical_pipeline_start(hub_outbound_queue, HUB_NODE_ID);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Could not start physical pipeline: %s", esp_err_to_name(result));
+        return;
+    }
+#else
     result = hub_router_start(
         hub_outbound_queue,
         &hub_router_input_queue
@@ -245,7 +258,6 @@ static void start_hub(void)
         ESP_LOGE(TAG, "Could not start hub router: %s", esp_err_to_name(result));
         return;
     }
-
     result = sensor_source_start(hub_router_input_queue, HUB_NODE_ID);
 
     if (result != ESP_OK) {
@@ -257,6 +269,7 @@ static void start_hub(void)
         );
         return;
     }
+#endif
 
     result = wifi_manager_start(wifi_connected, NULL);
 
@@ -267,8 +280,9 @@ static void start_hub(void)
 
     ESP_LOGI(
         TAG,
-        "Hub Node %u started; local 100 Hz MPU6050 stream ready; ESP-NOW %s",
+        "Hub Node %u started; local %s stream ready; ESP-NOW %s",
         HUB_NODE_ID,
+        APP_PHYSICAL_INTEGRATION ? "continuous 50 Hz physical" : "100 Hz raw",
         APP_HUB_LOCAL_ONLY ? "disabled" : "enabled"
     );
 #endif

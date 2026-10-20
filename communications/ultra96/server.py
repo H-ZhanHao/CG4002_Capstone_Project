@@ -45,10 +45,13 @@ HEADER_SIZE = 24
 HELLO_PAYLOAD_SIZE = 44
 HELLO_ACK_PAYLOAD_SIZE = 0
 DATA_PAYLOAD_SIZE = 16
+PHYSICAL_DATA_PAYLOAD_SIZE = 26
 ERROR_PAYLOAD_SIZE = 4
 MAX_PAYLOAD_SIZE = 1024
 SYNC_REQ_PAYLOAD_SIZE = 8
 SYNC_RESP_PAYLOAD_SIZE = 24
+ACTIVITY_TRIGGER_PAYLOAD_SIZE = 16
+START_FLUSH_PAYLOAD_SIZE = 28
 START_PAYLOAD_SIZE = 16
 STOP_PAYLOAD_SIZE = 0
 CONTROL_ACK_PAYLOAD_SIZE = 16
@@ -59,11 +62,14 @@ MESSAGE_TYPE_HELLO = 0x01
 MESSAGE_TYPE_HELLO_ACK = 0x02
 MESSAGE_TYPE_SYNC_REQ = 0x03
 MESSAGE_TYPE_SYNC_RESP = 0x04
+MESSAGE_TYPE_ACTIVITY_TRIGGER = 0x05
+MESSAGE_TYPE_START_FLUSH = 0x06
 MESSAGE_TYPE_START = 0x07
 MESSAGE_TYPE_STOP = 0x08
 MESSAGE_TYPE_CONTROL_ACK = 0x09
 MESSAGE_TYPE_DATA = 0x10
 MESSAGE_TYPE_HEARTBEAT = 0x11
+MESSAGE_TYPE_PHYSICAL_DATA = 0x12
 MESSAGE_TYPE_TEST_RESPONSE = 0x21
 MESSAGE_TYPE_BENCHMARK_REPORT = 0x23
 MESSAGE_TYPE_FILE_BEGIN = 0x30
@@ -78,11 +84,17 @@ STATUS_MOCK_DATA = 0x8000
 STATUS_SOURCE_UNAVAILABLE = 0x4000
 STATUS_TEST_REQUEST_PROCESSED = 0x2000
 STATUS_BENCHMARK = 0x1000
+STATUS_SENSOR_VALID = 0x0001
+STATUS_HISTORICAL = 0x0002
+STATUS_HISTORY_OVERWRITE = 0x0004
 KNOWN_STATUS_MASK = (
     STATUS_MOCK_DATA
     | STATUS_SOURCE_UNAVAILABLE
     | STATUS_TEST_REQUEST_PROCESSED
     | STATUS_BENCHMARK
+    | STATUS_SENSOR_VALID
+    | STATUS_HISTORICAL
+    | STATUS_HISTORY_OVERWRITE
 )
 DATA_LOG_PERIOD_SECONDS = 1
 SAMPLE_INTERVAL_TOLERANCE = 0.10
@@ -109,6 +121,14 @@ SCHEDULED_START_LEAD_US = 4_000_000
 CONTROL_RESULT_APPLIED = 0
 CONTROL_RESULT_ALREADY_STOPPED = 1
 CONTROL_RESULT_INVALID_STATE = 2
+CONTROL_RESULT_DUPLICATE = 3
+CONTROL_RESULT_INSUFFICIENT_HISTORY = 4
+CONTROL_RESULT_STALE_IDENTITY = 5
+CONTROL_RESULT_BUSY = 6
+PHYSICAL_HISTORY_DURATION_US = 5_000_000
+PHYSICAL_MAX_ACCEL_MPS2 = 160.0
+PHYSICAL_MAX_GYRO_RAD_S = 35.0
+CLOCK_MAPPING_MAX_AGE_US = int(CLOCK_SYNC_PERIOD_SECONDS * 2 * 1_000_000)
 VISUALIZER_HOST = "127.0.0.1"
 VISUALIZER_PUBLISHER_PORT = 9100
 VISUALIZER_QUEUE_SIZE = 64
@@ -227,6 +247,12 @@ def describe_status(status):
         names.append("test_request_processed")
     if status & STATUS_BENCHMARK:
         names.append("benchmark")
+    if status & STATUS_SENSOR_VALID:
+        names.append("sensor_valid")
+    if status & STATUS_HISTORICAL:
+        names.append("historical")
+    if status & STATUS_HISTORY_OVERWRITE:
+        names.append("history_overwrite")
     unknown = status & ~KNOWN_STATUS_MASK
     if unknown:
         names.append(f"unknown_0x{unknown:04X}")
@@ -557,11 +583,13 @@ def midpoint_offset(numerator):
 class NodeControlConnection:
     """Thread-owned socket plus clock synchronization state for one Session."""
 
-    def __init__(self, client, node_id, session_id, coordinator):
+    def __init__(self, client, node_id, session_id, coordinator, boot_id=0):
         self.client = client
         self.node_id = node_id
         self.session_id = session_id
         self.coordinator = coordinator
+        self.boot_id = boot_id
+        self.last_arm_generation = 0
         self.send_lock = threading.Lock()
         self.mapping_lock = threading.Lock()
         self.mapping = None
@@ -973,10 +1001,10 @@ class NodeControlConnection:
 
 
 class CaptureCoordinator:
-    """Coordinate STOP and one common scheduled START across Node 1 and Node 2."""
+    """Coordinate scheduled legacy capture or trigger-driven physical capture."""
 
     def __init__(self, required_nodes=(1, 2), auto_start=True,
-                 window_assembler=None):
+                 window_assembler=None, physical_mode=False):
         self.required_nodes = frozenset(required_nodes)
         self._connections = {}
         self._lock = threading.RLock()
@@ -990,6 +1018,8 @@ class CaptureCoordinator:
         self._pending_start_us = None
         self.desired_running = auto_start
         self.window_assembler = window_assembler
+        self.physical_mode = physical_mode
+        self._accepted_trigger = None
 
     def _next_sequence(self):
         sequence = self._control_sequence
@@ -1022,9 +1052,87 @@ class CaptureCoordinator:
         with self._lock:
             if self._connections.get(connection.node_id) is not connection:
                 return
-            self._maybe_start_locked()
+            if not self.physical_mode:
+                self._maybe_start_locked()
+
+    def activity_triggered(self, connection, header, trigger):
+        """Map one authenticated peak and start one two-node historical flush."""
+        with self._lock:
+            if self._connections.get(connection.node_id) is not connection:
+                return False
+            if not self.desired_running:
+                return False
+            identity = (connection.node_id, connection.session_id, header[7])
+            contents = (trigger[0], trigger[1], trigger[2], header[8])
+            if self._accepted_trigger is not None:
+                old_identity, old_contents = self._accepted_trigger
+                if identity == old_identity:
+                    if contents != old_contents:
+                        raise ProtocolError(
+                            ERROR_INVALID_SEQUENCE,
+                            MESSAGE_TYPE_ACTIVITY_TRIGGER,
+                            "ACTIVITY_TRIGGER Sequence reused with different contents",
+                        )
+                    return False
+                if self.run_active or self.start_pending:
+                    return False
+            if (trigger[0] != connection.boot_id or trigger[1] == 0 or
+                    trigger[1] <= connection.last_arm_generation):
+                raise ProtocolError(
+                    ERROR_INVALID_FRAME, MESSAGE_TYPE_ACTIVITY_TRIGGER,
+                    "ACTIVITY_TRIGGER has stale boot or arm identity",
+                )
+            if set(self._connections) != self.required_nodes:
+                return False
+            now_us = time.monotonic_ns() // 1000
+            mappings = {
+                node_id: item.get_mapping(now_us)
+                for node_id, item in self._connections.items()
+            }
+            if any(mapping is None or
+                   now_us - mapping.synchronized_at_us > CLOCK_MAPPING_MAX_AGE_US
+                   for mapping in mappings.values()):
+                return False
+            source_mapping = mappings[connection.node_id]
+            coordinator_t0_us = (
+                trigger[2] - source_mapping.node_minus_coordinator_us
+            )
+            sequence = self._next_sequence()
+            self.start_pending = True
+            self._pending_start_us = coordinator_t0_us - PHYSICAL_HISTORY_DURATION_US
+            self._pending_start_acks = {
+                node_id: sequence for node_id in self._connections
+            }
+            self._start_ack_deadline_us = now_us + int(
+                CONTROL_ACK_TIMEOUT_SECONDS * 1_000_000)
+            self._accepted_trigger = (identity, contents)
+            connection.last_arm_generation = trigger[1]
+            for node_id in sorted(self._connections):
+                item = self._connections[node_id]
+                mapping = mappings[node_id]
+                payload = struct.pack(
+                    "!QqIB3xI", coordinator_t0_us,
+                    mapping.node_minus_coordinator_us,
+                    PHYSICAL_HISTORY_DURATION_US,
+                    connection.node_id, header[7],
+                )
+                frame = build_header(
+                    MESSAGE_TYPE_START_FLUSH, node_id=0,
+                    payload_length=START_FLUSH_PAYLOAD_SIZE,
+                    session_id=item.session_id, sequence=sequence,
+                ) + payload
+                item.send(frame)
+                log_hub(
+                    logging.INFO, node_id,
+                    f"START_FLUSH_SENT node={node_id} session={item.session_id} "
+                    f"sequence={sequence} trigger_node={connection.node_id} "
+                    f"trigger_sequence={header[7]} coordinator_t0_us={coordinator_t0_us}",
+                )
+            return True
 
     def _maybe_start_locked(self):
+        if self.physical_mode:
+            return False
         if (not self.desired_running or self.run_active or self.start_pending or
                 set(self._connections) != self.required_nodes):
             return False
@@ -1092,6 +1200,7 @@ class CaptureCoordinator:
         self._start_ack_deadline_us = None
         self._pending_start_acks.clear()
         self._pending_start_us = None
+        self._accepted_trigger = None
         if self.window_assembler is not None:
             self.window_assembler.stop_run(reason)
 
@@ -1121,7 +1230,7 @@ class CaptureCoordinator:
         with self._lock:
             if self._connections.get(connection.node_id) is not connection:
                 return
-            if command_type == MESSAGE_TYPE_START:
+            if command_type in (MESSAGE_TYPE_START, MESSAGE_TYPE_START_FLUSH):
                 expected = self._pending_start_acks.get(connection.node_id)
                 if expected != command_sequence:
                     if (expected is None and not self.start_pending and
@@ -1132,11 +1241,11 @@ class CaptureCoordinator:
                         return
                     raise ProtocolError(
                         ERROR_INVALID_SEQUENCE, MESSAGE_TYPE_CONTROL_ACK,
-                        "CONTROL_ACK does not match the pending START",
+                        "CONTROL_ACK does not match the pending START/START_FLUSH",
                     )
                 if result != CONTROL_RESULT_APPLIED:
                     log_hub(logging.ERROR, connection.node_id,
-                        f"START_REJECTED node={connection.node_id} "
+                    f"START_REJECTED node={connection.node_id} "
                         f"sequence={command_sequence} result={result}")
                     self.desired_running = False
                     self._stop_locked("START rejected")
@@ -1192,7 +1301,7 @@ class CaptureCoordinator:
         """Remember the operator's intent and START now or when both nodes are ready."""
         with self._lock:
             self.desired_running = True
-            started = self._maybe_start_locked()
+            started = False if self.physical_mode else self._maybe_start_locked()
         if not started:
             LOGGER.info("START_REQUESTED waiting_for_both_synchronized_nodes")
         return started
@@ -1368,7 +1477,7 @@ def validate_hello(frame):
         or header_node_id not in HUB_CONFIG
         or boot_id == 0
         or reserved != 0
-        or not (supported_sampling_rates & SAMPLE_RATE_100_HZ)
+        or not (supported_sampling_rates & (SAMPLE_RATE_50_HZ | SAMPLE_RATE_100_HZ))
     ):
         raise ProtocolError(
             ERROR_INVALID_HELLO,
@@ -1557,6 +1666,94 @@ def process_data(
         status=status,
         flags=flags,
     )
+
+
+def process_physical_data(
+    frame, stream_state, session_id, assigned_node_mask, clock_mapping,
+    sample_rate_hz=50,
+):
+    """Validate physical-unit samples with strict replay and chronology checks."""
+    header = unpack_header(frame)
+    message_type, node_id, flags = header[2], header[3], header[4]
+    payload_length, received_session_id = header[5], header[6]
+    sequence, timestamp_us = header[7], header[8]
+    if received_session_id != session_id:
+        raise ProtocolError(ERROR_INVALID_SESSION, message_type,
+                            f"Invalid Session ID {received_session_id}")
+    if message_type != MESSAGE_TYPE_PHYSICAL_DATA:
+        raise ProtocolError(ERROR_UNEXPECTED_MESSAGE, message_type,
+                            "Expected PHYSICAL_DATA")
+    if payload_length != PHYSICAL_DATA_PAYLOAD_SIZE or len(frame) != (
+            HEADER_SIZE + PHYSICAL_DATA_PAYLOAD_SIZE):
+        raise ProtocolError(ERROR_INVALID_FRAME, message_type,
+                            "PHYSICAL_DATA payload has invalid length")
+    if node_id < 1 or node_id > 6 or not assigned_node_mask & (1 << node_id):
+        raise ProtocolError(ERROR_UNAUTHORIZED_NODE, message_type,
+                            f"Connection is not authorized for Node {node_id}")
+    ax, ay, az, gx, gy, gz, status = struct.unpack(
+        "!ffffffH", frame[HEADER_SIZE:])
+    axes = (ax, ay, az, gx, gy, gz)
+    if not all(math.isfinite(value) for value in axes):
+        raise ProtocolError(ERROR_INVALID_FRAME, message_type,
+                            "PHYSICAL_DATA contains NaN or infinity")
+    if any(abs(value) > PHYSICAL_MAX_ACCEL_MPS2 for value in axes[:3]) or any(
+            abs(value) > PHYSICAL_MAX_GYRO_RAD_S for value in axes[3:]):
+        raise ProtocolError(ERROR_INVALID_FRAME, message_type,
+                            "PHYSICAL_DATA value is outside plausible range")
+    if status & ~KNOWN_STATUS_MASK or not status & STATUS_SENSOR_VALID:
+        raise ProtocolError(ERROR_INVALID_FRAME, message_type,
+                            "PHYSICAL_DATA status is invalid")
+    if clock_mapping is None:
+        return None
+    key = (session_id, node_id, MESSAGE_TYPE_PHYSICAL_DATA)
+    previous = stream_state.get(key)
+    if previous is not None:
+        previous_sequence, previous_timestamp_us = previous
+        if sequence <= previous_sequence:
+            raise ProtocolError(ERROR_INVALID_SEQUENCE, message_type,
+                                "PHYSICAL_DATA replay or duplicate Sequence")
+        if timestamp_us <= previous_timestamp_us:
+            raise ProtocolError(ERROR_INVALID_FRAME, message_type,
+                                "PHYSICAL_DATA capture timestamp regressed")
+        if sequence != (previous_sequence + 1) & 0xFFFFFFFF:
+            log_hub(logging.WARNING, node_id,
+                    f"PHYSICAL_DATA_GAP node={node_id} previous={previous_sequence} "
+                    f"received={sequence}")
+    stream_state[key] = (sequence, timestamp_us)
+    coordinator_timestamp_us = timestamp_us - clock_mapping.node_minus_coordinator_us
+    if sequence % max(1, sample_rate_hz) == 0:
+        log_hub(logging.INFO, node_id,
+                f"PHYSICAL_DATA node={node_id} sequence={sequence} "
+                f"timestamp_us={timestamp_us} "
+                f"coordinator_timestamp_us={coordinator_timestamp_us} "
+                f"historical={bool(status & STATUS_HISTORICAL)}")
+    return DecodedImuSample(
+        node_id=node_id, session_id=session_id, sequence=sequence,
+        timestamp_us=timestamp_us,
+        coordinator_timestamp_us=coordinator_timestamp_us,
+        ax=ax, ay=ay, az=az, gx=gx, gy=gy, gz=gz,
+        battery_mv=0, status=status, flags=flags,
+    )
+
+
+def process_activity_trigger(frame, connection):
+    """Validate a Session/boot-bound trigger before coordinator processing."""
+    header = unpack_header(frame)
+    if (header[2] != MESSAGE_TYPE_ACTIVITY_TRIGGER or
+            header[3] != connection.node_id or header[4] != 0 or
+            header[5] != ACTIVITY_TRIGGER_PAYLOAD_SIZE or
+            header[6] != connection.session_id or
+            len(frame) != HEADER_SIZE + ACTIVITY_TRIGGER_PAYLOAD_SIZE):
+        raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_ACTIVITY_TRIGGER,
+                            "Invalid ACTIVITY_TRIGGER header")
+    boot_id, arm_generation, peak_timestamp_us = struct.unpack(
+        "!IIQ", frame[HEADER_SIZE:])
+    if (boot_id == 0 or arm_generation == 0 or
+            peak_timestamp_us > header[8]):
+        raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_ACTIVITY_TRIGGER,
+                            "Invalid ACTIVITY_TRIGGER payload")
+    return connection.coordinator.activity_triggered(
+        connection, header, (boot_id, arm_generation, peak_timestamp_us))
 
 
 def log_window_summary(window):
@@ -1806,7 +2003,7 @@ def process_control_ack(frame, connection):
 
 
 def handle_client(client, address, visualizer_publisher=None, coordinator=None,
-                  window_assembler=None, sample_rate_hz=100):
+                  window_assembler=None, sample_rate_hz=50):
     """Run one hub connection's HELLO-gated binary protocol state machine.
 
     Fragmented and coalesced input is accumulated until a complete framed
@@ -1932,7 +2129,8 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
                             f"session={session_id}")
                         if coordinator is not None:
                             control_connection = NodeControlConnection(
-                                client, hub_node_id, session_id, coordinator)
+                                client, hub_node_id, session_id, coordinator,
+                                boot_id=boot_id)
                             coordinator.register(control_connection)
                             control_connection.begin_sync()
                     elif message_type == MESSAGE_TYPE_SYNC_RESP:
@@ -1951,6 +2149,23 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
                                 "CONTROL_ACK is not enabled for this connection",
                             )
                         process_control_ack(frame, control_connection)
+                    elif message_type == MESSAGE_TYPE_ACTIVITY_TRIGGER:
+                        if control_connection is None:
+                            raise ProtocolError(
+                                ERROR_UNEXPECTED_MESSAGE, message_type,
+                                "ACTIVITY_TRIGGER is not enabled for this connection",
+                            )
+                        process_activity_trigger(frame, control_connection)
+                    elif message_type == MESSAGE_TYPE_PHYSICAL_DATA:
+                        sample = process_physical_data(
+                            frame, stream_state, session_id, assigned_node_mask,
+                            control_connection.get_mapping()
+                            if control_connection is not None else None,
+                            sample_rate_hz,
+                        )
+                        if sample is not None and window_assembler is not None:
+                            for window in window_assembler.submit(sample):
+                                log_window_summary(window)
                     elif message_type == MESSAGE_TYPE_DATA:
                         sample = process_data(
                             frame,
@@ -2042,7 +2257,7 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
 
 def start_client_worker(
     client, address, visualizer_publisher=None, coordinator=None,
-    window_assembler=None, sample_rate_hz=100,
+    window_assembler=None, sample_rate_hz=50,
 ):
     """Start one daemon protocol worker for an accepted hub TCP connection."""
     worker = threading.Thread(
@@ -2104,8 +2319,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--sample-rate-hz",
         type=positive_integer,
-        default=100,
-        help="expected samples per second for window quality (default: 100)",
+        default=50,
+        help="expected samples per second for window quality (default: 50)",
     )
     parser.add_argument(
         "--window-seconds",
@@ -2150,7 +2365,9 @@ def main(argv=None):
         window_config.hop_us / 1_000_000, window_config.expected_per_node)
 
     visualizer_publisher = VisualizerEventPublisher()
-    coordinator = CaptureCoordinator(window_assembler=window_assembler)
+    coordinator = CaptureCoordinator(
+        window_assembler=window_assembler, auto_start=True,
+        physical_mode=True)
     control_thread = threading.Thread(
         target=run_control_console,
         args=(coordinator,),

@@ -79,10 +79,12 @@ unity/Ultra96VisualizerDemo/Ultra96VisualizerDemo.apk
 
 # Others
 start-demo.ps1
+docs/*.md
 docs/handoffs/*.md
 docs/plans/*.md
 docs/progress/*.md
 docs/results/*.md
 docs/walkthrough/*.md
 docs/walkthrough/other/*.md
+
 

@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "imu_source.h"
 #include "protocol.h"
+#include "physical_pipeline.h"
 
 typedef enum {
     APPLICATION_RESPONSE_NONE = 0,
@@ -27,6 +28,7 @@ typedef enum {
     APPLICATION_RESPONSE_FILE,
     APPLICATION_RESPONSE_SYNC,
     APPLICATION_RESPONSE_CONTROL_ACK,
+    APPLICATION_RESPONSE_ACTIVITY_TRIGGER,
 } application_response_type_t;
 
 typedef struct {
@@ -46,6 +48,7 @@ typedef struct {
     protocol_sync_response_t sync_response;
     uint32_t control_ack_response_sequence;
     protocol_control_ack_t control_ack;
+    physical_trigger_event_t trigger_event;
 } application_response_t;
 
 /** Start the singleton application command task and its bounded queues. */
@@ -55,7 +58,7 @@ esp_err_t application_start(uint8_t local_node_id);
  * Clear pending session-scoped work and enqueue a new session boundary.
  * Called only by the transport task after HELLO_ACK succeeds.
  */
-bool application_begin_session(uint32_t session_id);
+bool application_begin_session(uint32_t session_id, uint32_t boot_id);
 
 /** Copy one complete frame into the bounded application command queue. */
 bool application_submit_frame(

@@ -15,6 +15,7 @@ topology must not be applied to the current build.
 
 ## Plans
 
+- [Hardware–communications integration plan](plans/HARDWARE_COMMUNICATIONS_INTEGRATION_PLAN.md)
 - [ESP32 individual demo implementation plan (historical)](plans/ESP32_INDIVIDUAL_DEMO_IMPLEMENTATION_PLAN.md)
 - [Ultra96 sliding-window MVP implementation plan](plans/ULTRA96_SLIDING_WINDOW_MVP_IMPLEMENTATION_PLAN.md)
 - [Continuous IMU streaming and sliding-window proposal](plans/CONTINUOUS_IMU_STREAMING_AND_SLIDING_WINDOW_PLAN.md)
@@ -22,6 +23,7 @@ topology must not be applied to the current build.
 
 ## Implementation handoffs
 
+- [Hardware–communications vertical-slice implementation](handoffs/HARDWARE_COMMUNICATIONS_VERTICAL_SLICE.md)
 - [Phases 1–6 physical test results and handoff](handoffs/PHASE_1_TO_6_PHYSICAL_TEST_RESULTS_AND_HANDOFF.md)
 - [Phase 7 physical test results and handoff](handoffs/PHASE_7_PHYSICAL_TEST_RESULTS_AND_HANDOFF.md)
 - [Phase 8 physical test results and handoff](handoffs/PHASE_8_PHYSICAL_TEST_RESULTS_AND_HANDOFF.md)

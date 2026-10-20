@@ -18,6 +18,7 @@
 
 #include <string.h>
 #include <limits.h>
+#include <math.h>
 
 /* Explicit byte helpers keep wire layout independent of ESP32 alignment and endianness. */
 static uint16_t read_u16_be(const uint8_t *source)
@@ -70,6 +71,21 @@ static void write_u64_be(uint8_t *destination, uint64_t value)
     destination[5] = (uint8_t)(value >> 16);
     destination[6] = (uint8_t)(value >> 8);
     destination[7] = (uint8_t)value;
+}
+
+static float read_f32_be(const uint8_t *source)
+{
+    uint32_t bits = read_u32_be(source);
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static void write_f32_be(uint8_t *destination, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    write_u32_be(destination, bits);
 }
 
 /* Shared DATA-shaped encoder used by request and response message types. */
@@ -159,6 +175,61 @@ void protocol_encode_data(
     write_u16_be(&packet[34], (uint16_t)sample->gz);
     write_u16_be(&packet[36], sample->battery_mv);
     write_u16_be(&packet[38], sample->status);
+}
+
+bool protocol_encode_physical_data(
+    uint8_t packet[PROTOCOL_PHYSICAL_DATA_PACKET_SIZE],
+    const protocol_physical_sample_t *sample, uint32_t session_id)
+{
+    if (packet == NULL || sample == NULL || session_id == 0 ||
+        !isfinite(sample->ax) || !isfinite(sample->ay) ||
+        !isfinite(sample->az) || !isfinite(sample->gx) ||
+        !isfinite(sample->gy) || !isfinite(sample->gz)) return false;
+    memset(packet, 0, PROTOCOL_PHYSICAL_DATA_PACKET_SIZE);
+    write_u16_be(packet, PROTOCOL_MAGIC);
+    packet[2] = PROTOCOL_VERSION;
+    packet[3] = PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA;
+    packet[4] = sample->node_id;
+    packet[5] = sample->flags;
+    write_u16_be(packet + 6, PROTOCOL_PHYSICAL_DATA_PAYLOAD_SIZE);
+    write_u32_be(packet + 8, session_id);
+    write_u32_be(packet + 12, sample->sequence);
+    write_u64_be(packet + 16, sample->timestamp_us);
+    write_f32_be(packet + 24, sample->ax);
+    write_f32_be(packet + 28, sample->ay);
+    write_f32_be(packet + 32, sample->az);
+    write_f32_be(packet + 36, sample->gx);
+    write_f32_be(packet + 40, sample->gy);
+    write_f32_be(packet + 44, sample->gz);
+    write_u16_be(packet + 48, sample->status);
+    return true;
+}
+
+bool protocol_decode_physical_data(
+    const uint8_t *frame, size_t frame_length,
+    protocol_header_t *header, protocol_physical_sample_t *sample)
+{
+    if (frame == NULL || header == NULL || sample == NULL ||
+        frame_length != PROTOCOL_PHYSICAL_DATA_PACKET_SIZE ||
+        !protocol_decode_header(frame, frame_length, header) ||
+        header->magic != PROTOCOL_MAGIC || header->version != PROTOCOL_VERSION ||
+        header->message_type != PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA ||
+        header->payload_length != PROTOCOL_PHYSICAL_DATA_PAYLOAD_SIZE) return false;
+    memset(sample, 0, sizeof(*sample));
+    sample->node_id = header->node_id;
+    sample->flags = header->flags;
+    sample->sequence = header->sequence;
+    sample->timestamp_us = header->timestamp_us;
+    sample->ax = read_f32_be(frame + 24);
+    sample->ay = read_f32_be(frame + 28);
+    sample->az = read_f32_be(frame + 32);
+    sample->gx = read_f32_be(frame + 36);
+    sample->gy = read_f32_be(frame + 40);
+    sample->gz = read_f32_be(frame + 44);
+    sample->status = read_u16_be(frame + 48);
+    return isfinite(sample->ax) && isfinite(sample->ay) &&
+        isfinite(sample->az) && isfinite(sample->gx) &&
+        isfinite(sample->gy) && isfinite(sample->gz);
 }
 
 void protocol_encode_hello(
@@ -341,6 +412,59 @@ void protocol_encode_control_ack(
     write_u16_be(&packet[26], 0);
     write_u32_be(&packet[28], ack->command_sequence);
     write_u64_be(&packet[32], ack->effective_local_us);
+}
+
+bool protocol_decode_start_flush_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_start_flush_t *start)
+{
+    if (payload == NULL || start == NULL ||
+        payload_length != PROTOCOL_START_FLUSH_PAYLOAD_SIZE) return false;
+    /* Bytes 21..23 are reserved so the final trigger Sequence is aligned. */
+    if (payload[21] != 0 || payload[22] != 0 || payload[23] != 0) return false;
+    start->coordinator_t0_us = read_u64_be(payload);
+    start->node_minus_coordinator_us = (int64_t)read_u64_be(payload + 8);
+    start->history_duration_us = read_u32_be(payload + 16);
+    start->trigger_node_id = payload[20];
+    start->trigger_sequence = read_u32_be(payload + 24);
+    return true;
+}
+
+void protocol_encode_activity_trigger(
+    uint8_t packet[PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE],
+    uint8_t node_id, uint32_t session_id, uint32_t sequence,
+    uint64_t detected_timestamp_us,
+    const protocol_activity_trigger_t *trigger)
+{
+    memset(packet, 0, PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE);
+    write_u16_be(packet, PROTOCOL_MAGIC);
+    packet[2] = PROTOCOL_VERSION;
+    packet[3] = PROTOCOL_MESSAGE_TYPE_ACTIVITY_TRIGGER;
+    packet[4] = node_id;
+    write_u16_be(packet + 6, PROTOCOL_ACTIVITY_TRIGGER_PAYLOAD_SIZE);
+    write_u32_be(packet + 8, session_id);
+    write_u32_be(packet + 12, sequence);
+    write_u64_be(packet + 16, detected_timestamp_us);
+    write_u32_be(packet + 24, trigger->boot_id);
+    write_u32_be(packet + 28, trigger->arm_generation);
+    write_u64_be(packet + 32, trigger->peak_timestamp_us);
+}
+
+bool protocol_decode_activity_trigger(
+    const uint8_t *frame, size_t frame_length,
+    protocol_header_t *header, protocol_activity_trigger_t *trigger)
+{
+    if (frame == NULL || header == NULL || trigger == NULL ||
+        frame_length != PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE ||
+        !protocol_decode_header(frame, frame_length, header) ||
+        header->magic != PROTOCOL_MAGIC || header->version != PROTOCOL_VERSION ||
+        header->message_type != PROTOCOL_MESSAGE_TYPE_ACTIVITY_TRIGGER ||
+        header->payload_length != PROTOCOL_ACTIVITY_TRIGGER_PAYLOAD_SIZE) return false;
+    trigger->boot_id = read_u32_be(frame + 24);
+    trigger->arm_generation = read_u32_be(frame + 28);
+    trigger->peak_timestamp_us = read_u64_be(frame + 32);
+    return trigger->boot_id != 0 && trigger->arm_generation != 0 &&
+        trigger->peak_timestamp_us <= header->timestamp_us;
 }
 
 bool protocol_decode_data(

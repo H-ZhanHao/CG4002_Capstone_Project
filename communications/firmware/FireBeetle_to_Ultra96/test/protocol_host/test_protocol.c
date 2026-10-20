@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 static void assert_bytes(const uint8_t *actual, const uint8_t *expected, size_t size)
 {
@@ -298,6 +299,77 @@ static void test_control_ack_layout(void)
     assert(packet[32] == 0x11 && packet[39] == 0x18);
 }
 
+static void test_physical_data_golden_vector(void)
+{
+    protocol_physical_sample_t input = {
+        .node_id = 1, .flags = 0x02, .sequence = 0x01020304,
+        .timestamp_us = UINT64_C(0x0102030405060708),
+        .ax = 1.0f, .ay = -2.0f, .az = 0.5f,
+        .gx = -0.25f, .gy = 3.0f, .gz = 0.0f,
+        .status = 0x0003,
+    };
+    const uint8_t expected[PROTOCOL_PHYSICAL_DATA_PACKET_SIZE] = {
+        0xa5,0x5a,0x01,0x12,0x01,0x02,0x00,0x1a,
+        0x11,0x22,0x33,0x44,0x01,0x02,0x03,0x04,
+        0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,
+        0x3f,0x80,0x00,0x00,0xc0,0x00,0x00,0x00,
+        0x3f,0x00,0x00,0x00,0xbe,0x80,0x00,0x00,
+        0x40,0x40,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x03,
+    };
+    uint8_t frame[PROTOCOL_PHYSICAL_DATA_PACKET_SIZE];
+    protocol_header_t header;
+    protocol_physical_sample_t decoded;
+    assert(protocol_encode_physical_data(frame, &input, 0x11223344));
+    assert_bytes(frame, expected, sizeof(expected));
+    assert(protocol_decode_physical_data(frame, sizeof(frame), &header, &decoded));
+    assert(decoded.ax == 1.0f && decoded.gy == 3.0f && decoded.status == 3);
+    input.ax = NAN;
+    assert(!protocol_encode_physical_data(frame, &input, 0x11223344));
+    memcpy(frame, expected, sizeof(frame));
+    frame[24] = 0x7f; frame[25] = 0x80; frame[26] = 0; frame[27] = 0;
+    assert(!protocol_decode_physical_data(frame, sizeof(frame), &header, &decoded));
+    assert(!protocol_decode_physical_data(frame, sizeof(frame) - 1, &header, &decoded));
+}
+
+static void test_trigger_and_flush_golden_vectors(void)
+{
+    protocol_activity_trigger_t trigger = {
+        .boot_id = 0x01020304, .arm_generation = 0x11121314,
+        .peak_timestamp_us = UINT64_C(0x2122232425262728),
+    };
+    const uint8_t expected[PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE] = {
+        0xa5,0x5a,0x01,0x05,0x02,0x00,0x00,0x10,
+        0x31,0x32,0x33,0x34,0x41,0x42,0x43,0x44,
+        0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,
+        0x01,0x02,0x03,0x04,0x11,0x12,0x13,0x14,
+        0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,
+    };
+    uint8_t frame[PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE];
+    protocol_header_t header;
+    protocol_activity_trigger_t decoded_trigger;
+    protocol_encode_activity_trigger(frame, 2, 0x31323334, 0x41424344,
+        UINT64_C(0x5152535455565758), &trigger);
+    assert_bytes(frame, expected, sizeof(expected));
+    assert(protocol_decode_activity_trigger(frame, sizeof(frame), &header,
+        &decoded_trigger));
+    assert(decoded_trigger.boot_id == trigger.boot_id);
+
+    const uint8_t payload[PROTOCOL_START_FLUSH_PAYLOAD_SIZE] = {
+        0,0,0,0,0,0,0x27,0x10,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xfc,0x18,
+        0x00,0x4c,0x4b,0x40, 0x02,0,0,0,
+        0x41,0x42,0x43,0x44,
+    };
+    protocol_start_flush_t flush;
+    assert(protocol_decode_start_flush_payload(payload, sizeof(payload), &flush));
+    assert(flush.coordinator_t0_us == 10000);
+    assert(flush.node_minus_coordinator_us == -1000);
+    assert(flush.history_duration_us == 5000000);
+    assert(flush.trigger_node_id == 2 && flush.trigger_sequence == 0x41424344);
+    assert(!protocol_decode_start_flush_payload(payload, sizeof(payload) - 1, &flush));
+}
+
 int main(void)
 {
     test_existing_data_golden_vector();
@@ -308,6 +380,8 @@ int main(void)
     test_error_golden_vector();
     test_sync_and_start_payloads();
     test_control_ack_layout();
+    test_physical_data_golden_vector();
+    test_trigger_and_flush_golden_vectors();
     puts("protocol host tests: PASS");
     return 0;
 }

@@ -39,6 +39,8 @@ typedef struct {
     const char *tls_ca_certificate;
     const char *tls_server_identity;
     tcp_client_overflow_count_fn_t get_overflow_count;
+    /** Queue items are protocol_physical_sample_t rather than legacy raw samples. */
+    bool physical_samples;
 } tcp_client_config_t;
 
 /**
