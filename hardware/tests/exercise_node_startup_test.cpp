@@ -104,8 +104,21 @@ static void step(int samples, float acceleration = 9.81f, float gyro = 0.0f) {
 static void command(const char* text) {
   while (*text) input.push_back(*text++);
   input.push_back('\n');
-  now += 20;
-  ExerciseNode::update();
+  do {
+    now += 20;
+    ExerciseNode::update();
+  } while (!input.empty());
+}
+static StreamStart acceptTrigger(uint32_t session) {
+  StreamTrigger trigger;
+  assert(ExerciseNode::pollStreamTrigger(trigger));
+  StreamStart start;
+  start.node = trigger.node;
+  start.coordinator = 17;
+  start.session = session;
+  start.localT0 = trigger.peakMs;
+  assert(ExerciseNode::joinWindowStream(start) == StreamJoinResult::STARTED);
+  return start;
 }
 static TelemetryData data() { return ExerciseNode::makeTelemetry(); }
 static void pauseRep() { step(25, 11.4f); step(45); }
@@ -299,7 +312,7 @@ int main() {
     ExerciseNode::begin(role);
     assert(!ExerciseNode::consumeGenericPeak(event));
   }
-  // The scheduler receives fresh peaks directly; observing a peak cannot consume its window.
+  // Peaks request a coordinated session; only the accepted START creates windows.
   static ScheduledWindow scheduled, firstWindow;
   for (NodeRole role : {HIP, WRIST}) {
     ExerciseNode::begin(role);
@@ -311,16 +324,22 @@ int main() {
     output.clear();
     const unsigned int beforePackets = radioPackets, beforeLeds = readyEvents + repEvents;
     genericPulse();
+    assert(ExerciseNode::windowStreamStatus().queued == 0);
+    assert(output.find("WAIT_COMMS") != std::string::npos);
+    const StreamStart accepted = acceptTrigger(1);
     const auto started = ExerciseNode::windowStreamStatus();
     assert(started.state == WindowStreamState::RUNNING && started.queued == 1);
     GenericPeakEvent peak;
     assert(ExerciseNode::consumeGenericPeak(peak));
     assert(started.triggerMs == peak.peakMs && started.nextEndMs == peak.peakMs + 1000);
     assert(ExerciseNode::takeSensorWindow(firstWindow));
+    assert(firstWindow.info.coordinator == 17 && firstWindow.info.session == 1);
     assert(firstWindow.info.sequence == 0 && firstWindow.info.window.status == SensorWindowStatus::READY);
     assert(firstWindow.info.window.endMs == peak.peakMs && firstWindow.info.window.count == 251);
     assert(output.find(role == HIP ? "[FRAME | HIP" : "[FRAME | WRIST") != std::string::npos);
     assert(data().reps == 0 && radioPackets == beforePackets && readyEvents + repEvents == beforeLeds);
+    assert(ExerciseNode::joinWindowStream(accepted) == StreamJoinResult::ALREADY_RUNNING);
+    assert(!ExerciseNode::takeSensorWindow(scheduled)); // Retry cannot recreate sequence zero.
 
     // No new peak is required. Service follows the original t0, even in standby.
     while ((uint32_t)now + 20 < started.nextEndMs) step(1);
@@ -360,6 +379,7 @@ int main() {
     assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
     step(60);
     genericPulse(true);
+    acceptTrigger(2);
     assert(ExerciseNode::windowStreamStatus().session == started.session + 1);
     assert(ExerciseNode::takeSensorWindow(scheduled) && scheduled.info.sequence == 0);
     assert(scheduled.info.triggerMs != started.triggerMs);
@@ -422,6 +442,7 @@ int main() {
     assert(!ExerciseNode::takeSensorWindow(scheduled));
     step(5);
     genericPulse();
+    acceptTrigger(3);
     assert(ExerciseNode::takeSensorWindow(scheduled));
     assert(scheduled.info.sequence == 0 && scheduled.info.window.status == SensorWindowStatus::INSUFFICIENT_HISTORY);
     const uint32_t earlyT0 = scheduled.info.triggerMs;
@@ -436,8 +457,55 @@ int main() {
     assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
     assert(!ExerciseNode::takeSensorWindow(scheduled));
   }
+  // Serial comms controls exercise the same typed API, including maximum-width IDs.
+  for (NodeRole role : {HIP, WRIST}) {
+    ExerciseNode::begin(role);
+    step(260);
+    output.clear();
+    command("STREAM:CLOCK:4294967295");
+    assert(output.find("probe=4294967295") != std::string::npos);
+    assert(output.find("armed=1") != std::string::npos);
+    const auto identity = ExerciseNode::streamIdentity();
+    const uint32_t t0 = (uint32_t)now;
+    char join[128];
+    snprintf(join, sizeof(join), "STREAM:JOIN:%lu:%lu:4294967295:4294967295:%lu",
+      (unsigned long)identity.boot, (unsigned long)identity.arm, (unsigned long)t0);
+    command(join); // Quiet node can start without detecting a local peak.
+    assert(ExerciseNode::takeSensorWindow(scheduled));
+    assert(scheduled.info.coordinator == UINT32_MAX && scheduled.info.session == UINT32_MAX);
+    assert(scheduled.info.window.endMs == t0);
+    const uint32_t before = ExerciseNode::windowStreamStatus().nextEndMs;
+    command(join);
+    assert(output.find("ALREADY_RUNNING") != std::string::npos);
+    assert(ExerciseNode::windowStreamStatus().nextEndMs == before);
+    peerOnline = true;
+    command(role == HIP ? "EXERCISE:SQUAT" : "EXERCISE:SITUP");
+    command("ACTIVATE");
+    assert(data().repState == 2);
+    command("DEACTIVATE");
+    assert(output.find("rep counting stopped") != std::string::npos);
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::RUNNING);
+    step(25, 11.4f); step(45);
+    assert(data().reps == 0); // Deactivation stops counting while windows continue.
+    command("STREAM:END:1:1");
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::RUNNING);
+    command("STREAM:END:4294967295:4294967295");
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::STOPPED);
+    assert(!ExerciseNode::takeSensorWindow(scheduled));
+    command("STREAM:ARM");
+    command(join);
+    assert(output.find("STALE_TARGET") != std::string::npos);
+    assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
+    for (const char* bad : {"STREAM:JOIN:", "STREAM:JOIN:1:2:3:4", "STREAM:JOIN:1:2:3:4:5:6",
+                           "STREAM:JOIN:1:2:3:-4:5", "STREAM:JOIN:1:2:3:4:4294967296"}) {
+      output.clear();
+      command(bad);
+      assert(output.find("ERROR: Use STREAM:JOIN") != std::string::npos);
+      assert(ExerciseNode::windowStreamStatus().state == WindowStreamState::ARMED);
+    }
+  }
   puts("Node startup, activation, reset, exercise/mode switching and LED tests passed");
   puts("Both node buffers, diagnostics, independent sampling and sensor-failure tests passed");
   puts("Both node peak triggers, window timestamps and counting/radio independence tests passed");
-  puts("Both node automatic windows, stream controls, queue overflow and outage scheduling tests passed");
+  puts("Both node coordinated starts, deactivation, stream controls, overflow and outage tests passed");
 }

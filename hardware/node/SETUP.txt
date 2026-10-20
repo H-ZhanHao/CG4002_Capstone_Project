@@ -59,7 +59,7 @@ filtering or gyro correction. Failed reads do not insert zero or stale samples.
 
 SensorHistoryConfig in SensorHistory.h sets a 5000 ms window and 8000 ms retention.
 At the configured 50 Hz this uses 401 ring slots, about 11 KB. The manual window
-command has a separate static scratch snapshot of the same size; neither array
+command shares a static 252-sample scratch snapshot (about 7 KB); neither array
 uses the main task stack. Data is in RAM only and is lost on reboot. ACTIVATE,
 STANDBY, RESET, exercise changes and mode changes preserve this history and the
 sampling cadence. Generic peak detection is described below; automatic window
@@ -96,8 +96,8 @@ For later integration, ExerciseNode::copySensorWindow(t0, destination, capacity)
 copies samples in chronological order. Call it from the same main loop as update().
 The caller owns the copy; subsequent ring writes cannot change it. OUTPUT_TOO_SMALL
 reports the required count without writing a partial result. The local scheduler
-below uses this same extraction behaviour. Transport and clock synchronization
-are not implemented yet.
+below uses this same extraction behaviour. Clock estimation and coordinated-start
+logic are available below; their actual comms transport is not connected yet.
 Timestamps are local to each board and wrap modulo 2^32 milliseconds; comparisons
 assume timestamps less than 2^31 ms apart. Reboot starts a new local time reference.
 
@@ -125,7 +125,7 @@ After a confirmed peak, both filtered signals must drop below 45% of their gates
 for 80 ms to rearm. New excursions during the one-second trigger cooldown are
 ignored until the signals settle again. This is trigger debounce during motion,
 not a three-second startup wait. Sustained motion may produce only one trigger;
-the local window session continues independently of subsequent peaks.
+an accepted window session continues independently of subsequent peaks.
 Candidates older than 2500 ms are discarded. Invalid values or sample gaps over
 100 ms discard the partial peak/filter state, without removing the cooldown.
 Counter RESET, exercise/mode changes and activation preserve the detector state.
@@ -146,20 +146,23 @@ Bench inspection, with either node powered and its serial monitor open:
    Verify that standby counts remain inactive and peaks cause no LED feedback.
    Try walking too: triggers are possible; exercise recognition belongs to comms.
 
-The local scheduler receives each fresh peak directly. consumeGenericPeak(event)
-remains an optional diagnostic observer: it returns the first unconsumed event
+The stream controller receives each fresh peak directly and requests a shared
+session from comms. consumeGenericPeak(event) remains an optional diagnostic
+observer: it returns the first unconsumed event
 once without consuming a prepared window or resetting detector cooldown. Later
 peaks are logged without replacing that pending observation. Reboot clears it.
 Do not use this diagnostic observer to drive a second window scheduler.
 
 LOCAL SLIDING WINDOWS (STEP 4, BEFORE COMMS INTEGRATION)
 
-Each node starts ARMED. Its first local generic peak starts its own window session.
-Sequence 0 is copied immediately when the peak is confirmed, before diagnostic
-output: [t0 - 5000, t0]. Following endpoints are t0 + 1000, t0 + 2000, etc.
+Each node starts ARMED. With Step 5, its first peak requests a coordinated session
+and prints TRIGGER/WAIT_COMMS. A peak alone no longer creates local windows.
+After an accepted JOIN, sequence 0 is copied immediately using the supplied local
+t0: [t0 - 5000, t0]. Following endpoints are t0 + 1000, t0 + 2000, etc.
 Each window is still five seconds long. Later peaks do not restart the timeline.
-No further peaks are needed for windows to continue. HIP and WRIST are independent
-here; a peak on one does not yet start the other. Timestamps are still local.
+No further peaks are needed for windows to continue. Both nodes use the same
+coordinator/session ID and translated local timestamps. STREAM:START remains an
+explicit local bench override (coordinator=0), without the comms handshake.
 
 Windows use actual samples, including both endpoints when present. At exactly
 50 Hz that is 251 samples; no padding, interpolation or fixed-size resampling is
@@ -169,7 +172,7 @@ The scheduler waits up to 100 ms for a successful read to cover a due endpoint;
 after that it records END_NOT_AVAILABLE/EMPTY rather than waiting indefinitely.
 It runs even when reads fail or the main loop is between scheduled sensor reads.
 
-An early peak still starts a session at its original t0. Its first windows may
+An early peak still requests its original t0. After JOIN, its first windows may
 report EMPTY/INSUFFICIENT_HISTORY with no sample payload. Later windows become
 usable once enough history exists, without requiring a new peak. SAMPLE_GAP
 includes real samples with a gap flag. Consumers must check each window's status.
@@ -193,9 +196,10 @@ excessive output can still block if that buffer fills.
 
 Commands (USB or Bluetooth, one command per line):
   STREAM                  Show ARMED/RUNNING/STOPPED, session/t0, queue and loss counts.
-  STREAM:STOP             Stop preparation, clear the queue, disable automatic start.
-  STREAM:ARM              Wait for the next fresh peak if stopped. A running session
-                          keeps its current anchor. Does not reset the peak detector.
+  STREAM:STOP             Stop preparation, clear the queue and pending request,
+                          invalidate the old arm ticket, disable peak requests.
+  STREAM:ARM              Allow a new peak request or peer-initiated JOIN if stopped.
+                          A running session keeps its anchor. No detector reset.
   STREAM:START            Start now using the latest sample timestamp, without a peak.
   STREAM:START:<t0_ms>    Start from a supplied past/current local timestamp. A future
                           t0 or an already-running session is rejected unchanged.
@@ -205,31 +209,36 @@ Commands (USB or Bluetooth, one command per line):
 There is no automatic inactivity timeout yet: preparation continues until STOP.
 Counter ACTIVATE, STANDBY, RESET, exercise/mode changes and peer LED events do not
 stop or restart the window session. STREAM controls do not activate/stop counting.
-STOP preserves the sensor history; START begins a new local session with sequence
-zero. ARM requires a new peak rather than replaying a previous pending observation.
-Reboot clears everything and returns to ARMED. Session numbers are local to a boot.
+STOP preserves sensor history. ARM requires a new peak request or a new coordinated
+JOIN, never a previous pending request. Reboot clears everything and creates a new
+boot ID. Local START numbers are per node; coordinated IDs come from comms.
 
-Typical automatic output after a peak (example values, exact cadence assumed):
+Typical output (example values, exact cadence assumed):
   [PEAK | HIP | t0_ms=8240 | confirmed_ms=8340 | accel=1.60 m/s2 | gyro=0.10 rad/s]
-  [STREAM | HIP | RUNNING | session=1 | t0_ms=8240 | next_end_ms=9240 | queue=1 | dropped=0 | skipped=0 | local_only]
-  [FRAME | HIP | session=1 | seq=0 | READY | start_ms=3240 | end_ms=8240 | samples=251 | queue=1 | dropped=0 | skipped=0]
-  [FRAME | HIP | session=1 | seq=1 | READY | start_ms=4240 | end_ms=9240 | samples=251 | queue=2 | dropped=0 | skipped=0]
+  [TRIGGER | HIP | boot=42 | arm=1 | t0_ms=8240 | confirmed_ms=8340 | WAIT_COMMS]
+No FRAME appears until comms accepts a start. For example, after:
+  STREAM:JOIN:42:1:99:12:8240
+  [JOIN | HIP | STARTED | coord=99 | session=12 | boot=42 | arm=1 | t0_ms=8240]
+  [FRAME | HIP | coord=99 | session=12 | seq=0 | READY | start_ms=3240 | end_ms=8240 | samples=251 | queue=1 | drop=0 | skip=0]
+  [FRAME | HIP | coord=99 | session=12 | seq=1 | READY | start_ms=4240 | end_ms=9240 | samples=251 | queue=2 | drop=0 | skip=0]
 FRAME means prepared locally, never sent. FRAME TAKEN means removed by STREAM:NEXT.
 If the queue fills, expect QUEUE_FULL on following intervals until records are taken.
 
 Bench check on each board independently:
 1. Power the node and leave counting in standby. STREAM should report ARMED.
-2. Allow at least five seconds of samples, then move through a peak. Expect seq=0
-   and then a window attempt each second, even if you stop moving.
+2. Allow at least five seconds of samples, then move through a peak. Expect
+   TRIGGER/WAIT_COMMS and no FRAME. Promptly send JOIN with the printed boot/arm/t0
+   and nonzero coordinator/session numbers. Expect seq=0, then one attempt/second.
 3. STREAM:NEXT displays/removes the oldest snapshot. Repeat about once per second
    to emulate a consumer; otherwise observe queue=3 followed by QUEUE_FULL.
-4. STREAM:STOP clears the queue. Further peaks are still logged but cannot start
-   windows until STREAM:ARM or an explicit STREAM:START.
+4. Repeat the identical JOIN: expect ALREADY_RUNNING, without a new sequence 0.
+   STREAM:STOP clears the queue and pending request. After STREAM:ARM, an old JOIN
+   must report STALE_TARGET; it must not start windows again.
 5. Test STREAM:START without movement. Stop before trying another anchor/session.
 6. Counter reset/exercise changes should preserve the current t0 and sequence.
 
 Integration hooks in ExerciseNode.h (same main loop as update(), never a radio callback):
-  startWindowStream(t0) / stopWindowStream() / armWindowStream()
+  startWindowStream(t0) [local bench override] / stopWindowStream() / armWindowStream()
   windowStreamStatus()
   takeSensorWindow(destination)
 Allocate the ScheduledWindow destination statically/on the heap on ESP32, not on
@@ -241,8 +250,104 @@ sample payload. Taking is not an acknowledgement of delivery; a future transport
 must retain its own copy if it needs retries. The manual NEXT command consumes
 the same queue, so do not use it alongside the real comms consumer.
 
-The remaining steps add shared trigger/clock coordination and actual comms
-transport/feedback. No port is opened and no sensor payload is transmitted here.
+COORDINATED WINDOW SESSIONS (STEP 5)
+
+StreamCoordination.h/.cpp contains NodeStreamControl (used by both firmware
+targets) and StreamCoordinator (portable comms-side logic, not instantiated on
+either node). The two-node host test runs this coordinator with both node controls,
+different clocks and independent sensor histories. Actual comms transport is still
+pending: no network port is opened and no IMU payload is transmitted in this step.
+USB/Bluetooth commands can exercise the receiver now; logs are bench diagnostics,
+not a finalized network wire format. ESP-NOW activation/LED packets are unchanged.
+
+Lifecycle and ownership:
+1. Comms owns ONE StreamCoordinator and serializes its calls. Call begin() with a
+   fresh, nonzero random coordinator ID at startup. Session numbers increment
+   within that coordinator boot; the pair (coordinator, session) identifies a set.
+2. Probe both armed nodes' clocks. Both need a fresh accepted clock measurement
+   before a trigger can start a set. Readiness here means armed/control readiness,
+   not guaranteed five-second sensor coverage; each window reports data quality.
+3. The first accepted trigger chooses t0. If both trigger together, the second
+   receives EXISTING and cannot change t0. There is no main streamer: both get a
+   targeted START and keep their own five-second windows / separate data pipeline.
+4. Comms polls START for each role and delivers it until acknowledged. A node
+   accepts its own boot/arm ticket, including when it has detected no local peak.
+   Identical retries return ALREADY_RUNNING without clearing a queue, resetting
+   sequence numbers or replaying sequence zero. Changed t0 under the same session
+   returns CONFLICT; a different session while running returns BUSY.
+5. Both acknowledgements make bothStarted() true. This means both accepted the
+   control session; it does not guarantee sample availability, successful payload
+   delivery or continued connectivity. Comms still checks every window status.
+6. An explicit END stops that matching session. STOP also cancels an unaccepted
+   request. Stop both nodes, close() the coordinator session, then ARM both for
+   another set. A partial-start abort must also STOP any node that never accepted
+   START, since it cannot recognize that session's END. Re-probe after rearming.
+   A reboot/changed arm during an active session requires explicit close/recovery;
+   the coordinator never silently substitutes a different node boot.
+
+The node's first trigger is retained until JOIN or STOP. pollStreamTrigger() offers
+the same request every 500 ms; consuming the optional generic peak diagnostic has
+no effect. The coordinator's pollStart(role, now, start) likewise retries every
+500 ms until a matching successful acknowledgement. A transport must service these
+APIs; printing a TRIGGER line alone does not send it to a central coordinator.
+There is no automatic inactivity timeout, stop, failover or fallback local start.
+The adapter must explicitly stop/cancel on its chosen abort policy.
+
+Clock measurement and translation:
+- Comms records c1 when sending a probe, and c4 when its correlated reply arrives.
+  The node returns n2 (command receive time), n3 (reply preparation time), its
+  role/boot/arm ticket and whether it is armed. Match the probe ID and current
+  transport connection before calling observeClock(reply, c1, c4).
+- The offset estimate is midpoint(n2,n3) - midpoint(c1,c4), modulo uint32.
+  Processing time is removed from the network round-trip estimate. Measurements
+  with network RTT > 40 ms or impossible timestamp ordering are rejected; mappings
+  expire after 30 seconds. Those limits live in StreamCoordinationConfig.
+- Timing asymmetry remains uncertainty (roughly half the network RTT, plus ms
+  rounding). clockUncertaintyMs() exposes it. This is not exact synchronization;
+  oscillator drift and real link timing still need hardware validation. Refresh
+  measurements while armed. A session freezes its chosen local anchors; later
+  measurements do not move a running window grid. Long-session drift correction
+  and any classifier-required alignment tolerance must be agreed during integration.
+- coordinator_t0 = source_peak_ms - source_offset;
+  target_local_t0 = coordinator_t0 + target_offset.
+  Thus different printed t0 numbers may describe the same physical instant.
+- Node clocks continue unchanged; no clock is reset. All time arithmetic assumes
+  intervals less than 2^31 ms. The eight-second ring allows only about three seconds
+  for peak confirmation PLUS coordination/delivery delay. A late JOIN reports
+  INSUFFICIENT_HISTORY rather than inventing/reanchoring the first window; subsequent
+  windows can recover. A coordinator must handle these data-quality failures.
+
+Additional USB/Bluetooth bench commands (newline terminated):
+  STREAM:REQUEST
+    Show the pending trigger without consuming it, or TRIGGER/NONE.
+  STREAM:CLOCK:<probe>
+    Reply CLOCK with probe, boot, arm, rx_ms, tx_ms, armed. Use automated timestamped
+    probes for actual clock estimation; manually typing commands cannot measure RTT.
+  STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0>
+    Target this node's CURRENT boot/arm (shown by STREAM/CLOCK/TRIGGER). Coordinator
+    and session must be nonzero uint32 values. A future local_t0 is INVALID.
+    Both boards receive the same coordinator/session, but their own ticket and
+    translated local_t0. A quiet board accepts JOIN while armed.
+  STREAM:END:<coordinator>:<session>
+    Stop only the accepted matching session, leave counting/history unchanged.
+    An old END cannot stop a newer session. Retries after rearm do not cancel the
+    new pending trigger. STREAM:STOP remains the deliberate local override.
+
+Typed node APIs for the future comms adapter (same main loop as update):
+  streamIdentity()                         Current role/boot/arm ticket.
+  streamClockReply(probe, receivedMs)       Pair a captured local receive time with send time.
+  pollStreamTrigger(trigger)               Retained request, with bounded retry cadence.
+  joinWindowStream(start)                  Returns a StreamJoinResult for the ACK.
+  endWindowStream(coordinator, session)    Scoped stop; false means wrong session.
+  takeSensorWindow(destination)            Independent payload consumer for this node.
+Capture/queue inbound messages in transport callbacks; apply state changes in the
+main loop. Do not call these APIs concurrently. Do not raw-memcpy C++ structs as a
+wire format: specify fields, version, units and byte order in the comms adapter.
+
+DEACTIVATE/STANDBY still stop counting only. They leave shared-session requests,
+sensor buffering and active window preparation running for classification. ACTIVATE
+still requires the existing ESP-NOW standby acknowledgement. Shared START never
+activates counting or chooses an exercise; comms routes that feedback separately.
 
 WIRELESS MONITORS ON WINDOWS
 
@@ -370,6 +475,9 @@ WINDOW / WINDOW:<t0_ms>
 STREAM / STREAM:START[:t0_ms] / STREAM:STOP / STREAM:ARM / STREAM:NEXT
   Control or inspect local window preparation independently of counting. See
   LOCAL SLIDING WINDOWS for queue behaviour, diagnostic consumption and limitations.
+STREAM:REQUEST / STREAM:CLOCK:<probe> / STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0>
+STREAM:END:<coordinator>:<session>
+  See COORDINATED WINDOW SESSIONS for the shared-start handshake and clock mapping.
 
 FIXED PRESETS
 
@@ -455,9 +563,10 @@ BENCH AND WEARABLE CHECKS
 - BUFFER/WINDOW work in standby on both boards, even when the peer is offline.
 - Counter RESET/exercise changes preserve history; only reboot clears it.
 - PEAK diagnostics appear on either board in standby without activating counting.
-- The first peak starts that board's local window timeline; later peaks preserve t0.
-- STREAM:STOP clears/disables the window queue; STREAM:ARM waits for a new peak.
-- With no consumer, queue=3/QUEUE_FULL must appear while sensor sampling continues.
+- The first peak reports WAIT_COMMS; only JOIN (or manual START) creates windows.
+- Repeated JOIN preserves t0 and sequence; an old boot/arm is rejected after STOP.
+- STREAM:STOP clears the queue/request; STREAM:ARM permits a new request or JOIN.
+- After JOIN, no consumer means queue=3/QUEUE_FULL while sampling continues.
 - Verify generic trigger sensitivity on the worn sensors, including walking/noise.
 - Compare counts/LEDs against full physical reps; mocks require tuning.
 
@@ -484,7 +593,7 @@ Transport-independent node switching/LED tests:
   .build/node_session_test.exe
 
 Firmware startup tests with fake sensor/radio/console hardware:
-  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp -o .build/exercise_node_startup_test.exe
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp hardware/node/StreamCoordination.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
 
 Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):
@@ -498,6 +607,14 @@ Generic peak tests (noise, axes, timing, rearm, cooldown, gaps, rollover):
 Local window scheduler tests (anchoring, snapshots, overflow, catch-up, gaps, rollover):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/window_scheduler_test.cpp hardware/node/WindowScheduler.cpp hardware/node/SensorHistory.cpp -o .build/window_scheduler_test.exe
   .build/window_scheduler_test.exe
+
+Two-node coordinated session tests (clocks, simultaneous triggers, retries, reboots):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/stream_coordination_test.cpp hardware/node/StreamCoordination.cpp hardware/node/WindowScheduler.cpp hardware/node/SensorHistory.cpp -o .build/stream_coordination_test.exe
+  .build/stream_coordination_test.exe
+
+Serial parser tests (long coordinated commands, overflow, reconnect):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/wireless_streamer_test.cpp hardware/node/WirelessStreamer.cpp -o .build/wireless_streamer_test.exe
+  .build/wireless_streamer_test.exe
 
 Host tests use synthetic samples. They do not establish physical counting accuracy
 or Bluetooth/ESP-NOW reliability. Compiling does not upload firmware to the boards.

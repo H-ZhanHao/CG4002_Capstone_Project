@@ -61,6 +61,17 @@ int main() {
   assert(streamer.pollCommand(command, sizeof(command)) && std::string(command) == "#OVERFLOW");
   assert(streamer.pollCommand(command, sizeof(command)) && std::string(command) == "HELP");
 
+  char longCommand[128];
+  const std::string join = "STREAM:JOIN:4294967295:4294967295:4294967295:4294967295:4294967295";
+  feed(usbInput, join + "\n");
+  if (join.size() >= 64) assert(!streamer.pollCommand(longCommand, sizeof(longCommand)));
+  assert(streamer.pollCommand(longCommand, sizeof(longCommand)) && std::string(longCommand) == join);
+  feed(usbInput, std::string(150, 'A') + "\nHELP\n");
+  assert(!streamer.pollCommand(longCommand, sizeof(longCommand)));
+  assert(!streamer.pollCommand(longCommand, sizeof(longCommand)));
+  assert(streamer.pollCommand(longCommand, sizeof(longCommand)) && std::string(longCommand) == "#OVERFLOW");
+  assert(streamer.pollCommand(longCommand, sizeof(longCommand)) && std::string(longCommand) == "HELP");
+
   connected = true;
   ++session;
   feed(btInput, "ACT");

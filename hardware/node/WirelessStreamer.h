@@ -16,7 +16,7 @@ class WirelessStreamer {
 
  private:
   struct CommandBuffer {
-    char text[32] = {};
+    char text[128] = {}; // Coordinated starts include boot/arm/session/timestamp fields.
     size_t length = 0;
     bool overflow = false;
   };

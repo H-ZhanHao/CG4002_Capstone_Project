@@ -15,6 +15,7 @@ namespace WindowSchedulerConfig {
 }
 
 struct ScheduledWindowInfo {
+  uint32_t coordinator = 0; // Zero for manual local bench sessions.
   uint32_t session = 0, sequence = 0, triggerMs = 0;
   SensorWindowResult window;
 };
@@ -29,6 +30,7 @@ enum class WindowStreamState { ARMED, RUNNING, STOPPED };
 
 struct WindowStreamStatus {
   WindowStreamState state = WindowStreamState::ARMED;
+  uint32_t coordinator = 0;
   uint32_t session = 0, triggerMs = 0, nextEndMs = 0, nextSequence = 0;
   size_t queued = 0;
   uint32_t dropped = 0, skipped = 0;
@@ -44,12 +46,14 @@ struct WindowPreparation {
 // Modular time comparisons require timestamps less than 2^31 ms apart.
 class WindowScheduler {
  public:
-  void reset(); // Boot: clear all state, arm automatic triggering.
+  void reset(); // Boot: clear all state, ready for an accepted start.
   void arm(); // Arm only when not running; an active session keeps its anchor.
-  void stop(); // Disable automatic triggering and discard queued windows.
+  void stop(); // Stop preparation and discard queued windows.
   // Explicit start, including from STOPPED. Reject future t0 / active-session restarts.
   // Captures sequence zero immediately, including an error record if unavailable.
-  bool start(uint32_t t0, uint32_t now, const SensorHistory& history);
+  // Both shared IDs must be nonzero, or both zero for a manual local session.
+  bool start(uint32_t t0, uint32_t now, const SensorHistory& history,
+             uint32_t coordinator = 0, uint32_t sharedSession = 0);
   // At most one window attempt per call. True means lastPreparation() changed.
   bool update(uint32_t now, const SensorHistory& history);
   // Copy before removing; the caller owns the result. False leaves it unchanged.

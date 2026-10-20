@@ -30,6 +30,7 @@ GenericPeakDetector genericPeakDetector;
 GenericPeakEvent pendingGenericPeak;
 bool genericPeakPending = false;
 WindowScheduler windowScheduler;
+NodeStreamControl streamControl(windowScheduler, sensorHistory);
 // Shared diagnostic scratch: keep full sensor windows off the ESP-IDF task stack.
 ScheduledWindow windowScratch;
 
@@ -46,6 +47,7 @@ void linkMessage(const char* text) { wirelessStreamer.message(text); }
 NodeSession nodeSession(NodeRadio::send, linkMessage);
 const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STREAM | STATUS | HELP. Select Newline, then Send.";
 const char* streamCommandHelp = "Windows: STREAM | STREAM:START[:t0_ms] | STREAM:STOP | STREAM:ARM | STREAM:NEXT. Local preparation only; no comms transmission.";
+const char* coordinationHelp = "Comms bench: STREAM:CLOCK:<probe> | STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0> | STREAM:END:<coordinator>:<session> | STREAM:REQUEST";
 
 bool wirelessStarted = false;
 
@@ -146,6 +148,24 @@ bool consumeGenericPeak(GenericPeakEvent& event) {
 
 WindowStreamStatus windowStreamStatus() { return windowScheduler.status(); }
 bool takeSensorWindow(ScheduledWindow& destination) { return windowScheduler.take(destination); }
+bool pollStreamTrigger(StreamTrigger& trigger) { return streamControl.pollTrigger((uint32_t)millis(), trigger); }
+StreamNodeIdentity streamIdentity() { return streamControl.identity(); }
+StreamClockReply streamClockReply(uint32_t probe, uint32_t receivedMs) {
+  return streamControl.clockReply(probe, receivedMs, (uint32_t)millis());
+}
+
+void reportTrigger() {
+  StreamTrigger trigger;
+  if (!streamControl.pendingTrigger(trigger)) {
+    wirelessStreamer.message("[TRIGGER | NONE]");
+    return;
+  }
+  char line[192];
+  snprintf(line, sizeof(line), "[TRIGGER | %s | boot=%lu | arm=%lu | t0_ms=%lu | confirmed_ms=%lu | WAIT_COMMS]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)trigger.node.boot, (unsigned long)trigger.node.arm,
+    (unsigned long)trigger.peakMs, (unsigned long)trigger.detectedMs);
+  wirelessStreamer.message(line);
+}
 
 void reportStreamStatus() {
   const WindowStreamStatus status = windowScheduler.status();
@@ -153,10 +173,16 @@ void reportStreamStatus() {
     : status.state == WindowStreamState::ARMED ? "ARMED" : "STOPPED";
   char line[216];
   snprintf(line, sizeof(line),
-    "[STREAM | %s | %s | session=%lu | t0_ms=%lu | next_end_ms=%lu | queue=%u | dropped=%lu | skipped=%lu | local_only]",
-    nodeRole == HIP ? "HIP" : "WRIST", state, (unsigned long)status.session,
+    "[STREAM | %s | %s | coord=%lu | session=%lu | t0_ms=%lu | next_end_ms=%lu | queue=%u | dropped=%lu | skipped=%lu]",
+    nodeRole == HIP ? "HIP" : "WRIST", state, (unsigned long)status.coordinator, (unsigned long)status.session,
     (unsigned long)status.triggerMs, (unsigned long)status.nextEndMs, (unsigned int)status.queued,
     (unsigned long)status.dropped, (unsigned long)status.skipped);
+  wirelessStreamer.message(line);
+  const StreamNodeIdentity identity = streamControl.identity();
+  StreamTrigger pending;
+  snprintf(line, sizeof(line), "[COORD | %s | boot=%lu | arm=%lu | %s]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)identity.boot, (unsigned long)identity.arm,
+    streamControl.pendingTrigger(pending) ? "WAIT_COMMS" : state);
   wirelessStreamer.message(line);
 }
 
@@ -164,10 +190,10 @@ void reportPreparedWindow() {
   const WindowPreparation& prepared = windowScheduler.lastPreparation();
   const WindowStreamStatus status = windowScheduler.status();
   const SensorWindowResult& window = prepared.info.window;
-  char line[216];
+  char line[224];
   snprintf(line, sizeof(line),
-    "[FRAME | %s | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u | queue=%u | dropped=%lu | skipped=%lu]",
-    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)prepared.info.session,
+    "[FRAME | %s | coord=%lu | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u | queue=%u | drop=%lu | skip=%lu]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)prepared.info.coordinator, (unsigned long)prepared.info.session,
     (unsigned long)prepared.info.sequence, prepared.queued ? sensorWindowStatusName(window.status) : "QUEUE_FULL",
     (unsigned long)window.startMs, (unsigned long)window.endMs, (unsigned int)window.count,
     (unsigned int)status.queued, (unsigned long)status.dropped, (unsigned long)status.skipped);
@@ -175,14 +201,31 @@ void reportPreparedWindow() {
 }
 
 bool startWindowStream(uint32_t t0) {
-  if (!windowScheduler.start(t0, (uint32_t)millis(), sensorHistory)) return false;
+  if (!streamControl.startLocal(t0, (uint32_t)millis())) return false;
   reportStreamStatus();
   reportPreparedWindow();
   return true;
 }
 
-void stopWindowStream() { windowScheduler.stop(); }
-void armWindowStream() { windowScheduler.arm(); }
+void stopWindowStream() { streamControl.stop(); }
+void armWindowStream() { streamControl.arm(); }
+
+StreamJoinResult joinWindowStream(const StreamStart& start) {
+  const StreamJoinResult result = streamControl.join(start, (uint32_t)millis());
+  char line[200];
+  snprintf(line, sizeof(line), "[JOIN | %s | %s | coord=%lu | session=%lu | boot=%lu | arm=%lu | t0_ms=%lu]",
+    nodeRole == HIP ? "HIP" : "WRIST", streamJoinResultName(result),
+    (unsigned long)start.coordinator, (unsigned long)start.session,
+    (unsigned long)start.node.boot, (unsigned long)start.node.arm, (unsigned long)start.localT0);
+  wirelessStreamer.message(line);
+  if (result == StreamJoinResult::STARTED) {
+    reportStreamStatus();
+    reportPreparedWindow();
+  }
+  return result;
+}
+
+bool endWindowStream(uint32_t coordinator, uint32_t session) { return streamControl.end(coordinator, session); }
 
 void serviceWindowStream() {
   if (windowScheduler.update((uint32_t)millis(), sensorHistory)) reportPreparedWindow();
@@ -195,9 +238,8 @@ void detectGenericPeak(const SensorSample& sample) {
     pendingGenericPeak = event;
     genericPeakPending = true;
   }
-  // Freeze sequence zero before any diagnostic output can delay the main loop.
-  const bool started = windowScheduler.status().state == WindowStreamState::ARMED &&
-    windowScheduler.start(event.peakMs, (uint32_t)millis(), sensorHistory);
+  // A single coordinator chooses the shared t0; local peaks only request a start.
+  const bool requested = streamControl.peak(event);
   // Diagnostic metadata only; no window payload, activation or peer trigger.
   char line[192];
   snprintf(line, sizeof(line),
@@ -205,10 +247,7 @@ void detectGenericPeak(const SensorSample& sample) {
     nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)event.peakMs,
     (unsigned long)event.detectedMs, event.accelerationMps2, event.gyroRadS);
   wirelessStreamer.message(line);
-  if (started) {
-    reportStreamStatus();
-    reportPreparedWindow();
-  }
+  if (requested) reportTrigger();
 }
 
 void reportBuffer(unsigned long now) {
@@ -251,6 +290,22 @@ bool parseTimestamp(const char* text, uint32_t& value) {
   return true;
 }
 
+bool parseFields(const char* text, uint32_t* values, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (*text < '0' || *text > '9') return false;
+    uint32_t value = 0;
+    while (*text >= '0' && *text <= '9') {
+      const uint32_t digit = (uint32_t)(*text++ - '0');
+      if (value > (UINT32_MAX - digit) / 10) return false;
+      value = value * 10 + digit;
+    }
+    values[i] = value;
+    if (i + 1 == count) return *text == '\0';
+    if (*text++ != ':') return false;
+  }
+  return false;
+}
+
 void reportExercise() {
   char message[160];
   const CountingMode selectedMode = nodeSession.selectedMode();
@@ -280,6 +335,7 @@ void processCommand(char* command, unsigned long now) {
   if (!strcmp(text, "HELP")) {
     wirelessStreamer.message(commandHelp);
     wirelessStreamer.message(streamCommandHelp);
+    wirelessStreamer.message(coordinationHelp);
     return;
   }
   if (!strcmp(text, "STATUS")) {
@@ -291,6 +347,51 @@ void processCommand(char* command, unsigned long now) {
     return;
   }
   if (!strcmp(text, "STREAM")) {
+    reportStreamStatus();
+    return;
+  }
+  if (!strcmp(text, "STREAM:REQUEST")) {
+    reportTrigger();
+    return;
+  }
+  if (!strncmp(text, "STREAM:CLOCK:", 13)) {
+    uint32_t probe;
+    if (!parseTimestamp(text + 13, probe)) {
+      wirelessStreamer.message("ERROR: Use STREAM:CLOCK:<probe>, an unsigned 32-bit number.");
+      return;
+    }
+    const StreamClockReply reply = streamClockReply(probe, (uint32_t)now);
+    char line[200];
+    snprintf(line, sizeof(line), "[CLOCK | %s | probe=%lu | boot=%lu | arm=%lu | rx_ms=%lu | tx_ms=%lu | armed=%u]",
+      nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)reply.probe,
+      (unsigned long)reply.node.boot, (unsigned long)reply.node.arm,
+      (unsigned long)reply.receivedMs, (unsigned long)reply.sentMs, reply.armed ? 1u : 0u);
+    wirelessStreamer.message(line);
+    return;
+  }
+  if (!strncmp(text, "STREAM:JOIN:", 12)) {
+    uint32_t fields[5];
+    if (!parseFields(text + 12, fields, 5)) {
+      wirelessStreamer.message("ERROR: Use STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0>, unsigned 32-bit numbers.");
+      return;
+    }
+    StreamStart start;
+    start.node.role = nodeRole;
+    start.node.boot = fields[0];
+    start.node.arm = fields[1];
+    start.coordinator = fields[2];
+    start.session = fields[3];
+    start.localT0 = fields[4];
+    joinWindowStream(start);
+    return;
+  }
+  if (!strncmp(text, "STREAM:END:", 11)) {
+    uint32_t fields[2];
+    if (!parseFields(text + 11, fields, 2)) {
+      wirelessStreamer.message("ERROR: Use STREAM:END:<coordinator>:<session>, unsigned 32-bit numbers.");
+      return;
+    }
+    wirelessStreamer.message(endWindowStream(fields[0], fields[1]) ? "[END | ACCEPTED]" : "[END | STALE_SESSION]");
     reportStreamStatus();
     return;
   }
@@ -326,8 +427,8 @@ void processCommand(char* command, unsigned long now) {
     char line[192];
     const ScheduledWindowInfo& info = windowScratch.info;
     snprintf(line, sizeof(line),
-      "[FRAME TAKEN | %s | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u]",
-      nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)info.session, (unsigned long)info.sequence,
+      "[FRAME TAKEN | %s | coord=%lu | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u]",
+      nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)info.coordinator, (unsigned long)info.session, (unsigned long)info.sequence,
       sensorWindowStatusName(info.window.status), (unsigned long)info.window.startMs,
       (unsigned long)info.window.endMs, (unsigned int)info.window.count);
     wirelessStreamer.message(line);
@@ -538,7 +639,6 @@ void begin(NodeRole role) {
   sensorHistory.clear(); // Boot only; counter resets must preserve sensor history.
   genericPeakDetector.reset();
   genericPeakPending = false;
-  windowScheduler.reset();
   activeExercise = nodeRole == HIP ? SQUAT : JUMPING_JACK;
   activeMode = ExercisePresets::defaultMode(activeExercise);
   usbConsole.begin(115200);
@@ -580,12 +680,15 @@ void begin(NodeRole role) {
 
   const unsigned long now = millis();
 
-  nodeSession.begin(nodeRole, esp_random(), activeMode);
+  const uint32_t boot = esp_random(); // Generate after radio initialization, as for NodeSession.
+  streamControl.begin(nodeRole, boot);
+  nodeSession.begin(nodeRole, boot, activeMode);
   restartSession(now);
   fallDetector.begin(now);
 
   wirelessStreamer.message(commandHelp);
   wirelessStreamer.message(streamCommandHelp);
+  wirelessStreamer.message(coordinationHelp);
   reportStreamStatus();
   nodeSession.status();
   reportExercise();
@@ -599,7 +702,7 @@ void update() {
 
   updateOutputTimers(now);
 
-  char command[32];
+  char command[128];
   if (wirelessStreamer.pollCommand(command, sizeof(command))) {
     processCommand(command, millis());
   }

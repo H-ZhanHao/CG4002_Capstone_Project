@@ -11,6 +11,7 @@ idf_component_register(
         "node/NodeSession.cpp"
         "node/RepCounter.cpp"
         "node/SensorHistory.cpp"
+        "node/StreamCoordination.cpp"
         "node/WirelessStreamer.cpp"
         "node/WindowScheduler.cpp"
     INCLUDE_DIRS "node"

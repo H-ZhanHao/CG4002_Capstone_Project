@@ -19,13 +19,16 @@ void WindowScheduler::stop() {
   head_ = 0;
 }
 
-bool WindowScheduler::start(uint32_t t0, uint32_t now, const SensorHistory& history) {
+bool WindowScheduler::start(uint32_t t0, uint32_t now, const SensorHistory& history,
+                            uint32_t coordinator, uint32_t sharedSession) {
+  if ((!coordinator) != (!sharedSession)) return false;
   if (status_.state == WindowStreamState::RUNNING || now - t0 >= HALF_RANGE) return false;
   uint32_t session = status_.session + 1;
   if (!session) ++session;
   status_ = WindowStreamStatus{};
   status_.state = WindowStreamState::RUNNING;
-  status_.session = session;
+  status_.coordinator = coordinator;
+  status_.session = coordinator ? sharedSession : session;
   status_.triggerMs = t0;
   status_.nextEndMs = t0 + WindowSchedulerConfig::STEP_MS;
   status_.nextSequence = 1;
@@ -36,6 +39,7 @@ bool WindowScheduler::start(uint32_t t0, uint32_t now, const SensorHistory& hist
 
 void WindowScheduler::prepare(uint32_t endMs, uint32_t sequence, const SensorHistory& history) {
   last_ = WindowPreparation{};
+  last_.info.coordinator = status_.coordinator;
   last_.info.session = status_.session;
   last_.info.sequence = sequence;
   last_.info.triggerMs = status_.triggerMs;
