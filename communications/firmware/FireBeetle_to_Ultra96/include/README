@@ -1,0 +1,101 @@
+
+This directory is intended for project header files.
+
+A header file is a file containing C declarations and macro definitions
+to be shared between several project source files. You request the use of a
+header file in your project source file (C, C++, etc) located in `src` folder
+by including it, with the C preprocessing directive `#include'.
+
+```src/main.c
+
+#include "header.h"
+
+int main (void)
+{
+ ...
+}
+```
+
+Including a header file produces the same results as copying the header file
+into each source file that needs it. Such copying would be time-consuming
+and error-prone. With a header file, the related declarations appear
+in only one place. If they need to be changed, they can be changed in one
+place, and programs that include the header file will automatically use the
+new version when next recompiled. The header file eliminates the labor of
+finding and changing all the copies as well as the risk that a failure to
+find one copy will result in inconsistencies within a program.
+
+In C, the convention is to give header files names that end with `.h'.
+
+Read more about using header files in official GCC documentation:
+
+* Include Syntax
+* Include Operation
+* Once-Only Headers
+* Computed Includes
+
+https://gcc.gnu.org/onlinedocs/cpp/Header-Files.html
+
+
+# Stage 3 HEARTBEAT Test Build
+
+This package extends the verified HELLO handshake checkpoint with per-source
+HEARTBEAT generation and parsing. It also includes the three-second Ultra96
+client-inactivity timeout validated after an ungraceful ESP32 disconnect.
+
+## Replacement files
+
+- `esp32/include/hub_router.h`
+- `esp32/include/mock_imu.h`
+- `esp32/include/protocol.h`
+- `esp32/include/tcp_client.h`
+- `esp32/src/hub_router.c`
+- `esp32/src/main.c`
+- `esp32/src/mock_imu.c`
+- `esp32/src/protocol.c`
+- `esp32/src/tcp_client.c`
+- `ultra96/server.py`
+
+## HEARTBEAT behavior
+
+- Development active-node mask `0x0A` selects temporary Node 1 and Hub Node 3.
+- HELLO assigned-node mask remains `0x0E`, authorizing Nodes 1, 2, and 3.
+- Each active source has independent last-DATA time, last-HEARTBEAT time, and
+  HEARTBEAT sequence state.
+- If a source has sent no DATA for one second, the hub sends one HEARTBEAT per
+  second for that source.
+- The eight-byte payload contains battery voltage, status, and the source's
+  cumulative hub-router outbound overflow count.
+- DATA from other source nodes continues normally.
+- DATA resumption suppresses further HEARTBEAT messages for that source.
+
+## Automatic test
+
+`ENABLE_HEARTBEAT_TEST` is set to `1` in `main.c`. Twenty seconds after
+application startup, the test pauses temporary Node 1 for four seconds and
+then resumes it. Hub Node 3 remains active throughout.
+
+Expected ESP32 output includes:
+
+```text
+HEARTBEAT TEST: pausing temporary Node 1 for 4000 ms
+Sent HEARTBEAT: node=1 sequence=0 overflow=...
+Sent HEARTBEAT: node=1 sequence=1 overflow=...
+Sent HEARTBEAT: node=1 sequence=2 overflow=...
+HEARTBEAT TEST: temporary Node 1 resumed
+```
+
+Expected Ultra96 output includes matching Node 1 HEARTBEAT messages under the
+current Session ID while Node 3 DATA continues. Node 1 DATA should resume
+without reconnecting or changing the Session ID. A large Node 1 DATA timestamp
+interval after the pause is expected.
+
+After the test passes, set this in `main.c`:
+
+```c
+#define ENABLE_HEARTBEAT_TEST 0
+```
+
+Rebuild once more before committing the production path. The pause API may
+remain available for later diagnostics, but the automatic pause task should be
+disabled.

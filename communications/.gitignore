@@ -1,0 +1,88 @@
+# PlatformIO build output
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VS Code generated files
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+firmware/FireBeetle_to_Ultra96/.vscode/sessions.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment and secret files
+.env
+.env.*
+!.env.example
+secrets.h
+credentials.h
+firmware/FireBeetle_to_Ultra96/include/wifi_secrets.h
+firmware/FireBeetle_to_Ultra96/include/wifi_enterprise_secrets.h
+unity/Ultra96VisualizerDemo/Assets/Resources/Certificates/server-cert.pem
+unity/Ultra96VisualizerDemo/Assets/Resources/Certificates/server-cert.pem.meta
+unity/Ultra96VisualizerDemo/Assets/Resources/Certificates/server-cert.bytes
+unity/Ultra96VisualizerDemo/Assets/Resources/Certificates/server-cert.bytes.meta
+unity/Ultra96VisualizerDemo/Assets/Resources/Certificates/server-key.pem
+unity/Ultra96VisualizerDemo/Assets/Resources/Certificates/server-key.pem.meta
+firmware/FireBeetle_to_Ultra96/include/laptop_relay_endpoint_secrets.h
+firmware/FireBeetle_to_Ultra96/include/espnow_secrets.h
+firmware/FireBeetle_to_Ultra96/include/demo_tls_config.h
+
+# PlatformIO-generated ESP-IDF configurations
+sdkconfig
+sdkconfig.*
+
+# Certificates and private keys
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Keep public/example certificates if deliberately added
+!*.example.pem
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Unity generated directories
+/unity/Ultra96VisualizerDemo/[Ll]ibrary/
+/unity/Ultra96VisualizerDemo/[Tt]emp/
+/unity/Ultra96VisualizerDemo/[Oo]bj/
+/unity/Ultra96VisualizerDemo/[Ll]ogs/
+/unity/Ultra96VisualizerDemo/[Uu]serSettings/
+/unity/Ultra96VisualizerDemo/[Mm]emoryCaptures/
+/unity/Ultra96VisualizerDemo/[Bb]uild/
+/unity/Ultra96VisualizerDemo/[Bb]uilds/
+
+# Unity and IDE generated files
+/unity/Ultra96VisualizerDemo/*.csproj
+/unity/Ultra96VisualizerDemo/*.sln
+/unity/Ultra96VisualizerDemo/*.suo
+/unity/Ultra96VisualizerDemo/*.user
+/unity/Ultra96VisualizerDemo/.vs/
+/unity/Ultra96VisualizerDemo/.idea/
+unity/Ultra96VisualizerDemo/Ultra96VisualizerDemo.apk
+.vscode/settings.json
+.vscode/sessions.json
+*.bin
+
+# Others
+start-demo.ps1
+docs/handoffs/*.md
+docs/plans/*.md
+docs/progress/*.md
+docs/results/*.md
+docs/walkthrough/*.md
+docs/walkthrough/other/*.md
+
