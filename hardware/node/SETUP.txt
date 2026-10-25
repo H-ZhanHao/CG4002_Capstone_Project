@@ -24,6 +24,11 @@ PLATFORMIO SETUP AND UPLOAD
    Connect the wrist over USB and upload using node2_private_tls.
    Upload over USB, not the Bluetooth serial port. If unsure which COM port is
    which, connect one board at a time. Do not open the same port in two monitors.
+   From a PlatformIO PowerShell terminal, you can instead run this repository
+   root script and select the board and its USB port:
+     .\upload-firmware.ps1 -Role hip -Port COM7
+     .\upload-firmware.ps1 -Role wrist -Port COM8
+   Replace COM7/COM8 with the corresponding USB ports.
 5. Open each PlatformIO serial monitor at 115200 baud. The existing configuration
    sends commands with LF when you press Enter.
    Check the role, Wi-Fi STA MAC, ESP-NOW status, Bluetooth name and STANDBY.
@@ -358,6 +363,8 @@ WIRELESS MONITORS ON WINDOWS
 3. Open a separate PlatformIO serial monitor for each outgoing port, e.g.:
      pio device monitor --port COM7 --baud 115200
    Replace COM7 with the correct outgoing Bluetooth port for each board.
+   Alternatively, use the repository root script:
+     .\monitor-serial.ps1 -Port COM7
 4. The USB COM port and Bluetooth COM port are different. Switch to the
    Bluetooth ports for wireless commands/telemetry; upload firmware via USB.
 5. Keep battery power connected when removing USB. If a board reboots, it returns
