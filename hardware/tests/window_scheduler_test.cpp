@@ -22,10 +22,10 @@ static void checkWindow(const ScheduledWindow& frame, uint32_t session, uint32_t
   assert(frame.info.session == session && frame.info.sequence == sequence);
   assert(frame.info.triggerMs == t0);
   const auto& window = frame.info.window;
-  assert(window.status == SensorWindowStatus::READY && window.count == 251);
-  assert(window.startMs == end - 5000 && window.endMs == end);
+  assert(window.status == SensorWindowStatus::READY && window.count == 151);
+  assert(window.startMs == end - 3000 && window.endMs == end);
   for (size_t i = 0; i < window.count; ++i) {
-    const uint32_t time = end - 5000 + (uint32_t)i * 20;
+    const uint32_t time = end - 3000 + (uint32_t)i * 20;
     assert(frame.samples[i].timestampMs == time);
     for (int axis = 0; axis < 3; ++axis) {
       assert(frame.samples[i].acceleration[axis] == sample(time).acceleration[axis]);
@@ -151,7 +151,7 @@ int main() {
   assert(scheduler.update(6100, history));
   assert(scheduler.take(frame));
   assert(frame.info.window.endMs == 6000 && frame.info.window.lastMs == 5980);
-  assert(frame.info.window.count == 250);
+  assert(frame.info.window.count == 150);
 
   // Failed reads do not hold the scheduler forever or fabricate endpoint samples.
   assert(!scheduler.update(7000, history));
@@ -171,25 +171,25 @@ int main() {
   fill(history, 0, 8020);
   assert(scheduler.start(7011, 8020, history));
   assert(scheduler.take(frame));
-  assert(frame.info.window.startMs == 2011 && frame.info.window.firstMs == 2020);
+  assert(frame.info.window.startMs == 4011 && frame.info.window.firstMs == 4020);
   assert(frame.info.window.endMs == 7011 && frame.info.window.lastMs == 7000);
   assert(scheduler.update(8020, history));
   assert(scheduler.take(frame));
-  assert(frame.info.window.startMs == 3011 && frame.info.window.endMs == 8011);
-  assert(frame.info.window.lastMs == 8000 && frame.info.window.count == 250);
+  assert(frame.info.window.startMs == 5011 && frame.info.window.endMs == 8011);
+  assert(frame.info.window.lastMs == 8000 && frame.info.window.count == 150);
 
   // Denser input fails explicitly rather than overflowing/truncating a snapshot.
   scheduler.reset();
   history.clear();
-  for (uint32_t time = 0; time <= 5000; time += 20) {
+  for (uint32_t time = 0; time <= 5000; time += 10) {
     assert(history.push(sample(time)));
-    if (time < 40) assert(history.push(sample(time + 10)));
+    if (time >= 2000 && time < 2020) assert(history.push(sample(time + 5)));
   }
   assert(scheduler.start(5000, 5000, history));
   frame.samples[0].timestampMs = 123;
   assert(scheduler.take(frame));
   assert(frame.info.window.status == SensorWindowStatus::OUTPUT_TOO_SMALL);
-  assert(frame.info.window.count == 253 && !frame.info.window.copied());
+  assert(frame.info.window.count == 303 && !frame.info.window.copied());
   assert(frame.samples[0].timestampMs == 123);
 
   // Local millisecond rollover does not change interval ordering or readiness.

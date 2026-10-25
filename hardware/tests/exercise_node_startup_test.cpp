@@ -207,7 +207,7 @@ int main() {
     assert(output.find("INSUFFICIENT_HISTORY") != std::string::npos);
     step(250, 10.0f, 0.5f);
     auto captured = ExerciseNode::copySensorWindow((uint32_t)now, window, capacity);
-    assert(captured.status == SensorWindowStatus::READY && captured.count == 251);
+    assert(captured.status == SensorWindowStatus::READY && captured.count == 151);
     assert(window[captured.count - 1].acceleration[2] == 10.0f);
     assert(window[captured.count - 1].gyro[0] == 0.5f);
     assert(data().reps == 0);
@@ -216,7 +216,7 @@ int main() {
     command("WINDOW");
     assert(output.find(role == HIP ? "[BUFFER | HIP" : "[BUFFER | WRIST") != std::string::npos);
     assert(output.find(" | READY | ") != std::string::npos);
-    assert(output.find("samples=251") != std::string::npos);
+    assert(output.find("samples=151") != std::string::npos);
 
     // Counter commands neither clear history nor skip scheduled sensor reads.
     const uint32_t anchor = (uint32_t)now;
@@ -228,7 +228,7 @@ int main() {
     assert(ExerciseNode::copySensorWindow(anchor, window, capacity).status == SensorWindowStatus::READY);
     captured = ExerciseNode::copySensorWindow((uint32_t)now, window, capacity);
     assert(captured.status == SensorWindowStatus::READY && captured.maxGapMs == 20);
-    assert(captured.count == 251);
+    assert(captured.count == 151);
     char historicalCommand[32];
     snprintf(historicalCommand, sizeof(historicalCommand), "WINDOW:%lu", (unsigned long)anchor);
     output.clear();
@@ -287,7 +287,7 @@ int main() {
     assert(ExerciseNode::consumeGenericPeak(event));
     assert(event.gyroRadS > 2 && data().reps == 0 && data().repState == 2);
 
-    // An early peak is observable; it cannot manufacture five seconds of history.
+    // An early peak is observable; it cannot manufacture three seconds of history.
     ExerciseNode::begin(role);
     assert(!ExerciseNode::consumeGenericPeak(event));
     step(5);
@@ -335,7 +335,7 @@ int main() {
     assert(ExerciseNode::takeSensorWindow(firstWindow));
     assert(firstWindow.info.coordinator == 17 && firstWindow.info.session == 1);
     assert(firstWindow.info.sequence == 0 && firstWindow.info.window.status == SensorWindowStatus::READY);
-    assert(firstWindow.info.window.endMs == peak.peakMs && firstWindow.info.window.count == 251);
+    assert(firstWindow.info.window.endMs == peak.peakMs && firstWindow.info.window.count == 151);
     assert(output.find(role == HIP ? "[FRAME | HIP" : "[FRAME | WRIST") != std::string::npos);
     assert(data().reps == 0 && radioPackets == beforePackets && readyEvents + repEvents == beforeLeds);
     assert(ExerciseNode::joinWindowStream(accepted) == StreamJoinResult::ALREADY_RUNNING);
@@ -347,7 +347,7 @@ int main() {
     step(1);
     assert(ExerciseNode::takeSensorWindow(scheduled));
     assert(scheduled.info.sequence == 1 && scheduled.info.window.endMs == started.nextEndMs);
-    assert(scheduled.info.window.startMs == peak.peakMs - 4000);
+    assert(scheduled.info.window.startMs == peak.peakMs - 2000);
     assert(firstWindow.info.window.endMs == peak.peakMs); // Caller-owned snapshot remains unchanged.
     command("RESET");
     command("STANDBY");

@@ -82,7 +82,7 @@ int main() {
   assert(hipWindows.take(hipFrame) && wristWindows.take(wristFrame));
   assert(hipFrame.info.coordinator == wristFrame.info.coordinator);
   assert(hipFrame.info.session == wristFrame.info.session && hipFrame.info.sequence == 0);
-  assert(hipFrame.info.window.count == 251 && wristFrame.info.window.count == 251);
+  assert(hipFrame.info.window.count == 151 && wristFrame.info.window.count == 151);
   for (size_t i = 0; i < hipFrame.info.window.count; ++i) {
     assert(hipFrame.samples[i].timestampMs - hipOffset == wristFrame.samples[i].timestampMs - wristOffset);
     assert(hipFrame.samples[i].acceleration[0] == wristFrame.samples[i].acceleration[0]);

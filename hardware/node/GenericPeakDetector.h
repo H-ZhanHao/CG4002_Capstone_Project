@@ -14,7 +14,7 @@ namespace GenericPeakConfig {
   constexpr uint32_t REARM_MS = 80;
   constexpr uint32_t MIN_TRIGGER_GAP_MS = 1000;
   constexpr uint32_t MAX_SAMPLE_GAP_MS = 100;
-  // Keep confirmation delay inside the buffer's extra three seconds of history.
+  // Keep confirmation delay inside the buffer's extra retained history.
   constexpr uint32_t MAX_CANDIDATE_MS = 2500;
   static_assert(MAX_CANDIDATE_MS < SensorHistoryConfig::RETENTION_MS - SensorHistoryConfig::WINDOW_MS,
                 "Peak confirmation must fit retained history");

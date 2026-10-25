@@ -62,9 +62,9 @@ local uptime in milliseconds (timestamped at read start), acceleration XYZ in
 m/s2 including gravity, and gyro XYZ in rad/s. Values are saved before exercise
 filtering or gyro correction. Failed reads do not insert zero or stale samples.
 
-SensorHistoryConfig in SensorHistory.h sets a 5000 ms window and 8000 ms retention.
-At the configured 50 Hz this uses 401 ring slots, about 11 KB. The manual window
-command shares a static 252-sample scratch snapshot (about 7 KB); neither array
+SensorHistoryConfig in SensorHistory.h sets a 3000 ms window and 8000 ms retention.
+At the configured 100 Hz this uses 801 ring slots, about 22 KB. The manual window
+command shares a static 302-sample scratch snapshot (about 8.5 KB); neither array
 uses the main task stack. Data is in RAM only and is lost on reboot. ACTIVATE,
 STANDBY, RESET, exercise changes and mode changes preserve this history and the
 sampling cadence. Generic peak detection is described below; automatic window
@@ -73,19 +73,19 @@ transmission is not implemented yet.
 Bench inspection, on each board's USB or Bluetooth serial monitor:
 1. Send BUFFER after boot. It reports the node, stored sample count, oldest/newest
    timestamps, covered span and newest sample age (all times in milliseconds).
-2. Send WINDOW before five seconds of samples are available. Expect EMPTY or
+2. Send WINDOW before three seconds of samples are available. Expect EMPTY or
    INSUFFICIENT_HISTORY. No samples are padded or invented.
-3. After at least five seconds of successful sampling, send WINDOW again. It
-   copies [latest sample time - 5000, latest sample time] and prints a summary.
-   READY means enough history with no gap greater than 40 ms. SAMPLE_GAP means
+3. After at least three seconds of successful sampling, send WINDOW again. It
+   copies [latest sample time - 3000, latest sample time] and prints a summary.
+   READY means enough history with no gap greater than 20 ms. SAMPLE_GAP means
    the actual samples were copied, but at least one interval/edge gap exceeds
-   40 ms. max_gap_ms reports the largest gap; smaller jitter is not resampled.
-   At exactly 50 Hz with both endpoints included, there are 251 samples. With
+   20 ms. max_gap_ms reports the largest gap; smaller jitter is not resampled.
+   At exactly 100 Hz with both endpoints included, there are 301 samples. With
    real timing jitter or a t0 between samples, counts/endpoints can differ.
 4. To simulate a delayed trigger, note newest_ms from BUFFER and send
-   WINDOW:<that timestamp>, for example WINDOW:12000. This selects [7000,12000]
+   WINDOW:<that timestamp>, for example WINDOW:12000. This selects [9000,12000]
    regardless of when the command arrives, provided those times are retained.
-   At nominal cadence, the extra history allows up to three seconds of delay,
+   At nominal cadence, the extra history allows up to five seconds of delay,
    shared between peak confirmation and any later trigger/transport handling.
    END_NOT_AVAILABLE means t0 is newer than the last successful sample.
    INSUFFICIENT_HISTORY means the requested history is unavailable/expired.
@@ -120,7 +120,7 @@ from ExercisePresets.h. Tune them with recordings from the actual wearer/mountin
   Rotation gate: |gyro XYZ| >= 0.60 rad/s, assuming zero gyro bias.
 Either channel can trigger, including rotation with little acceleration change.
 A three-sample median filter rejects isolated spikes. The larger of the two
-normalized signals must remain above its gate for at least 60 ms. A peak is
+normalized signals must remain above its gate for at least 100 ms. A peak is
 confirmed once the score falls at least 25% from its maximum for at least 40 ms.
 The filtered peak can lag the raw sensor maximum by a sample; t0 is the timestamp
 of the highest filtered score, not the later time at which the decline confirms it.
@@ -142,9 +142,9 @@ Bench inspection, with either node powered and its serial monitor open:
      [PEAK | HIP | t0_ms=8240 | confirmed_ms=8340 | accel=1.60 m/s2 | gyro=0.10 rad/s]
    This is a USB/Bluetooth diagnostic line, not a comms packet or a sensor window.
 3. Send WINDOW:8240 using the actual printed t0, promptly enough to retain its
-   history. Expect READY when five seconds of healthy samples cover that time.
+   history. Expect READY when three seconds of healthy samples cover that time.
    The returned end time is t0, not confirmed_ms or the time the command arrived.
-4. A peak during the first five seconds is still detected, but WINDOW can report
+4. A peak during the first three seconds is still detected, but WINDOW can report
    INSUFFICIENT_HISTORY. No missing pre-boot samples are invented. Waiting for
    initial history does not require the wearer to stand still.
 5. Repeat on WRIST, including rotation resembling jumping-jack arm movement.
@@ -163,14 +163,14 @@ LOCAL SLIDING WINDOWS (STEP 4, BEFORE COMMS INTEGRATION)
 Each node starts ARMED. With Step 5, its first peak requests a coordinated session
 and prints TRIGGER/WAIT_COMMS. A peak alone no longer creates local windows.
 After an accepted JOIN, sequence 0 is copied immediately using the supplied local
-t0: [t0 - 5000, t0]. Following endpoints are t0 + 1000, t0 + 2000, etc.
-Each window is still five seconds long. Later peaks do not restart the timeline.
+t0: [t0 - 3000, t0]. Following endpoints are t0 + 1000, t0 + 2000, etc.
+Each window is still three seconds long. Later peaks do not restart the timeline.
 No further peaks are needed for windows to continue. Both nodes use the same
 coordinator/session ID and translated local timestamps. STREAM:START remains an
 explicit local bench override (coordinator=0), without the comms handshake.
 
 Windows use actual samples, including both endpoints when present. At exactly
-50 Hz that is 251 samples; no padding, interpolation or fixed-size resampling is
+100 Hz that is 301 samples; no padding, interpolation or fixed-size resampling is
 performed. If t0 falls between samples, each copied sample stays within the
 requested interval. Endpoint times remain on the t0-based grid despite loop jitter.
 The scheduler waits up to 100 ms for a successful read to cover a due endpoint;
@@ -185,9 +185,9 @@ If the loop stalls, at most the three most recent due slots are caught up, one
 per update; older slots increment skipped. Sequence numbers retain their original
 positions, so missing windows remain visible. The cadence never shifts to now.
 
-There is a FIFO queue of three snapshots (about 21 KB), in addition to the 11 KB
-history ring and 7 KB shared diagnostic scratch. All large arrays are static.
-Each snapshot holds 252 samples at the configured 50 Hz: 251 inclusive samples
+There is a FIFO queue of three snapshots (about 25.5 KB), in addition to the 22 KB
+history ring and 8.5 KB shared diagnostic scratch. All large arrays are static.
+Each snapshot holds 302 samples at the configured 100 Hz: 301 inclusive samples
 plus one for boundary timing jitter. If an interval exceeds that capacity, its
 record reports OUTPUT_TOO_SMALL with no payload; samples are never truncated.
 New ring samples cannot change queued/copied snapshots. A full queue preserves
@@ -224,14 +224,14 @@ Typical output (example values, exact cadence assumed):
 No FRAME appears until comms accepts a start. For example, after:
   STREAM:JOIN:42:1:99:12:8240
   [JOIN | HIP | STARTED | coord=99 | session=12 | boot=42 | arm=1 | t0_ms=8240]
-  [FRAME | HIP | coord=99 | session=12 | seq=0 | READY | start_ms=3240 | end_ms=8240 | samples=251 | queue=1 | drop=0 | skip=0]
-  [FRAME | HIP | coord=99 | session=12 | seq=1 | READY | start_ms=4240 | end_ms=9240 | samples=251 | queue=2 | drop=0 | skip=0]
+  [FRAME | HIP | coord=99 | session=12 | seq=0 | READY | start_ms=5240 | end_ms=8240 | samples=301 | queue=1 | drop=0 | skip=0]
+  [FRAME | HIP | coord=99 | session=12 | seq=1 | READY | start_ms=6240 | end_ms=9240 | samples=301 | queue=2 | drop=0 | skip=0]
 FRAME means prepared locally, never sent. FRAME TAKEN means removed by STREAM:NEXT.
 If the queue fills, expect QUEUE_FULL on following intervals until records are taken.
 
 Bench check on each board independently:
 1. Power the node and leave counting in standby. STREAM should report ARMED.
-2. Allow at least five seconds of samples, then move through a peak. Expect
+2. Allow at least three seconds of samples, then move through a peak. Expect
    TRIGGER/WAIT_COMMS and no FRAME. Promptly send JOIN with the printed boot/arm/t0
    and nonzero coordinator/session numbers. Expect seq=0, then one attempt/second.
 3. STREAM:NEXT displays/removes the oldest snapshot. Repeat about once per second
@@ -271,10 +271,10 @@ Lifecycle and ownership:
    within that coordinator boot; the pair (coordinator, session) identifies a set.
 2. Probe both armed nodes' clocks. Both need a fresh accepted clock measurement
    before a trigger can start a set. Readiness here means armed/control readiness,
-   not guaranteed five-second sensor coverage; each window reports data quality.
+   not guaranteed three-second sensor coverage; each window reports data quality.
 3. The first accepted trigger chooses t0. If both trigger together, the second
    receives EXISTING and cannot change t0. There is no main streamer: both get a
-   targeted START and keep their own five-second windows / separate data pipeline.
+   targeted START and keep their own three-second windows / separate data pipeline.
 4. Comms polls START for each role and delivers it until acknowledged. A node
    accepts its own boot/arm ticket, including when it has detected no local peak.
    Identical retries return ALREADY_RUNNING without clearing a queue, resetting
@@ -317,7 +317,7 @@ Clock measurement and translation:
   target_local_t0 = coordinator_t0 + target_offset.
   Thus different printed t0 numbers may describe the same physical instant.
 - Node clocks continue unchanged; no clock is reset. All time arithmetic assumes
-  intervals less than 2^31 ms. The eight-second ring allows only about three seconds
+  intervals less than 2^31 ms. The eight-second ring allows about five seconds
   for peak confirmation PLUS coordination/delivery delay. A late JOIN reports
   INSUFFICIENT_HISTORY rather than inventing/reanchoring the first window; subsequent
   windows can recover. A coordinator must handle these data-quality failures.
@@ -477,7 +477,7 @@ STATUS / HELP
 BUFFER
   Show local sensor history size, timestamps, span and age; counting is unchanged.
 WINDOW / WINDOW:<t0_ms>
-  Copy and summarize the inclusive five-second window ending at the latest sample
+  Copy and summarize the inclusive three-second window ending at the latest sample
   or the supplied local unsigned 32-bit timestamp. See LOCAL SENSOR HISTORY above.
 STREAM / STREAM:START[:t0_ms] / STREAM:STOP / STREAM:ARM / STREAM:NEXT
   Control or inspect local window preparation independently of counting. See

@@ -5,7 +5,7 @@
 namespace WindowSchedulerConfig {
   constexpr uint32_t STEP_MS = 1000;
   constexpr uint32_t END_WAIT_MS = 100; // Allow the next sensor read to cover an endpoint.
-  // Five seconds including both endpoints, plus one sample for boundary timing jitter.
+  // Window including both endpoints, plus one sample for boundary timing jitter.
   constexpr size_t SAMPLE_CAPACITY = SensorHistoryConfig::WINDOW_MS * 1000 /
     GeneralConfig::SAMPLE_INTERVAL_US + 2;
   constexpr size_t QUEUE_CAPACITY = 3;
