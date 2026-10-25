@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <vector>
 #include "GenericPeakDetector.h"
+#include "ExercisePresets.h"
 
 struct Rig {
   GenericPeakDetector detector;
@@ -86,6 +87,41 @@ int main() {
     weak.hold(10, gyroOnly ? 0 : .70f, gyroOnly ? .70f : 0);
     weak.hold(10);
     assert(weak.events.size() == 1);
+  }
+
+  // At 100 Hz, reject sub-gate noise and short strong bursts,
+  // but retain sustained weak exercise peaks on either channel independently.
+  for (bool gyroOnly : {false, true}) {
+    for (int scenario = 0; scenario < 3; ++scenario) {
+      Rig rig;
+      for (int i = 0; i < 20; ++i) rig.feed(0, 0, 10);
+      const float amplitude = scenario == 0 ? .35f : (scenario == 1 ? 1.2f : .70f);
+      const int samples = scenario == 1 ? 8 : 20;
+      for (int i = 0; i < samples; ++i)
+        rig.feed(gyroOnly ? 0 : amplitude, gyroOnly ? amplitude : 0, 10);
+      for (int i = 0; i < 20; ++i) rig.feed(0, 0, 10);
+      assert(rig.events.size() == (scenario == 2 ? 1u : 0u));
+    }
+  }
+
+  // Replay a smooth one-second peak at each preset's minimum amplitude.
+  // Keep coverage tied to the presets so a threshold increase cannot silently
+  // exclude a supported exercise. These are synthetic signals, not worn traces.
+  for (int exercise = 0; exercise < EXERCISE_COUNT; ++exercise) {
+    const auto& preset = ExercisePresets::get(static_cast<ExerciseType>(exercise));
+    assert(GenericPeakConfig::ACCELERATION_GATE_MPS2 < preset.peak);
+    assert(GenericPeakConfig::GYRO_GATE_RAD_S < preset.gyroPeak);
+    for (bool gyroOnly : {false, true}) {
+      Rig rig;
+      for (int i = 0; i < 20; ++i) rig.feed(0, 0, 10);
+      const float peak = gyroOnly ? preset.gyroPeak : preset.peak;
+      for (int i = 0; i <= 100; ++i) {
+        const float amplitude = peak * (i <= 50 ? i : 100 - i) / 50.0f;
+        rig.feed(gyroOnly ? 0 : amplitude, gyroOnly ? amplitude : 0, 10);
+      }
+      for (int i = 0; i < 20; ++i) rig.feed(0, 0, 10);
+      assert(rig.events.size() == 1);
+    }
   }
 
   // Real sample intervals can vary: duration guards use timestamps, not counts.
