@@ -9,7 +9,7 @@
  * Version-1 DATA frame layout:
  *
  *   Bytes 0-23:  fixed protocol header
- *   Bytes 24-39: signed IMU values, battery voltage, and status
+ *   Bytes 24-37: signed IMU values and status
  *
  * The module is independent of Wi-Fi, TCP, ESP-NOW, queues, and the selected
  * sensor implementation.
@@ -111,8 +111,7 @@ static void encode_imu_frame(
     write_u16_be(&packet[30], (uint16_t)sample->gx);
     write_u16_be(&packet[32], (uint16_t)sample->gy);
     write_u16_be(&packet[34], (uint16_t)sample->gz);
-    write_u16_be(&packet[36], sample->battery_mv);
-    write_u16_be(&packet[38], sample->status);
+    write_u16_be(&packet[36], sample->status);
 }
 
 /* Validate the complete fixed-size frame before exposing any decoded sample. */
@@ -142,8 +141,7 @@ static bool decode_imu_frame(
     sample->gx = (int16_t)read_u16_be(&frame[30]);
     sample->gy = (int16_t)read_u16_be(&frame[32]);
     sample->gz = (int16_t)read_u16_be(&frame[34]);
-    sample->battery_mv = read_u16_be(&frame[36]);
-    sample->status = read_u16_be(&frame[38]);
+    sample->status = read_u16_be(&frame[36]);
     return true;
 }
 
@@ -166,15 +164,14 @@ void protocol_encode_data(
     write_u32_be(&packet[12], sample->sequence);
     write_u64_be(&packet[16], sample->timestamp_us);
 
-    /* 16-byte DATA payload */
+    /* 14-byte DATA payload */
     write_u16_be(&packet[24], (uint16_t)sample->ax);
     write_u16_be(&packet[26], (uint16_t)sample->ay);
     write_u16_be(&packet[28], (uint16_t)sample->az);
     write_u16_be(&packet[30], (uint16_t)sample->gx);
     write_u16_be(&packet[32], (uint16_t)sample->gy);
     write_u16_be(&packet[34], (uint16_t)sample->gz);
-    write_u16_be(&packet[36], sample->battery_mv);
-    write_u16_be(&packet[38], sample->status);
+    write_u16_be(&packet[36], sample->status);
 }
 
 bool protocol_encode_physical_data(
@@ -282,9 +279,8 @@ void protocol_encode_heartbeat(
     write_u32_be(&packet[12], heartbeat->sequence);
     write_u64_be(&packet[16], heartbeat->timestamp_us);
 
-    write_u16_be(&packet[24], heartbeat->battery_mv);
-    write_u16_be(&packet[26], heartbeat->status);
-    write_u32_be(&packet[28], heartbeat->overflow_count);
+    write_u16_be(&packet[24], heartbeat->status);
+    write_u32_be(&packet[26], heartbeat->overflow_count);
 }
 
 /* Decode only the common header; message-specific policy remains with the caller. */
@@ -494,8 +490,7 @@ bool protocol_decode_data(
     sample->gx = (int16_t)read_u16_be(&frame[30]);
     sample->gy = (int16_t)read_u16_be(&frame[32]);
     sample->gz = (int16_t)read_u16_be(&frame[34]);
-    sample->battery_mv = read_u16_be(&frame[36]);
-    sample->status = read_u16_be(&frame[38]);
+    sample->status = read_u16_be(&frame[36]);
     return true;
 }
 

@@ -64,7 +64,7 @@ If a node disconnects, Ultra96 stops the surviving node. Reconnection requires a
 The physical wire format is a 24-byte common header plus a 26-byte
 `PHYSICAL_DATA` payload, all in network byte order. The payload is
 `!ffffffH`; capture timestamp and sequence remain in the header and there is no
-battery field. The version-1 raw `DATA` (`!hhhhhhHH`), TEST and benchmark
+battery field. The version-1 raw `DATA` (`!hhhhhhH`), TEST and benchmark
 formats remain available for their existing demo paths. AI code should consume
 decoded samples rather than implement another network parser.
 

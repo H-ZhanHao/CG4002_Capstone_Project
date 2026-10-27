@@ -93,7 +93,7 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
     def build_data(self, status=server.STATUS_MOCK_DATA):
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,
-            1, 2, 3, 4, 5, 6, 3800, status)
+            1, 2, 3, 4, 5, 6, status)
         return server.build_header(
             server.MESSAGE_TYPE_DATA, node_id=1,
             payload_length=len(payload), session_id=123,
@@ -104,7 +104,7 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
         self.assertEqual(
             (defaults.sample_rate_hz, defaults.window_seconds,
              defaults.hop_seconds),
-            (50, 5.0, 1.0))
+            (100, 5.0, 1.0))
         explicit = server.parse_args([
             "--sample-rate-hz", "100", "--window-seconds", "4.5",
             "--hop-seconds", "0.5"])
@@ -136,7 +136,7 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
 
     def test_sample_interval_uses_configured_rate_with_ten_percent_tolerance(self):
         payload = struct.pack(
-            server.DATA_PAYLOAD_FORMAT, 1, 2, 3, 4, 5, 6, 0, 0)
+            server.DATA_PAYLOAD_FORMAT, 1, 2, 3, 4, 5, 6, 0)
 
         def frame(sequence, timestamp_us):
             return server.build_header(
@@ -231,7 +231,6 @@ class PhysicalIntegrationTest(unittest.TestCase):
         mapping = server.ClockMapping(100, 20, 1)
         decoded = server.process_physical_data(
             frame, {}, 101, 1 << 1, mapping, 50)
-        self.assertEqual(decoded.battery_mv, 0)
         self.assertEqual(decoded.coordinator_timestamp_us,
                          0x0102030405060708 - 100)
         nan_frame = self.build_physical(values=(float("nan"), 0, 0, 0, 0, 0))
@@ -255,6 +254,29 @@ class PhysicalIntegrationTest(unittest.TestCase):
                 self.build_physical(sequence=11, timestamp_us=999_999),
                 state, 101, 1 << 1, mapping, 50)
 
+    def test_physical_history_overlap_is_allowed_in_new_capture_generation(self):
+        mapping = server.ClockMapping(0, 20, 1)
+        state = {}
+        newest = self.build_physical(sequence=250, timestamp_us=5_000_000)
+        overlapping = self.build_physical(sequence=50, timestamp_us=1_000_000)
+
+        server.process_physical_data(
+            newest, state, 101, 1 << 1, mapping, 50,
+            capture_generation=1)
+        with self.assertRaises(server.ProtocolError):
+            server.process_physical_data(
+                overlapping, state, 101, 1 << 1, mapping, 50,
+                capture_generation=1)
+
+        decoded = server.process_physical_data(
+            overlapping, state, 101, 1 << 1, mapping, 50,
+            capture_generation=2)
+        self.assertEqual(decoded.sequence, 50)
+        with self.assertRaises(server.ProtocolError):
+            server.process_physical_data(
+                overlapping, state, 101, 1 << 1, mapping, 50,
+                capture_generation=2)
+
     def test_two_node_trigger_maps_one_t0_and_duplicate_is_idempotent(self):
         assembler = RecordingAssembler()
         coordinator = server.CaptureCoordinator(
@@ -271,6 +293,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
         coordinator.register(node2)
         trigger = self.build_trigger(node1)
         self.assertTrue(server.process_activity_trigger(trigger, node1))
+        self.assertEqual(node1.get_physical_capture_generation(), 1)
+        self.assertEqual(node2.get_physical_capture_generation(), 1)
         self.assertEqual(server.unpack_header(sock1.frames[-1])[2],
                          server.MESSAGE_TYPE_START_FLUSH)
         left = struct.unpack("!QqIB3xI", sock1.frames[-1][server.HEADER_SIZE:])
@@ -289,6 +313,28 @@ class PhysicalIntegrationTest(unittest.TestCase):
             assembler.started,
             [(command_sequence, left[0] - server.PHYSICAL_HISTORY_DURATION_US)])
 
+    def test_both_physical_nodes_synced_is_announced_once_per_session_pair(self):
+        coordinator = server.CaptureCoordinator(physical_mode=True)
+        node1 = server.NodeControlConnection(
+            RecordingSocket(), 1, 101, coordinator)
+        node2 = server.NodeControlConnection(
+            RecordingSocket(), 2, 202, coordinator)
+        coordinator.register(node1)
+        coordinator.register(node2)
+
+        node1.mapping = server.ClockMapping(10, 20, 30)
+        with self.assertNoLogs(server.LOGGER, level="INFO"):
+            coordinator.mapping_updated(node1)
+        node2.mapping = server.ClockMapping(20, 20, 30)
+        with self.assertLogs(server.LOGGER, level="INFO") as captured:
+            coordinator.mapping_updated(node2)
+        output = "\n".join(captured.output)
+        self.assertIn("BOTH_NODES_SYNCED", output)
+        self.assertIn("waiting_for_activity_trigger", output)
+
+        with self.assertNoLogs(server.LOGGER, level="INFO"):
+            coordinator.mapping_updated(node1)
+
     def test_physical_stop_disarms_triggers_until_manual_start(self):
         coordinator = server.CaptureCoordinator(
             auto_start=True, physical_mode=True)
@@ -303,16 +349,111 @@ class PhysicalIntegrationTest(unittest.TestCase):
         coordinator.register(node1)
         coordinator.register(node2)
 
-        coordinator.request_stop()
-        trigger = self.build_trigger(node1)
+        coordinator.manual_stop()
+        stop_sequence = server.unpack_header(sock1.frames[-1])[7]
+        server.process_control_ack(build_control_ack(
+            node1, server.MESSAGE_TYPE_STOP, stop_sequence), node1)
+        server.process_control_ack(build_control_ack(
+            node2, server.MESSAGE_TYPE_STOP, stop_sequence), node2)
+
+        old_peak_us = time.monotonic_ns() // 1000 + 100
+        trigger = self.build_trigger(
+            node1, peak_us=old_peak_us, detected_us=old_peak_us + 60_000)
         frame_counts = (len(sock1.frames), len(sock2.frames))
         self.assertFalse(server.process_activity_trigger(trigger, node1))
         self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)
 
         coordinator.request_start()
-        self.assertTrue(server.process_activity_trigger(trigger, node1))
+        self.assertFalse(server.process_activity_trigger(trigger, node1))
+        fresh_peak_us = coordinator._armed_after_us + 100 + 1
+        fresh_trigger = self.build_trigger(
+            node1, sequence=10, peak_us=fresh_peak_us,
+            arm_generation=2, detected_us=fresh_peak_us + 60_000)
+        self.assertTrue(server.process_activity_trigger(fresh_trigger, node1))
         self.assertEqual(server.unpack_header(sock1.frames[-1])[2],
                          server.MESSAGE_TYPE_START_FLUSH)
+
+    def test_idle_pause_stays_armed_and_resumes_on_fresh_trigger(self):
+        assembler = RecordingAssembler()
+        coordinator = server.CaptureCoordinator(
+            auto_start=True, physical_mode=True, window_assembler=assembler)
+        sock1, sock2 = RecordingSocket(), RecordingSocket()
+        node1 = server.NodeControlConnection(
+            sock1, 1, 101, coordinator, boot_id=0x11111111)
+        node2 = server.NodeControlConnection(
+            sock2, 2, 202, coordinator, boot_id=0x22222222)
+        now_us = time.monotonic_ns() // 1000
+        node1.mapping = server.ClockMapping(100, 20, now_us)
+        node2.mapping = server.ClockMapping(-200, 20, now_us)
+        coordinator.register(node1)
+        coordinator.register(node2)
+
+        initial_peak_us = now_us + 100
+        initial_trigger = self.build_trigger(
+            node1, peak_us=initial_peak_us,
+            detected_us=initial_peak_us + 60_000)
+        self.assertTrue(server.process_activity_trigger(initial_trigger, node1))
+        start_sequence = server.unpack_header(sock1.frames[-1])[7]
+        server.process_control_ack(build_control_ack(
+            node1, server.MESSAGE_TYPE_START_FLUSH, start_sequence), node1)
+        server.process_control_ack(build_control_ack(
+            node2, server.MESSAGE_TYPE_START_FLUSH, start_sequence), node2)
+        self.assertTrue(coordinator.run_active)
+
+        self.assertTrue(coordinator.idle_pause())
+        self.assertTrue(coordinator.desired_running)
+        self.assertTrue(coordinator.idle_paused)
+        self.assertFalse(coordinator.run_active)
+        self.assertIn("AI idle pause", assembler.stopped)
+        stop_sequence = server.unpack_header(sock1.frames[-1])[7]
+        fresh_peak_us = coordinator._armed_after_us + 100 + 1
+        fresh_trigger = self.build_trigger(
+            node1, sequence=10, peak_us=fresh_peak_us,
+            arm_generation=2, detected_us=fresh_peak_us + 60_000)
+
+        # A peak cannot race STOP acknowledgements and restart the old feeder.
+        self.assertFalse(server.process_activity_trigger(fresh_trigger, node1))
+        server.process_control_ack(build_control_ack(
+            node1, server.MESSAGE_TYPE_STOP, stop_sequence), node1)
+        server.process_control_ack(build_control_ack(
+            node2, server.MESSAGE_TYPE_STOP, stop_sequence), node2)
+
+        frame_counts = (len(sock1.frames), len(sock2.frames))
+        self.assertFalse(server.process_activity_trigger(initial_trigger, node1))
+        self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)
+        self.assertFalse(coordinator.idle_pause())
+        self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)
+
+        self.assertTrue(server.process_activity_trigger(fresh_trigger, node1))
+        self.assertFalse(coordinator.idle_paused)
+        self.assertEqual(server.unpack_header(sock1.frames[-1])[2],
+                         server.MESSAGE_TYPE_START_FLUSH)
+
+    def test_idle_pause_is_rejected_outside_physical_mode(self):
+        coordinator = server.CaptureCoordinator(physical_mode=False)
+        with self.assertLogs(server.LOGGER, level="WARNING") as output:
+            self.assertFalse(coordinator.idle_pause())
+        self.assertIn("physical_mode_is_disabled", "\n".join(output.output))
+
+    def test_manual_stop_overrides_pending_idle_pause_without_new_stop(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        coordinator.register(node)
+
+        self.assertTrue(coordinator.idle_pause())
+        stop_sequence = server.unpack_header(sock.frames[-1])[7]
+        frame_count = len(sock.frames)
+        coordinator.manual_stop()
+
+        self.assertFalse(coordinator.desired_running)
+        self.assertFalse(coordinator.idle_paused)
+        self.assertEqual(len(sock.frames), frame_count)
+        server.process_control_ack(build_control_ack(
+            node, server.MESSAGE_TYPE_STOP, stop_sequence), node)
+        self.assertEqual(coordinator._pending_stop_acks, {})
 
     def test_five_seconds_history_then_live_builds_one_two_node_window(self):
         config = server.WindowConfig(
@@ -935,7 +1076,6 @@ class HeartbeatCadenceTest(unittest.TestCase):
     def build_heartbeat(self, sequence, timestamp_us):
         payload = struct.pack(
             server.HEARTBEAT_PAYLOAD_FORMAT,
-            3800,
             server.STATUS_MOCK_DATA | server.STATUS_SOURCE_UNAVAILABLE,
             0,
         )
@@ -951,7 +1091,7 @@ class HeartbeatCadenceTest(unittest.TestCase):
     def build_data(self, sequence, timestamp_us):
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,
-            1000, -500, 16384, 0, 0, 0, 3800,
+            1000, -500, 16384, 0, 0, 0,
             server.STATUS_MOCK_DATA,
         )
         return server.build_header(
@@ -1088,7 +1228,7 @@ class TestResponseTest(unittest.TestCase):
         session_id = 1234
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,
-            13, -2, 3, 110, 5, -6, 3800,
+            13, -2, 3, 110, 5, -6,
             server.STATUS_MOCK_DATA | server.STATUS_TEST_REQUEST_PROCESSED,
         )
         frame = server.build_header(
@@ -1106,7 +1246,7 @@ class TestResponseTest(unittest.TestCase):
     def test_wrong_hub_or_missing_processed_status_is_rejected(self):
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,
-            1, 2, 3, 4, 5, 6, 3800, server.STATUS_MOCK_DATA,
+            1, 2, 3, 4, 5, 6, server.STATUS_MOCK_DATA,
         )
         frame = server.build_header(
             server.MESSAGE_TYPE_TEST_RESPONSE,
@@ -1205,7 +1345,7 @@ class Phase10PipelineTest(unittest.TestCase):
             status = server.STATUS_MOCK_DATA | server.STATUS_TEST_REQUEST_PROCESSED
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,
-            ax, 2, 3, 4, 5, 6, 3800, status)
+            ax, 2, 3, 4, 5, 6, status)
         return server.build_header(
             server.MESSAGE_TYPE_TEST_RESPONSE, node_id, len(payload),
             session_id, sequence) + payload

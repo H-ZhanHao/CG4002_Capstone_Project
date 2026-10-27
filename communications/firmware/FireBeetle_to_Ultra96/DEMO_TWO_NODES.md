@@ -9,8 +9,8 @@ leaf-hub relationship and ESP-NOW forwarding is disabled.
 
 | Board | Protocol ID | Assigned source mask | PlatformIO profile |
 |---|---:|---:|---|
-| Node 1 | `1` | `0x02` | `node1_private_tls` (`node1_mock_tls` without an IMU) |
-| Node 2 | `2` | `0x04` | `node2_private_tls` (`node2_mock_tls` without an IMU) |
+| Node 1 | `1` | `0x02` | `node1_integration_update` (`node1_mock_tls` without an IMU) |
+| Node 2 | `2` | `0x04` | `node2_integration_update` (`node2_mock_tls` without an IMU) |
 
 The assigned masks reserve one source bit per node. They are validated by the
 Ultra96 during the `HELLO` handshake.
@@ -34,13 +34,13 @@ Ultra96 during the `HELLO` handshake.
 From this firmware directory, flash Node 1:
 
 ```powershell
-pio run -e node1_private_tls -t upload --upload-port COM7
+pio run -e node1_integration_update -t upload --upload-port COM7
 ```
 
 Flash Node 2:
 
 ```powershell
-pio run -e node2_private_tls -t upload --upload-port COM9
+pio run -e node2_integration_update -t upload --upload-port COM9
 ```
 
 Change the COM ports if Windows assigns different ones.

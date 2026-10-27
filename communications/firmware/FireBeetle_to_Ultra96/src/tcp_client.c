@@ -64,7 +64,6 @@ typedef struct {
     int64_t last_data_sent_us;
     int64_t last_heartbeat_sent_us;
     uint32_t heartbeat_sequence;
-    uint16_t latest_battery_mv;
     uint16_t latest_status;
 } source_transport_state_t;
 
@@ -737,7 +736,7 @@ static void initialize_source_states(
     }
 }
 
-/* Retain the latest source metadata used if that source later needs a heartbeat. */
+/* Retain the latest source status used if that source later needs a heartbeat. */
 static void record_data_sent(
     source_transport_state_t states[7],
     const imu_sample_t *sample,
@@ -749,7 +748,6 @@ static void record_data_sent(
 
     source_transport_state_t *state = &states[sample->node_id];
     state->last_data_sent_us = sent_at_us;
-    state->latest_battery_mv = sample->battery_mv;
     state->latest_status = sample->status;
 }
 
@@ -760,7 +758,6 @@ static void record_physical_data_sent(
     if (sample->node_id < 1 || sample->node_id > 6) return;
     source_transport_state_t *state = &states[sample->node_id];
     state->last_data_sent_us = sent_at_us;
-    state->latest_battery_mv = 0;
     state->latest_status = sample->status;
 }
 
@@ -788,7 +785,6 @@ static bool send_due_heartbeats(
             .flags = 0,
             .sequence = state->heartbeat_sequence,
             .timestamp_us = (uint64_t)now_us,
-            .battery_mv = state->latest_battery_mv,
             /* Physical nodes intentionally retain samples without publishing
              * before START_FLUSH. That quiet period is not sensor failure. */
             .status = physical_samples_enabled
@@ -1133,7 +1129,6 @@ static void tcp_client_task(void *argument)
                         .az = 16384,
                         .gx = (int16_t)(sequence % 1000),
                         .gy = (int16_t)-(int32_t)(sequence % 1000),
-                        .battery_mv = 3800,
                         .status = PROTOCOL_STATUS_MOCK_DATA |
                             PROTOCOL_STATUS_BENCHMARK,
                     };

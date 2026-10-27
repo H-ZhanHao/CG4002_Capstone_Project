@@ -3,7 +3,7 @@
  * @brief Public interface for the ESP32–Ultra96 application protocol.
  *
  * Version 1 DATA messages contain a 24-byte fixed header followed by a
- * 16-byte IMU payload, producing a 40-byte frame.
+ * 14-byte IMU payload, producing a 38-byte frame.
  *
  * All multibyte fields are serialized in network byte order. Callers pass
  * logical IMU samples to the encoder and must not send in-memory structures
@@ -52,9 +52,9 @@
 #define PROTOCOL_START_PAYLOAD_SIZE     16
 #define PROTOCOL_STOP_PAYLOAD_SIZE       0
 #define PROTOCOL_CONTROL_ACK_PAYLOAD_SIZE 16
-#define PROTOCOL_DATA_PAYLOAD_SIZE       16
+#define PROTOCOL_DATA_PAYLOAD_SIZE       14
 #define PROTOCOL_PHYSICAL_DATA_PAYLOAD_SIZE 26
-#define PROTOCOL_HEARTBEAT_PAYLOAD_SIZE  8
+#define PROTOCOL_HEARTBEAT_PAYLOAD_SIZE  6
 #define PROTOCOL_ERROR_PAYLOAD_SIZE      4
 #define PROTOCOL_ERROR_PACKET_SIZE \
     (PROTOCOL_HEADER_SIZE + PROTOCOL_ERROR_PAYLOAD_SIZE)
@@ -177,7 +177,6 @@ typedef struct {
     uint8_t flags;
     uint32_t sequence;
     uint64_t timestamp_us;
-    uint16_t battery_mv;
     uint16_t status;
     uint32_t overflow_count;
 } protocol_heartbeat_t;

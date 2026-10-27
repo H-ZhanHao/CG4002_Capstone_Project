@@ -35,8 +35,27 @@ three seconds. The server then opens its assembler at five seconds before the
 common peak. A timeout sends STOP to both and requires a manual `start` to
 re-arm trigger handling. The terminal also accepts `start` and `stop`.
 
+Physical capture has two stop paths. `manual_stop()` (the console `stop`)
+disarms trigger handling until a manual `start`. `idle_pause()` (the console
+`idle`) stops the current ESP feeders and window run but remains armed after
+both STOP acknowledgements, so the next fresh `ACTIVITY_TRIGGER` automatically
+sends `START_FLUSH`. In both cases the ESPs continue filling their local rolling
+history; only network `PHYSICAL_DATA` transmission stops. An inference adapter
+can call `coordinator.idle_pause()` after its idle threshold is reached. The
+inference-enabled `server_new.py` does this automatically after three consecutive
+active-capture classifications whose exercise label is exactly `idle`; any
+non-idle classification resets the counter.
+
+Each authorized `START_FLUSH` advances a per-connection physical capture
+generation before the command is sent. Replay and timestamp validation remain
+strict within that generation, while acquisition sequences intentionally
+resent by an overlapping five-second history are accepted in the new
+generation. This permits a user to resume within five seconds of an idle or
+manual stop without the historical backfill being mistaken for a protocol
+replay.
+
 After START_FLUSH is confirmed, the server assembles provisional two-node windows
-using mapped capture timestamps. The defaults are a 50 Hz expected rate, a
+using mapped capture timestamps. The defaults are a 100 Hz expected rate, a
 five-second window, and a one-second hop. This complete example makes both the
 window and rotating-log settings explicit:
 
@@ -45,7 +64,7 @@ python server.py \
   --log-file /tmp/comms/logs/server.log \
   --log-max-mb 10 \
   --log-backups 5 \
-  --sample-rate-hz 50 \
+  --sample-rate-hz 100 \
   --window-seconds 5 \
   --hop-seconds 1
 ```
@@ -57,20 +76,35 @@ The server options are:
 | `--log-file` | `/tmp/comms/logs/server.log` | Active plain-text server log. |
 | `--log-max-mb` | `10` | Maximum size of each log file before rotation. |
 | `--log-backups` | `5` | Number of older rotated log files retained. Use `0` to retain none. |
-| `--sample-rate-hz` | `50` | Expected sampling rate used for window quality checks. |
+| `--sample-rate-hz` | `100` | Expected sampling rate used for window quality checks. |
 | `--window-seconds` | `5.0` | Duration of each assembled window. |
 | `--hop-seconds` | `1.0` | Time between consecutive window starts. |
 
 `--sample-rate-hz` changes only the expected sample count used for window
 quality checks and the server's sample-interval diagnostics; it does not
 change the ESP32 sampling rate. The physical firmware currently advertises and
-produces 50 Hz. Normal sample intervals may vary by 10% around the configured
-rate before a warning is emitted. To keep the terminal readable, one normal
+produces 50 Hz, so it must be updated to 100 Hz before using the new server
+default, or the server must be launched with `--sample-rate-hz 50`. Normal
+sample intervals may vary by 10% around the configured rate before a warning
+is emitted. To keep the terminal readable, one normal
 sample summary is printed per node per second. Window and hop
 values must be positive, and the hop cannot exceed the window. Completed or
 rejected windows are summarized as `WINDOW_READY` or `WINDOW_REJECTED` without
-printing their sample contents. This is a neutral adapter for later AI
-integration and does not run inference, resample, fill, or normalize data.
+printing their sample contents. Each node may be missing up to five samples per
+window. Accepted windows are padded to the expected per-node length with
+inference-only samples whose six IMU values are zero; internal sequence gaps
+are filled in place and edge losses are padded at the corresponding edge. The
+summary reports both the received and padded counts, for example
+`node1=496/500 padded=4 node2=495/500 padded=5`. If either node is missing more
+than five samples, or its sequence gaps cannot be reconciled with its count
+deficit, the whole synchronized two-node window is rejected. Up to two extra
+samples per node are also tolerated. Identical duplicate sequences are removed
+first; unique extras are removed by an order-preserving minimum-error match
+against the expected timestamp grid. The summary reports `dropped=` and
+`dropped_sequences=`. More than two extras, conflicting duplicate contents, or
+a sequence gap mixed with unique extras rejects the window. `server.py` remains
+a window/logging adapter; `server_new.py` sends accepted windows to the AI
+inference pipeline.
 
 Clock synchronization uses five exchanges and builds its candidate from the
 median offset of the three lowest-delay usable rounds. Periodic refreshes apply
@@ -82,6 +116,16 @@ measurements leave the previous mapping active. The conservative defaults in
 current values and acceptance checklist are recorded in
 `../firmware/FireBeetle_to_Ultra96/DEMO_TWO_NODES.md` under "Integration tuning
 reminder."
+
+After both physical nodes have an applied mapping, the coordinator emits one
+neutral, non-node-coloured readiness line for that Session pair:
+
+```text
+BOTH_NODES_SYNCED nodes=[1, 2] sessions={1: ..., 2: ...} waiting_for_activity_trigger
+```
+
+Periodic mapping refreshes do not repeat the line. A reconnect creates a new
+Session pair and allows a new readiness announcement.
 
 For example, select another writable log path and retain three 20 MiB backup
 files while keeping the default window configuration:

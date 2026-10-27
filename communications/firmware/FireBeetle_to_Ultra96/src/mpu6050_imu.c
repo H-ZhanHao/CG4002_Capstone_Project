@@ -183,7 +183,6 @@ static void mpu6050_task(void *argument)
                 .ax = signed_be(&raw[0]), .ay = signed_be(&raw[2]),
                 .az = signed_be(&raw[4]), .gx = signed_be(&raw[8]),
                 .gy = signed_be(&raw[10]), .gz = signed_be(&raw[12]),
-                .battery_mv = 0,
                 .status = 0,
             };
             if (queue_sample_drop_oldest(source->output_queue, &sample))

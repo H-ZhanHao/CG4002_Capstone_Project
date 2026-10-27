@@ -16,8 +16,8 @@ class InteractiveHubRelayCodecTests(unittest.TestCase):
     def test_five_editable_payloads_are_complete(self):
         self.assertGreaterEqual(len(demo.DUMMY_PAYLOADS), 5)
         for payload in demo.DUMMY_PAYLOADS:
-            self.assertEqual(len(payload), 8)
-            self.assertTrue(payload[7] & demo.STATUS_MOCK_DATA)
+            self.assertEqual(len(payload), 7)
+            self.assertTrue(payload[6] & demo.STATUS_MOCK_DATA)
             struct.pack(demo.IMU_FORMAT, *payload)
 
     def test_status_description_is_human_readable(self):
@@ -30,6 +30,26 @@ class InteractiveHubRelayCodecTests(unittest.TestCase):
     def test_error_diagnostic_names_match_wire_values(self):
         self.assertEqual(demo.ERROR_NAMES[8], "SEQUENCE_REUSE")
         self.assertEqual(demo.MESSAGE_TYPE_NAMES[demo.TEST_REQUEST], "TEST_REQUEST")
+        self.assertEqual(
+            demo.MESSAGE_TYPE_NAMES[demo.PHYSICAL_DATA], "PHYSICAL_DATA")
+        self.assertEqual(
+            demo.MESSAGE_TYPE_NAMES[demo.ACTIVITY_TRIGGER], "ACTIVITY_TRIGGER")
+
+    def test_activity_trigger_wire_shape_is_named_and_decodable(self):
+        payload = (0x12345678, 7, 987654321)
+        encoded = struct.pack(demo.ACTIVITY_TRIGGER_FORMAT, *payload)
+        self.assertEqual(len(encoded), demo.ACTIVITY_TRIGGER_SIZE)
+        self.assertEqual(struct.unpack(demo.ACTIVITY_TRIGGER_FORMAT, encoded),
+                         payload)
+
+    def test_physical_status_description_is_human_readable(self):
+        self.assertEqual(
+            demo.describe_status(
+                demo.STATUS_SENSOR_VALID
+                | demo.STATUS_HISTORICAL
+                | demo.STATUS_HISTORY_OVERWRITE),
+            "sensor_valid|historical|history_overwrite",
+        )
 
     def test_request_uses_session_sequence_and_canonical_payload(self):
         payload = demo.DUMMY_PAYLOADS[0]
@@ -80,7 +100,29 @@ class InteractiveHubRelayCodecTests(unittest.TestCase):
         self.assertEqual(report["duplicates"], 0)
         self.assertEqual(report["out_of_order"], 0)
         self.assertEqual(report["timestamp_regressions"], 0)
-        self.assertAlmostEqual(report["current_kbps"], 0.96)
+        self.assertAlmostEqual(report["current_kbps"], 0.912)
+
+    def test_stream_stats_decodes_physical_data_payload(self):
+        stats = demo.StreamStats()
+        payload = (
+            1.25, -2.5, 9.81, 0.125, -0.25, 0.5,
+            demo.STATUS_SENSOR_VALID | demo.STATUS_HISTORICAL,
+        )
+        frame = struct.pack(
+            demo.HEADER_FORMAT,
+            demo.MAGIC, demo.VERSION, demo.PHYSICAL_DATA, 1, 0,
+            demo.PHYSICAL_IMU_SIZE, 7, 42, 123456,
+        ) + struct.pack(demo.PHYSICAL_IMU_FORMAT, *payload)
+        header = struct.unpack(demo.HEADER_FORMAT, frame[:demo.HEADER_SIZE])
+
+        stats.record(header, frame, now=100.0)
+
+        self.assertEqual(stats.latest_message_type, demo.PHYSICAL_DATA)
+        self.assertEqual(stats.latest_payload[-1], payload[-1])
+        for actual, expected in zip(stats.latest_payload[:6], payload[:6]):
+            self.assertAlmostEqual(actual, expected, places=5)
+        self.assertEqual(stats.total_bytes,
+                         demo.HEADER_SIZE + demo.PHYSICAL_IMU_SIZE)
 
     def test_file_frames_have_streaming_metadata_crc_and_sha256(self):
         data = bytes(range(256)) * 4

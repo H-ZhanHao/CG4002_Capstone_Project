@@ -25,14 +25,20 @@ from dataclasses import dataclass
 
 LOGGER = logging.getLogger("interactive_hub_relay")
 HEADER_FORMAT = "!HBBBBHIIQ"
-IMU_FORMAT = "!hhhhhhHH"
+IMU_FORMAT = "!hhhhhhH"
+PHYSICAL_IMU_FORMAT = "!ffffffH"
+ACTIVITY_TRIGGER_FORMAT = "!IIQ"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 IMU_SIZE = struct.calcsize(IMU_FORMAT)
+PHYSICAL_IMU_SIZE = struct.calcsize(PHYSICAL_IMU_FORMAT)
+ACTIVITY_TRIGGER_SIZE = struct.calcsize(ACTIVITY_TRIGGER_FORMAT)
 MAGIC = 0xA55A
 VERSION = 1
 TEST_REQUEST = 0x20
 TEST_RESPONSE = 0x21
+ACTIVITY_TRIGGER = 0x05
 DATA = 0x10
+PHYSICAL_DATA = 0x12
 BENCHMARK_CONTROL = 0x22
 BENCHMARK_REPORT = 0x23
 FILE_BEGIN = 0x30
@@ -45,6 +51,10 @@ ERROR = 0x7F
 STATUS_MOCK_DATA = 0x8000
 STATUS_TEST_REQUEST_PROCESSED = 0x2000
 STATUS_BENCHMARK = 0x1000
+STATUS_SOURCE_UNAVAILABLE = 0x4000
+STATUS_SENSOR_VALID = 0x0001
+STATUS_HISTORICAL = 0x0002
+STATUS_HISTORY_OVERWRITE = 0x0004
 MAX_PAYLOAD_SIZE = 1024
 STATS_INTERVAL_SECONDS = 5.0
 FILE_CHUNK_DATA_SIZE = 900
@@ -60,7 +70,9 @@ ERROR_NAMES = {
 MESSAGE_TYPE_NAMES = {
     HELLO: "HELLO",
     HELLO_ACK: "HELLO_ACK",
+    ACTIVITY_TRIGGER: "ACTIVITY_TRIGGER",
     DATA: "DATA",
+    PHYSICAL_DATA: "PHYSICAL_DATA",
     TEST_REQUEST: "TEST_REQUEST",
     TEST_RESPONSE: "TEST_RESPONSE",
     BENCHMARK_CONTROL: "BENCHMARK_CONTROL",
@@ -98,14 +110,14 @@ class HubColorFormatter(logging.Formatter):
             rendered = f"{self.COLORS[matches.pop()]}{rendered}{self.RESET}"
         return rendered
 
-# Editable complete IMU payloads: ax, ay, az, gx, gy, gz, battery_mV, status.
+# Editable complete IMU payloads: ax, ay, az, gx, gy, gz, status.
 DUMMY_PAYLOADS = (
-    ( 1001, -2001,  100,  10, -20,  30, 3800, STATUS_MOCK_DATA),
-    (-2001,  3001,  400, -20,  30, -40, 3850, STATUS_MOCK_DATA),
-    ( 3001, -4001,  500,  30, -40,  50, 3900, STATUS_MOCK_DATA),
-    (-4001,  5001,  600, -50,  60,  70, 3950, STATUS_MOCK_DATA),
+    ( 1001, -2001,  100,  10, -20,  30, STATUS_MOCK_DATA),
+    (-2001,  3001,  400, -20,  30, -40, STATUS_MOCK_DATA),
+    ( 3001, -4001,  500,  30, -40,  50, STATUS_MOCK_DATA),
+    (-4001,  5001,  600, -50,  60,  70, STATUS_MOCK_DATA),
     # Boundary case: verifies that FireBeetle transformation uses saturation.
-    (32760, -32760, 0, 32700, -32700, 1, 4000, STATUS_MOCK_DATA),
+    (32760, -32760, 0, 32700, -32700, 1, STATUS_MOCK_DATA),
 )
 
 
@@ -118,6 +130,14 @@ def describe_status(status: int) -> str:
         names.append("test_request_processed")
     if status & STATUS_BENCHMARK:
         names.append("benchmark")
+    if status & STATUS_SOURCE_UNAVAILABLE:
+        names.append("source_unavailable")
+    if status & STATUS_SENSOR_VALID:
+        names.append("sensor_valid")
+    if status & STATUS_HISTORICAL:
+        names.append("historical")
+    if status & STATUS_HISTORY_OVERWRITE:
+        names.append("history_overwrite")
     return "|".join(names) if names else "none"
 
 
@@ -146,7 +166,7 @@ class ControllerState:
 
 @dataclass
 class StreamStats:
-    """Accumulate normal or benchmark DATA health and throughput counters."""
+    """Accumulate DATA or PHYSICAL_DATA health and throughput counters."""
 
     started_at: float | None = None
     window_started_at: float | None = None
@@ -161,6 +181,7 @@ class StreamStats:
     last_sequence: int | None = None
     last_timestamp_us: int | None = None
     latest_payload: tuple[int, ...] | None = None
+    latest_message_type: int | None = None
 
     def record(self, header: tuple[int, ...], frame: bytes,
                now: float | None = None) -> None:
@@ -185,7 +206,12 @@ class StreamStats:
 
         self.last_sequence = sequence
         self.last_timestamp_us = timestamp_us
-        self.latest_payload = struct.unpack(IMU_FORMAT, frame[HEADER_SIZE:])
+        message_type = header[2]
+        payload_format = (
+            PHYSICAL_IMU_FORMAT if message_type == PHYSICAL_DATA else IMU_FORMAT
+        )
+        self.latest_payload = struct.unpack(payload_format, frame[HEADER_SIZE:])
+        self.latest_message_type = message_type
         self.total_frames += 1
         self.total_bytes += len(frame)
         self.window_frames += 1
@@ -525,10 +551,10 @@ class InteractiveHubRelay:
             await hub.writer.drain()
         LOGGER.info(
             "TEST_REQUEST node=%d session=%d sequence=%d payload_index=%d "
-            "accel=%s gyro=%s battery=%dmV status=%s",
+            "accel=%s gyro=%s status=%s",
             state.hub_node_id, state.session_id, sequence,
             DUMMY_PAYLOADS.index(payload), payload[:3], payload[3:6],
-            payload[6], describe_status(payload[7]))
+            describe_status(payload[6]))
 
     async def keyboard(self) -> None:
         """Convert one-key commands into hub selection and protocol test actions."""
@@ -604,9 +630,29 @@ class InteractiveHubRelay:
             message_type, node_id, sequence = header[2], header[3], header[7]
             if message_type == HELLO:
                 state.hub_node_id = node_id
-            elif message_type == DATA:
-                values = struct.unpack(IMU_FORMAT, frame[HEADER_SIZE:])
-                (hub.benchmark_stats if values[7] & STATUS_BENCHMARK
+            elif message_type == ACTIVITY_TRIGGER:
+                if header[5] != ACTIVITY_TRIGGER_SIZE:
+                    LOGGER.warning(
+                        "ACTIVITY_TRIGGER_INVALID node=%d session=%d "
+                        "sequence=%d payload_length=%d",
+                        node_id, header[6], sequence, header[5])
+                else:
+                    boot_id, arm_generation, peak_timestamp_us = struct.unpack(
+                        ACTIVITY_TRIGGER_FORMAT, frame[HEADER_SIZE:])
+                    LOGGER.info(
+                        "ACTIVITY_TRIGGER_RECEIVED node=%d session=%d "
+                        "sequence=%d boot_id=%d arm_generation=%d "
+                        "peak_timestamp_us=%d detected_timestamp_us=%d",
+                        node_id, header[6], sequence, boot_id, arm_generation,
+                        peak_timestamp_us, header[8])
+            elif message_type in (DATA, PHYSICAL_DATA):
+                status_index = 6
+                payload_format = (
+                    PHYSICAL_IMU_FORMAT
+                    if message_type == PHYSICAL_DATA else IMU_FORMAT
+                )
+                values = struct.unpack(payload_format, frame[HEADER_SIZE:])
+                (hub.benchmark_stats if values[status_index] & STATUS_BENCHMARK
                  else hub.stream_stats).record(header, frame)
             elif message_type == TEST_RESPONSE:
                 values = struct.unpack(IMU_FORMAT, frame[HEADER_SIZE:])
@@ -614,10 +660,9 @@ class InteractiveHubRelay:
                 latency_ms = (time.monotonic() - pending[0]) * 1000 if pending else -1
                 LOGGER.info(
                     "TEST_RESPONSE node=%d session=%d sequence=%d latency=%.1fms "
-                    "accel=%s gyro=%s battery=%dmV status=%s",
+                    "accel=%s gyro=%s status=%s",
                     node_id, header[6], sequence, latency_ms,
-                    values[:3], values[3:6], values[6],
-                    describe_status(values[7]))
+                    values[:3], values[3:6], describe_status(values[6]))
             elif message_type == ERROR:
                 code, offending, _reserved = struct.unpack("!HBB", frame[HEADER_SIZE:])
                 error_name = ERROR_NAMES.get(code, "UNKNOWN_ERROR")
@@ -684,10 +729,14 @@ class InteractiveHubRelay:
                     report = hub.stream_stats.report()
                     hub.last_stream_report = report
                     payload = hub.stream_stats.latest_payload
+                    physical = (
+                        hub.stream_stats.latest_message_type == PHYSICAL_DATA
+                    )
                     LOGGER.info(
-                        "STREAM node=%d stream_age=%.1fs current=%.2fkbps/%.1fpps "
+                        "%s node=%d stream_age=%.1fs current=%.2fkbps/%.1fpps "
                         "average=%.2fkbps frames=%d bytes=%d gaps=%d duplicates=%d "
                         "out_of_order=%d timestamp_regressions=%d",
+                        "PHYSICAL_STREAM" if physical else "STREAM",
                         state.hub_node_id, report["duration"],
                         report["current_kbps"], report["current_pps"],
                         report["average_kbps"], report["total_frames"],
@@ -695,10 +744,17 @@ class InteractiveHubRelay:
                         report["duplicates"], report["out_of_order"],
                         report["timestamp_regressions"])
                     if payload is not None:
-                        LOGGER.info(
-                            "LATEST_DATA node=%d accel=%s gyro=%s battery=%dmV status=%s",
-                            state.hub_node_id, payload[:3], payload[3:6],
-                            payload[6], describe_status(payload[7]))
+                        if physical:
+                            LOGGER.info(
+                                "LATEST_PHYSICAL_DATA node=%d accel_mps2=%s "
+                                "gyro_rad_s=%s status=%s",
+                                state.hub_node_id, payload[:3], payload[3:6],
+                                describe_status(payload[6]))
+                        else:
+                            LOGGER.info(
+                                "LATEST_DATA node=%d accel=%s gyro=%s status=%s",
+                                state.hub_node_id, payload[:3], payload[3:6],
+                                describe_status(payload[6]))
                     ready_reports = [item.last_stream_report
                                      for item in self.hubs.values()
                                      if item.last_stream_report is not None]

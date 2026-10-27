@@ -43,6 +43,11 @@
 #define APP_PHYSICAL_INTEGRATION 0
 #endif
 
+/* Discard pre-STOP peak notifications for idle-pause auto-resume builds. */
+#ifndef APP_IDLE_RESUME_INTEGRATION
+#define APP_IDLE_RESUME_INTEGRATION 0
+#endif
+
 #if APP_NODE_ROLE != APP_ROLE_HUB && APP_NODE_ROLE != APP_ROLE_LEAF
 #error "APP_NODE_ROLE must be APP_ROLE_HUB or APP_ROLE_LEAF"
 #endif

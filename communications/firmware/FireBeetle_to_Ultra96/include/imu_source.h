@@ -32,7 +32,6 @@ typedef struct {
     int16_t gy;            /**< Raw Y-axis angular velocity. */
     int16_t gz;            /**< Raw Z-axis angular velocity. */
 
-    uint16_t battery_mv;   /**< Supply voltage in millivolts. */
     uint16_t status;       /**< Sensor and sample status bits. */
 } imu_sample_t;
 

@@ -139,7 +139,6 @@ static void mock_imu_task(void *argument)
             .gy = -(int16_t)(sequence % 100),
             .gz = 0,
 
-            .battery_mv = 3800,
             .status = PROTOCOL_STATUS_MOCK_DATA,
         };
 

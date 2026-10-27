@@ -68,6 +68,10 @@ static void handle_command(const pipeline_command_t *command,
                                       : PROTOCOL_CONTROL_RESULT_ALREADY_STOPPED;
         physical_feeder_stop(feeder);
         xQueueReset(sample_queue);
+#if APP_IDLE_RESUME_INTEGRATION
+        /* A peak queued before STOP must not reopen the newly armed run. */
+        xQueueReset(trigger_queue);
+#endif
         if (command->type == COMMAND_END) {
             *session_id = 0;
             *boot_id = 0;

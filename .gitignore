@@ -4,3 +4,5 @@ sdkconfig.node*
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/.browse.c_cpp.db*
+communications/ultra96/server_new.py
+communications/ultra96/test_server_new.py
