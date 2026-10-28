@@ -32,6 +32,7 @@ class InteractiveHubRelayCodecTests(unittest.TestCase):
         self.assertEqual(demo.MESSAGE_TYPE_NAMES[demo.TEST_REQUEST], "TEST_REQUEST")
         self.assertEqual(
             demo.MESSAGE_TYPE_NAMES[demo.PHYSICAL_DATA], "PHYSICAL_DATA")
+        self.assertEqual(demo.MESSAGE_TYPE_NAMES[demo.HEARTBEAT], "HEARTBEAT")
         self.assertEqual(
             demo.MESSAGE_TYPE_NAMES[demo.ACTIVITY_TRIGGER], "ACTIVITY_TRIGGER")
         self.assertEqual(demo.MESSAGE_TYPE_NAMES[demo.ARM], "ARM")
@@ -124,6 +125,42 @@ class InteractiveHubRelayCodecTests(unittest.TestCase):
             self.assertAlmostEqual(actual, expected, places=5)
         self.assertEqual(stats.total_bytes,
                          demo.HEADER_SIZE + demo.PHYSICAL_IMU_SIZE)
+
+    def test_heartbeat_clears_latest_data_for_matching_source(self):
+        stats = demo.StreamStats()
+        payload = (1.25, -2.5, 9.81, 0.125, -0.25, 0.5,
+                   demo.STATUS_SENSOR_VALID)
+        frame = struct.pack(
+            demo.HEADER_FORMAT,
+            demo.MAGIC, demo.VERSION, demo.PHYSICAL_DATA, 2, 0,
+            demo.PHYSICAL_IMU_SIZE, 7, 42, 123456,
+        ) + struct.pack(demo.PHYSICAL_IMU_FORMAT, *payload)
+        header = struct.unpack(demo.HEADER_FORMAT, frame[:demo.HEADER_SIZE])
+        stats.record(header, frame, now=100.0)
+
+        self.assertFalse(stats.mark_idle(1, now=101.0))
+        self.assertIsNotNone(stats.latest_payload)
+        self.assertTrue(stats.mark_idle(2, now=101.0))
+        self.assertIsNone(stats.latest_payload)
+        self.assertEqual(stats.idle_since, 101.0)
+        self.assertFalse(stats.mark_idle(2, now=102.0))
+
+    def test_new_data_reactivates_stream_after_heartbeat(self):
+        stats = demo.StreamStats()
+        payload = demo.DUMMY_PAYLOADS[0]
+        frame = struct.pack(
+            demo.HEADER_FORMAT,
+            demo.MAGIC, demo.VERSION, demo.DATA, 1, 0, demo.IMU_SIZE,
+            7, 1, 123456,
+        ) + struct.pack(demo.IMU_FORMAT, *payload)
+        header = struct.unpack(demo.HEADER_FORMAT, frame[:demo.HEADER_SIZE])
+
+        stats.record(header, frame, now=100.0)
+        stats.mark_idle(1, now=101.0)
+        stats.record(header, frame, now=102.0)
+
+        self.assertEqual(stats.latest_payload, payload)
+        self.assertIsNone(stats.idle_since)
 
     def test_file_frames_have_streaming_metadata_crc_and_sha256(self):
         data = bytes(range(256)) * 4

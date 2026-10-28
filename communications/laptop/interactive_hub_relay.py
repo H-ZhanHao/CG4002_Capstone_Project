@@ -39,6 +39,7 @@ TEST_RESPONSE = 0x21
 ACTIVITY_TRIGGER = 0x05
 ARM = 0x0A
 DATA = 0x10
+HEARTBEAT = 0x11
 PHYSICAL_DATA = 0x12
 BENCHMARK_CONTROL = 0x22
 BENCHMARK_REPORT = 0x23
@@ -74,6 +75,7 @@ MESSAGE_TYPE_NAMES = {
     ACTIVITY_TRIGGER: "ACTIVITY_TRIGGER",
     ARM: "ARM",
     DATA: "DATA",
+    HEARTBEAT: "HEARTBEAT",
     PHYSICAL_DATA: "PHYSICAL_DATA",
     TEST_REQUEST: "TEST_REQUEST",
     TEST_RESPONSE: "TEST_RESPONSE",
@@ -184,6 +186,9 @@ class StreamStats:
     last_timestamp_us: int | None = None
     latest_payload: tuple[int, ...] | None = None
     latest_message_type: int | None = None
+    latest_node_id: int | None = None
+    latest_data_received_at: float | None = None
+    idle_since: float | None = None
 
     def record(self, header: tuple[int, ...], frame: bytes,
                now: float | None = None) -> None:
@@ -214,10 +219,27 @@ class StreamStats:
         )
         self.latest_payload = struct.unpack(payload_format, frame[HEADER_SIZE:])
         self.latest_message_type = message_type
+        self.latest_node_id = header[3]
+        self.latest_data_received_at = now
+        self.idle_since = None
         self.total_frames += 1
         self.total_bytes += len(frame)
         self.window_frames += 1
         self.window_bytes += len(frame)
+
+    def mark_idle(self, node_id: int, now: float | None = None) -> bool:
+        """Clear the visible sample when its source starts sending HEARTBEATs.
+
+        A hub can carry more than one source, so a HEARTBEAT must not clear a
+        newer sample belonging to a different node. The return value is true
+        only for the active-to-idle transition, which keeps repeated one-second
+        HEARTBEATs from producing duplicate transition logs.
+        """
+        if self.latest_node_id != node_id or self.latest_payload is None:
+            return False
+        self.latest_payload = None
+        self.idle_since = time.monotonic() if now is None else now
+        return True
 
     def report(self, now: float | None = None) -> dict[str, float | int]:
         """Return lifetime totals and current-window rates, then reset the window."""
@@ -656,6 +678,26 @@ class InteractiveHubRelay:
                 values = struct.unpack(payload_format, frame[HEADER_SIZE:])
                 (hub.benchmark_stats if values[status_index] & STATUS_BENCHMARK
                  else hub.stream_stats).record(header, frame)
+            elif message_type == HEARTBEAT:
+                if header[5] != struct.calcsize("!HI"):
+                    LOGGER.warning(
+                        "HEARTBEAT_INVALID node=%d session=%d sequence=%d "
+                        "payload_length=%d",
+                        node_id, header[6], sequence, header[5])
+                else:
+                    status, overflow_count = struct.unpack(
+                        "!HI", frame[HEADER_SIZE:])
+                    if hub.stream_stats.mark_idle(node_id):
+                        stream_name = (
+                            "PHYSICAL_STREAM_IDLE"
+                            if hub.stream_stats.latest_message_type == PHYSICAL_DATA
+                            else "STREAM_IDLE"
+                        )
+                        LOGGER.info(
+                            "%s node=%d reason=HEARTBEAT sequence=%d "
+                            "status=%s overflow=%d latest_data=cleared",
+                            stream_name, node_id, sequence,
+                            describe_status(status), overflow_count)
             elif message_type == TEST_RESPONSE:
                 values = struct.unpack(IMU_FORMAT, frame[HEADER_SIZE:])
                 pending = state.pending.pop(sequence, None)
@@ -734,12 +776,20 @@ class InteractiveHubRelay:
                     physical = (
                         hub.stream_stats.latest_message_type == PHYSICAL_DATA
                     )
+                    display_node_id = (
+                        hub.stream_stats.latest_node_id
+                        if hub.stream_stats.latest_node_id is not None
+                        else state.hub_node_id
+                    )
+                    stream_name = "PHYSICAL_STREAM" if physical else "STREAM"
+                    if hub.stream_stats.idle_since is not None:
+                        stream_name += "_IDLE"
                     LOGGER.info(
                         "%s node=%d stream_age=%.1fs current=%.2fkbps/%.1fpps "
                         "average=%.2fkbps frames=%d bytes=%d gaps=%d duplicates=%d "
                         "out_of_order=%d timestamp_regressions=%d",
-                        "PHYSICAL_STREAM" if physical else "STREAM",
-                        state.hub_node_id, report["duration"],
+                        stream_name,
+                        display_node_id, report["duration"],
                         report["current_kbps"], report["current_pps"],
                         report["average_kbps"], report["total_frames"],
                         report["total_bytes"], report["sequence_gaps"],
@@ -750,13 +800,25 @@ class InteractiveHubRelay:
                             LOGGER.info(
                                 "LATEST_PHYSICAL_DATA node=%d accel_mps2=%s "
                                 "gyro_rad_s=%s status=%s",
-                                state.hub_node_id, payload[:3], payload[3:6],
+                                display_node_id, payload[:3], payload[3:6],
                                 describe_status(payload[6]))
                         else:
                             LOGGER.info(
                                 "LATEST_DATA node=%d accel=%s gyro=%s status=%s",
-                                state.hub_node_id, payload[:3], payload[3:6],
+                                display_node_id, payload[:3], payload[3:6],
                                 describe_status(payload[6]))
+                    elif hub.stream_stats.idle_since is not None:
+                        last_data_age = (
+                            time.monotonic()
+                            - hub.stream_stats.latest_data_received_at
+                            if hub.stream_stats.latest_data_received_at is not None
+                            else 0.0
+                        )
+                        LOGGER.info(
+                            "LATEST_%s node=%d state=IDLE values=unavailable "
+                            "last_data_age=%.1fs",
+                            "PHYSICAL_DATA" if physical else "DATA",
+                            display_node_id, last_data_age)
                     ready_reports = [item.last_stream_report
                                      for item in self.hubs.values()
                                      if item.last_stream_report is not None]
