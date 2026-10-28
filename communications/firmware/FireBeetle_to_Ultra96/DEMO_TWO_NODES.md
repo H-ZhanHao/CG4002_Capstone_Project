@@ -64,8 +64,10 @@ but do not send `PHYSICAL_DATA` until Ultra96 commands a flush.
 After both HELLO exchanges, the Ultra96 performs five clock-sync rounds with
 each node. It forms the candidate offset from the median of the three
 lowest-delay usable rounds, rejecting a batch whose selected offsets disagree.
-Clock synchronization completes before trigger processing. Either node may
-detect the first generic motion peak and send `ACTIVITY_TRIGGER`. Ultra96 maps
+Clock synchronization completes before Ultra96 sends a scheduled, acknowledged
+`ARM` generation to both nodes. Each ESP resets only its generic peak detector
+at the shared arm boundary. Either node may then detect the first generic motion
+peak and send `ACTIVITY_TRIGGER`. Ultra96 maps
 the peak into its own clock and then into both ESP32 `esp_timer` domains. It
 sends `START_FLUSH` to each node for the preceding five seconds. Each ESP
 acknowledges the command, exposes matching history oldest-first, catches up to
@@ -136,6 +138,7 @@ select both for the older diagnostic and benchmark commands.
 | `START` (`0x07`) | Ultra96 → ESP | retained legacy common start time (`u64`) and signed ESP-minus-Ultra96 offset (`i64`) |
 | `STOP` (`0x08`) | Ultra96 → ESP | empty |
 | `CONTROL_ACK` (`0x09`) | ESP → Ultra96 | command type (`u8`), result (`u8`), reserved (`u16`), original command Sequence (`u32`), effective ESP-local time (`u64`) |
+| `ARM` (`0x0A`) | Ultra96 → ESP | common future arm time (`u64`), signed ESP-minus-Ultra96 offset (`i64`), arm generation (`u32`) |
 | `PHYSICAL_DATA` (`0x12`) | ESP → Ultra96 | `ax,ay,az` float32 m/s², `gx,gy,gz` float32 rad/s, status (`u16`) |
 
 All multibyte values use network byte order. The Ultra96 records receive time

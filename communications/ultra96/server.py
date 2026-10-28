@@ -55,6 +55,7 @@ START_FLUSH_PAYLOAD_SIZE = 28
 START_PAYLOAD_SIZE = 16
 STOP_PAYLOAD_SIZE = 0
 CONTROL_ACK_PAYLOAD_SIZE = 16
+ARM_PAYLOAD_SIZE = 20
 
 MAGIC = 0xA55A
 PROTOCOL_VERSION = 1
@@ -67,6 +68,7 @@ MESSAGE_TYPE_START_FLUSH = 0x06
 MESSAGE_TYPE_START = 0x07
 MESSAGE_TYPE_STOP = 0x08
 MESSAGE_TYPE_CONTROL_ACK = 0x09
+MESSAGE_TYPE_ARM = 0x0A
 MESSAGE_TYPE_DATA = 0x10
 MESSAGE_TYPE_HEARTBEAT = 0x11
 MESSAGE_TYPE_PHYSICAL_DATA = 0x12
@@ -116,6 +118,7 @@ CLOCK_SYNC_DIRECT_APPLY_US = 5_000
 CLOCK_SYNC_CONFIRMATION_AGREEMENT_US = 5_000
 CLOCK_SYNC_SLEW_US_PER_SECOND = 1_000
 CONTROL_ACK_TIMEOUT_SECONDS = 3.0
+ARM_LEAD_US = 500_000
 # Leave one second after the ACK deadline to deliver STOP before an armed start.
 SCHEDULED_START_LEAD_US = 4_000_000
 CONTROL_RESULT_APPLIED = 0
@@ -1026,6 +1029,12 @@ class CaptureCoordinator:
         self.start_pending = False
         self._pending_start_acks = {}
         self._pending_stop_acks = {}
+        self.arm_pending = False
+        self._pending_arm_acks = {}
+        self._arm_ack_deadline_us = None
+        self._cancelled_arm_sequence = None
+        self._arm_generation = 0
+        self._arm_ready = False
         self._start_ack_deadline_us = None
         self._cancelled_start_sequence = None
         self._pending_start_us = None
@@ -1048,7 +1057,8 @@ class CaptureCoordinator:
     def register(self, connection):
         with self._lock:
             previous = self._connections.get(connection.node_id)
-            if self.run_active or self.start_pending:
+            if (self.run_active or self.start_pending or self.arm_pending or
+                    self._arm_ready):
                 self._stop_locked("session changed")
             self._connections[connection.node_id] = connection
             self._announced_sync_sessions = None
@@ -1062,12 +1072,14 @@ class CaptureCoordinator:
         with self._lock:
             if self._connections.get(connection.node_id) is not connection:
                 return
-            if self.run_active or self.start_pending:
+            if (self.run_active or self.start_pending or self.arm_pending or
+                    self._arm_ready):
                 self._stop_locked(f"Node {connection.node_id} disconnected")
             del self._connections[connection.node_id]
             self._announced_sync_sessions = None
             self._pending_start_acks.pop(connection.node_id, None)
             self._pending_stop_acks.pop(connection.node_id, None)
+            self._pending_arm_acks.pop(connection.node_id, None)
 
     def mapping_updated(self, connection):
         with self._lock:
@@ -1084,8 +1096,10 @@ class CaptureCoordinator:
                         self._announced_sync_sessions = sessions
                         LOGGER.info(
                             "BOTH_NODES_SYNCED nodes=%s sessions=%s "
-                            "waiting_for_activity_trigger",
+                            "arming_activity_detection",
                             sorted(self.required_nodes), dict(sessions))
+                    if self.desired_running:
+                        self._arm_locked("both nodes synchronized")
             else:
                 self._maybe_start_locked()
 
@@ -1095,6 +1109,8 @@ class CaptureCoordinator:
             if self._connections.get(connection.node_id) is not connection:
                 return False
             if not self.desired_running:
+                return False
+            if not self._arm_ready or self.arm_pending:
                 return False
             # STOP is asynchronous.  Do not let a trigger race the command and
             # reopen streaming before every node confirms that its old feeder
@@ -1120,6 +1136,13 @@ class CaptureCoordinator:
                     ERROR_INVALID_FRAME, MESSAGE_TYPE_ACTIVITY_TRIGGER,
                     "ACTIVITY_TRIGGER has stale boot or arm identity",
                 )
+            if trigger[1] != self._arm_generation:
+                log_hub(
+                    logging.INFO, connection.node_id,
+                    f"ACTIVITY_TRIGGER_IGNORED node={connection.node_id} "
+                    f"reason=stale_arm_generation received={trigger[1]} "
+                    f"expected={self._arm_generation}")
+                return False
             if set(self._connections) != self.required_nodes:
                 return False
             now_us = time.monotonic_ns() // 1000
@@ -1144,11 +1167,6 @@ class CaptureCoordinator:
                     f"armed_after_us={self._armed_after_us}",
                 )
                 return False
-            if trigger[1] <= connection.last_arm_generation:
-                raise ProtocolError(
-                    ERROR_INVALID_FRAME, MESSAGE_TYPE_ACTIVITY_TRIGGER,
-                    "ACTIVITY_TRIGGER has stale boot or arm identity",
-                )
             sequence = self._next_sequence()
             self.start_pending = True
             self._pending_start_us = coordinator_t0_us - PHYSICAL_HISTORY_DURATION_US
@@ -1159,6 +1177,7 @@ class CaptureCoordinator:
                 CONTROL_ACK_TIMEOUT_SECONDS * 1_000_000)
             self._accepted_trigger = (identity, contents)
             self.idle_paused = False
+            self._arm_ready = False
             connection.last_arm_generation = trigger[1]
             for node_id in sorted(self._connections):
                 item = self._connections[node_id]
@@ -1185,6 +1204,58 @@ class CaptureCoordinator:
                     f"coordinator_t0_us={coordinator_t0_us}",
                 )
             return True
+
+    def _arm_locked(self, reason):
+        """Schedule one shared, acknowledged trigger-arm generation."""
+        if (not self.physical_mode or not self.desired_running or
+                self.run_active or self.start_pending or self.arm_pending or
+                self._arm_ready or self._pending_stop_acks or
+                set(self._connections) != self.required_nodes):
+            return False
+        now_us = time.monotonic_ns() // 1000
+        mappings = {
+            node_id: item.get_mapping(now_us)
+            for node_id, item in self._connections.items()
+        }
+        if any(mapping is None or
+               now_us - mapping.synchronized_at_us > CLOCK_MAPPING_MAX_AGE_US
+               for mapping in mappings.values()):
+            return False
+        sequence = self._next_sequence()
+        self._arm_generation = (self._arm_generation + 1) & 0xFFFFFFFF
+        if self._arm_generation == 0:
+            self._arm_generation = 1
+        arm_at_us = now_us + ARM_LEAD_US
+        self.arm_pending = True
+        self._arm_ready = False
+        self._armed_after_us = arm_at_us
+        self._accepted_trigger = None
+        self._pending_arm_acks = {
+            node_id: sequence for node_id in self._connections
+        }
+        self._arm_ack_deadline_us = now_us + int(
+            CONTROL_ACK_TIMEOUT_SECONDS * 1_000_000)
+        self._cancelled_arm_sequence = None
+        for node_id in sorted(self._connections):
+            item = self._connections[node_id]
+            mapping = mappings[node_id]
+            payload = struct.pack(
+                "!QqI", arm_at_us, mapping.node_minus_coordinator_us,
+                self._arm_generation)
+            frame = build_header(
+                MESSAGE_TYPE_ARM, node_id=0,
+                payload_length=ARM_PAYLOAD_SIZE,
+                session_id=item.session_id, sequence=sequence,
+            ) + payload
+            item.send(frame)
+            log_hub(
+                logging.INFO, node_id,
+                f"ARM_SENT node={node_id} session={item.session_id} "
+                f"sequence={sequence} arm_generation={self._arm_generation} "
+                f"coordinator_arm_us={arm_at_us} "
+                f"local_arm_us={arm_at_us + mapping.node_minus_coordinator_us} "
+                f"reason={reason}")
+        return True
 
     def _maybe_start_locked(self):
         if self.physical_mode:
@@ -1229,6 +1300,9 @@ class CaptureCoordinator:
         return True
 
     def _stop_locked(self, reason):
+        if self._pending_arm_acks:
+            self._cancelled_arm_sequence = next(
+                iter(self._pending_arm_acks.values()))
         if self._pending_start_acks:
             self._cancelled_start_sequence = next(
                 iter(self._pending_start_acks.values()))
@@ -1253,6 +1327,11 @@ class CaptureCoordinator:
                 pass
         self.run_active = False
         self.start_pending = False
+        self.arm_pending = False
+        self._arm_ready = False
+        self._arm_ack_deadline_us = None
+        self._pending_arm_acks.clear()
+        self._armed_after_us = None
         self._start_ack_deadline_us = None
         self._pending_start_acks.clear()
         self._pending_start_us = None
@@ -1261,10 +1340,23 @@ class CaptureCoordinator:
             self.window_assembler.stop_run(reason)
 
     def tick(self, now_us=None):
-        """Fail a group START that is still missing acknowledgements at its deadline."""
+        """Fail a group ARM/START that is missing acknowledgements."""
         if now_us is None:
             now_us = time.monotonic_ns() // 1000
         with self._lock:
+            if (self.arm_pending and self._arm_ack_deadline_us is not None and
+                    now_us >= self._arm_ack_deadline_us):
+                missing_nodes = sorted(self._pending_arm_acks)
+                sequence = next(iter(self._pending_arm_acks.values()))
+                self.desired_running = False
+                self.idle_paused = False
+                LOGGER.error(
+                    "ARM_ACK_TIMEOUT sequence=%d missing_nodes=%s "
+                    "timeout_seconds=%.1f; automatic restart disabled until "
+                    "manual START", sequence, missing_nodes,
+                    CONTROL_ACK_TIMEOUT_SECONDS)
+                self._stop_locked("ARM acknowledgement timeout")
+                return True
             if (not self.start_pending or self._start_ack_deadline_us is None or
                     now_us < self._start_ack_deadline_us):
                 return False
@@ -1288,6 +1380,53 @@ class CaptureCoordinator:
         with self._lock:
             if self._connections.get(connection.node_id) is not connection:
                 return
+            if command_type == MESSAGE_TYPE_ARM:
+                expected = self._pending_arm_acks.get(connection.node_id)
+                if expected != command_sequence:
+                    if (expected is None and not self.arm_pending and
+                            command_sequence == self._cancelled_arm_sequence):
+                        log_hub(
+                            logging.WARNING, connection.node_id,
+                            f"LATE_ARM_ACK_IGNORED node={connection.node_id} "
+                            f"sequence={command_sequence}")
+                        return
+                    raise ProtocolError(
+                        ERROR_INVALID_SEQUENCE, MESSAGE_TYPE_CONTROL_ACK,
+                        "CONTROL_ACK does not match the pending ARM")
+                if result != CONTROL_RESULT_APPLIED:
+                    log_hub(
+                        logging.ERROR, connection.node_id,
+                        f"ARM_REJECTED node={connection.node_id} "
+                        f"sequence={command_sequence} result={result}")
+                    self.desired_running = False
+                    self.idle_paused = False
+                    self._stop_locked("ARM rejected")
+                    return
+                del self._pending_arm_acks[connection.node_id]
+                log_hub(
+                    logging.INFO, connection.node_id,
+                    f"ARM_ACK node={connection.node_id} "
+                    f"sequence={command_sequence} "
+                    f"local_arm_us={effective_local_us}")
+                if not self._pending_arm_acks:
+                    self.arm_pending = False
+                    self._arm_ack_deadline_us = None
+                    now_us = time.monotonic_ns() // 1000
+                    if now_us >= self._armed_after_us:
+                        LOGGER.warning(
+                            "ARM_CONFIRMATION_LATE sequence=%d; rescheduling",
+                            command_sequence)
+                        self._arm_locked("late ARM confirmation retry")
+                    else:
+                        self._arm_ready = True
+                        LOGGER.info(
+                            "ARM_CONFIRMED nodes=%s sequence=%d "
+                            "arm_generation=%d coordinator_arm_us=%d "
+                            "waiting_for_activity_trigger",
+                            sorted(self.required_nodes), command_sequence,
+                            self._arm_generation, self._armed_after_us)
+                return
+
             if command_type in (MESSAGE_TYPE_START, MESSAGE_TYPE_START_FLUSH):
                 expected = self._pending_start_acks.get(connection.node_id)
                 if expected != command_sequence:
@@ -1346,10 +1485,11 @@ class CaptureCoordinator:
                     f"STOP_ACK node={connection.node_id} "
                     f"sequence={command_sequence} result={result} "
                     f"local_stop_us={effective_local_us}")
-                if not self._pending_stop_acks and self.idle_paused:
-                    LOGGER.info(
-                        "IDLE_PAUSE_ARMED nodes=%s armed_after_us=%d",
-                        sorted(self.required_nodes), self._armed_after_us)
+                if (not self._pending_stop_acks and self.physical_mode and
+                        self.desired_running):
+                    self._arm_locked(
+                        "AI idle pause" if self.idle_paused else
+                        "manual START after STOP")
                 return
 
             raise ProtocolError(
@@ -1367,13 +1507,13 @@ class CaptureCoordinator:
             self.desired_running = True
             self.idle_paused = False
             if self.physical_mode:
-                self._armed_after_us = time.monotonic_ns() // 1000
-            started = False if self.physical_mode else self._maybe_start_locked()
+                started = self._arm_locked("manual START")
+            else:
+                started = self._maybe_start_locked()
         if not started:
             if self.physical_mode:
                 LOGGER.info(
-                    "START_REQUESTED armed_after_us=%d waiting_for_fresh_trigger",
-                    self._armed_after_us)
+                    "START_REQUESTED waiting_for_stop_ack_or_synchronization")
             else:
                 LOGGER.info("START_REQUESTED waiting_for_both_synchronized_nodes")
         return started
@@ -1402,14 +1542,11 @@ class CaptureCoordinator:
             if self.idle_paused and not self.run_active and not self.start_pending:
                 LOGGER.info("IDLE_PAUSE_ALREADY_ARMED")
                 return False
-            armed_after_us = time.monotonic_ns() // 1000
             self.desired_running = True
             self.idle_paused = True
-            self._armed_after_us = armed_after_us
             self._stop_locked("AI idle pause")
             LOGGER.info(
-                "IDLE_PAUSE_REQUESTED armed_after_us=%d waiting_for_stop_ack",
-                armed_after_us)
+                "IDLE_PAUSE_REQUESTED waiting_for_stop_ack_then_ARM")
             return True
 
 

@@ -18,6 +18,8 @@ typedef struct {
 esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id);
 bool physical_pipeline_begin_session(uint32_t session_id, uint32_t boot_id);
 void physical_pipeline_end_session(uint32_t session_id);
+uint8_t physical_pipeline_arm(uint32_t session_id,
+    const protocol_arm_t *arm, uint64_t *effective_local_us);
 uint8_t physical_pipeline_start_flush(uint32_t session_id,
     uint32_t command_sequence, const protocol_start_flush_t *flush,
     uint64_t *effective_local_us);

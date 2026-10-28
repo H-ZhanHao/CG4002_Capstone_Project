@@ -65,6 +65,7 @@ typedef struct {
 
 typedef struct {
     bool capture_requested;
+    control_cache_entry_t arm;
     control_cache_entry_t start;
     control_cache_entry_t stop;
 } control_state_t;
@@ -427,6 +428,46 @@ static void process_start(
         (long long)local_start_us);
 }
 
+static void process_arm(
+    const application_command_t *command, const protocol_header_t *header,
+    control_state_t *state)
+{
+    protocol_arm_t arm;
+    if (header->node_id != 0 || header->flags != 0 ||
+        !protocol_decode_arm_payload(command->frame + PROTOCOL_HEADER_SIZE,
+            header->payload_length, &arm) ||
+        arm.coordinator_arm_us > INT64_MAX) {
+        enqueue_error(command->session_id, header->sequence,
+            PROTOCOL_ERROR_INVALID_FRAME, PROTOCOL_MESSAGE_TYPE_ARM);
+        return;
+    }
+    if (replay_control_if_cached(command, header, &state->arm)) return;
+    int64_t coordinator_arm_us = (int64_t)arm.coordinator_arm_us;
+    if ((arm.node_minus_coordinator_us > 0 &&
+            coordinator_arm_us > INT64_MAX - arm.node_minus_coordinator_us) ||
+        (arm.node_minus_coordinator_us < 0 &&
+            coordinator_arm_us < INT64_MIN - arm.node_minus_coordinator_us)) {
+        enqueue_error(command->session_id, header->sequence,
+            PROTOCOL_ERROR_INVALID_FRAME, PROTOCOL_MESSAGE_TYPE_ARM);
+        return;
+    }
+    uint64_t effective_local_us = 0;
+#if APP_PHYSICAL_INTEGRATION
+    uint8_t result = physical_pipeline_arm(
+        command->session_id, &arm, &effective_local_us);
+#else
+    uint8_t result = PROTOCOL_CONTROL_RESULT_INVALID_STATE;
+#endif
+    protocol_control_ack_t ack = {
+        .command_type = PROTOCOL_MESSAGE_TYPE_ARM,
+        .result = result,
+        .command_sequence = header->sequence,
+        .effective_local_us = effective_local_us,
+    };
+    cache_control_result(command, header, &state->arm, &ack);
+    enqueue_control_ack(command->session_id, header->sequence, &ack);
+}
+
 static void process_start_flush(
     const application_command_t *command, const protocol_header_t *header,
     control_state_t *state)
@@ -588,6 +629,11 @@ static void process_frame(
 
     if (header.message_type == PROTOCOL_MESSAGE_TYPE_START_FLUSH) {
         process_start_flush(command, &header, control_state);
+        return;
+    }
+
+    if (header.message_type == PROTOCOL_MESSAGE_TYPE_ARM) {
+        process_arm(command, &header, control_state);
         return;
     }
 

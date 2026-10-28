@@ -389,6 +389,18 @@ bool protocol_decode_start_payload(
     return true;
 }
 
+bool protocol_decode_arm_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_arm_t *arm)
+{
+    if (payload == NULL || arm == NULL ||
+        payload_length != PROTOCOL_ARM_PAYLOAD_SIZE) return false;
+    arm->coordinator_arm_us = read_u64_be(&payload[0]);
+    arm->node_minus_coordinator_us = (int64_t)read_u64_be(&payload[8]);
+    arm->arm_generation = read_u32_be(&payload[16]);
+    return arm->coordinator_arm_us != 0 && arm->arm_generation != 0;
+}
+
 void protocol_encode_control_ack(
     uint8_t packet[PROTOCOL_CONTROL_ACK_PACKET_SIZE],
     uint8_t node_id, uint32_t session_id, uint32_t response_sequence,

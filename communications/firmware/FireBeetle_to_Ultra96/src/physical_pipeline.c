@@ -19,12 +19,15 @@
 #define PIPELINE_COMMAND_QUEUE_LENGTH 8
 #define PIPELINE_TRIGGER_QUEUE_LENGTH 2
 
-typedef enum { COMMAND_BEGIN, COMMAND_END, COMMAND_FLUSH, COMMAND_STOP } command_type_t;
+typedef enum {
+    COMMAND_BEGIN, COMMAND_END, COMMAND_ARM, COMMAND_FLUSH, COMMAND_STOP
+} command_type_t;
 typedef struct {
     command_type_t type;
     uint32_t session_id;
     uint32_t boot_id;
     uint32_t command_sequence;
+    protocol_arm_t arm;
     protocol_start_flush_t flush;
     QueueHandle_t result_queue;
 } pipeline_command_t;
@@ -50,14 +53,16 @@ static void handle_command(const pipeline_command_t *command,
                            physical_history_t *history,
                            physical_feeder_t *feeder,
                            uint32_t *session_id, uint32_t *boot_id,
-                           uint32_t *arm_generation)
+                           uint32_t *arm_generation, bool *trigger_armed,
+                           uint64_t *scheduled_arm_us)
 {
     command_result_t reply = { .effective_local_us = (uint64_t)esp_timer_get_time() };
     if (command->type == COMMAND_BEGIN) {
         *session_id = command->session_id;
         *boot_id = command->boot_id;
-        (*arm_generation)++;
-        if (*arm_generation == 0) (*arm_generation)++;
+        *arm_generation = 0;
+        *trigger_armed = false;
+        *scheduled_arm_us = 0;
         physical_feeder_stop(feeder);
         xQueueReset(sample_queue);
         xQueueReset(trigger_queue);
@@ -67,6 +72,8 @@ static void handle_command(const pipeline_command_t *command,
         reply.result = feeder->active ? PROTOCOL_CONTROL_RESULT_APPLIED
                                       : PROTOCOL_CONTROL_RESULT_ALREADY_STOPPED;
         physical_feeder_stop(feeder);
+        *trigger_armed = false;
+        *scheduled_arm_us = 0;
         xQueueReset(sample_queue);
 #if APP_IDLE_RESUME_INTEGRATION
         /* A peak queued before STOP must not reopen the newly armed run. */
@@ -75,9 +82,22 @@ static void handle_command(const pipeline_command_t *command,
         if (command->type == COMMAND_END) {
             *session_id = 0;
             *boot_id = 0;
+        }
+    } else if (command->type == COMMAND_ARM) {
+        int64_t coordinator_arm_us = (int64_t)command->arm.coordinator_arm_us;
+        int64_t local_arm_us = coordinator_arm_us +
+            command->arm.node_minus_coordinator_us;
+        reply.effective_local_us = local_arm_us > 0 ?
+            (uint64_t)local_arm_us : 0;
+        if (feeder->active || command->arm.arm_generation == 0 ||
+            local_arm_us <= esp_timer_get_time()) {
+            reply.result = PROTOCOL_CONTROL_RESULT_INVALID_STATE;
         } else {
-            (*arm_generation)++;
-            if (*arm_generation == 0) (*arm_generation)++;
+            *arm_generation = command->arm.arm_generation;
+            *trigger_armed = false;
+            *scheduled_arm_us = (uint64_t)local_arm_us;
+            xQueueReset(trigger_queue);
+            reply.result = PROTOCOL_CONTROL_RESULT_APPLIED;
         }
     } else if (command->type == COMMAND_FLUSH) {
         int64_t coordinator_t0 = (int64_t)command->flush.coordinator_t0_us;
@@ -96,6 +116,9 @@ static void handle_command(const pipeline_command_t *command,
             reply.result = PROTOCOL_CONTROL_RESULT_INSUFFICIENT_HISTORY;
         } else {
             reply.result = PROTOCOL_CONTROL_RESULT_APPLIED;
+            *trigger_armed = false;
+            *scheduled_arm_us = 0;
+            xQueueReset(trigger_queue);
         }
     }
     if (command->result_queue != NULL) (void)xQueueSend(command->result_queue, &reply, 0);
@@ -105,6 +128,8 @@ static void pipeline_task(void *unused)
 {
     (void)unused;
     uint32_t session_id = 0, boot_id = 0, arm_generation = 0, sequence = 0;
+    bool trigger_armed = false;
+    uint64_t scheduled_arm_us = 0;
     physical_history_clear(&pipeline_history);
     physical_feeder_stop(&pipeline_feeder);
     uint64_t next_capture_us = (uint64_t)esp_timer_get_time();
@@ -112,8 +137,16 @@ static void pipeline_task(void *unused)
         pipeline_command_t command;
         while (xQueueReceive(command_queue, &command, 0) == pdPASS)
             handle_command(&command, &pipeline_history, &pipeline_feeder,
-                           &session_id, &boot_id, &arm_generation);
+                           &session_id, &boot_id, &arm_generation,
+                           &trigger_armed, &scheduled_arm_us);
         uint64_t now_us = (uint64_t)esp_timer_get_time();
+        if (!trigger_armed && scheduled_arm_us != 0 &&
+            now_us >= scheduled_arm_us) {
+            hardware_bridge_reset_peak_detector();
+            xQueueReset(trigger_queue);
+            trigger_armed = true;
+            scheduled_arm_us = 0;
+        }
         bluetooth_bridge_poll(now_us);
         if (now_us >= next_capture_us) {
             protocol_physical_sample_t captured = {0};
@@ -135,7 +168,8 @@ static void pipeline_task(void *unused)
                 captured.status = PROTOCOL_STATUS_MOCK_DATA;
 #endif
                 if (physical_history_push(&pipeline_history, &captured)) sequence++;
-                if (session_id != 0 && peak.peak_timestamp_us != 0) {
+                if (session_id != 0 && trigger_armed &&
+                    peak.peak_timestamp_us != 0) {
                     physical_trigger_event_t event = {
                         .sequence = captured.sequence,
                         .detected_timestamp_us = peak.detected_timestamp_us,
@@ -143,7 +177,8 @@ static void pipeline_task(void *unused)
                             .arm_generation = arm_generation,
                             .peak_timestamp_us = peak.peak_timestamp_us },
                     };
-                    (void)xQueueSend(trigger_queue, &event, 0);
+                    if (xQueueSend(trigger_queue, &event, 0) == pdPASS)
+                        trigger_armed = false;
                 }
             }
             next_capture_us += PHYSICAL_SAMPLE_PERIOD_US;
@@ -215,6 +250,18 @@ void physical_pipeline_end_session(uint32_t session_id)
     pipeline_command_t command = { .type = COMMAND_END, .session_id = session_id };
     command_result_t result;
     (void)submit_sync(&command, &result);
+}
+
+uint8_t physical_pipeline_arm(uint32_t session_id,
+    const protocol_arm_t *arm, uint64_t *effective_local_us)
+{
+    if (arm == NULL) return PROTOCOL_CONTROL_RESULT_INVALID_STATE;
+    pipeline_command_t command = { .type = COMMAND_ARM,
+        .session_id = session_id, .arm = *arm };
+    command_result_t result = { .result = PROTOCOL_CONTROL_RESULT_INVALID_STATE };
+    if (!submit_sync(&command, &result)) return PROTOCOL_CONTROL_RESULT_INVALID_STATE;
+    if (effective_local_us != NULL) *effective_local_us = result.effective_local_us;
+    return result.result;
 }
 
 uint8_t physical_pipeline_start_flush(uint32_t session_id,

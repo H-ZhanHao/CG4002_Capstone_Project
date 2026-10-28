@@ -252,6 +252,12 @@ static void test_sync_and_start_payloads(void)
         0xff,0xff,0xff,0xff,0xff,0xff,0xfc,0x18,
     };
     protocol_start_t start;
+    const uint8_t arm_payload[PROTOCOL_ARM_PAYLOAD_SIZE] = {
+        0,0,0,0,0,0,0x4e,0x20,
+        0xff,0xff,0xff,0xff,0xff,0xff,0xfc,0x18,
+        0x11,0x12,0x13,0x14,
+    };
+    protocol_arm_t arm;
 
     assert(protocol_decode_sync_request_payload(request, sizeof(request),
         &coordinator_send_us));
@@ -275,6 +281,13 @@ static void test_sync_and_start_payloads(void)
     assert(start.coordinator_start_us == 10000);
     assert(start.node_minus_coordinator_us == -1000);
     assert(!protocol_decode_start_payload(start_payload, 15, &start));
+
+    assert(protocol_decode_arm_payload(arm_payload, sizeof(arm_payload), &arm));
+    assert(arm.coordinator_arm_us == 20000);
+    assert(arm.node_minus_coordinator_us == -1000);
+    assert(arm.arm_generation == 0x11121314);
+    assert(!protocol_decode_arm_payload(arm_payload, sizeof(arm_payload) - 1,
+        &arm));
 }
 
 static void test_control_ack_layout(void)

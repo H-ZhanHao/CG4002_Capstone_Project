@@ -34,6 +34,7 @@ class InteractiveHubRelayCodecTests(unittest.TestCase):
             demo.MESSAGE_TYPE_NAMES[demo.PHYSICAL_DATA], "PHYSICAL_DATA")
         self.assertEqual(
             demo.MESSAGE_TYPE_NAMES[demo.ACTIVITY_TRIGGER], "ACTIVITY_TRIGGER")
+        self.assertEqual(demo.MESSAGE_TYPE_NAMES[demo.ARM], "ARM")
 
     def test_activity_trigger_wire_shape_is_named_and_decodable(self):
         payload = (0x12345678, 7, 987654321)

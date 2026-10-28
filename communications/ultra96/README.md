@@ -28,8 +28,11 @@ python server.py
 ```
 
 The physical path continuously captures on both nodes. After HELLO, the server
-synchronizes both clocks; only then does it accept an `ACTIVITY_TRIGGER` from
-either node. It maps the reported peak into the Ultra96 clock and sends one
+synchronizes both clocks, schedules one shared `ARM` generation, and waits for
+both acknowledgements. Each ESP resets its generic detector at the common arm
+boundary without clearing IMU history. Only then does the server accept an
+`ACTIVITY_TRIGGER` from either node. It maps the reported peak into the Ultra96
+clock and sends one
 `START_FLUSH` to each node. Both commands must receive `CONTROL_ACK` within
 three seconds. The server then opens its assembler at five seconds before the
 common peak. A timeout sends STOP to both and requires a manual `start` to
@@ -37,8 +40,8 @@ re-arm trigger handling. The terminal also accepts `start` and `stop`.
 
 Physical capture has two stop paths. `manual_stop()` (the console `stop`)
 disarms trigger handling until a manual `start`. `idle_pause()` (the console
-`idle`) stops the current ESP feeders and window run but remains armed after
-both STOP acknowledgements, so the next fresh `ACTIVITY_TRIGGER` automatically
+`idle`) stops the current ESP feeders and window run, then issues a fresh ARM
+after both STOP acknowledgements, so the next fresh `ACTIVITY_TRIGGER` automatically
 sends `START_FLUSH`. In both cases the ESPs continue filling their local rolling
 history; only network `PHYSICAL_DATA` transmission stops. An inference adapter
 can call `coordinator.idle_pause()` after its idle threshold is reached. The
@@ -121,7 +124,8 @@ After both physical nodes have an applied mapping, the coordinator emits one
 neutral, non-node-coloured readiness line for that Session pair:
 
 ```text
-BOTH_NODES_SYNCED nodes=[1, 2] sessions={1: ..., 2: ...} waiting_for_activity_trigger
+BOTH_NODES_SYNCED nodes=[1, 2] sessions={1: ..., 2: ...} arming_activity_detection
+ARM_CONFIRMED nodes=[1, 2] sequence=... arm_generation=... coordinator_arm_us=... waiting_for_activity_trigger
 ```
 
 Periodic mapping refreshes do not repeat the line. A reconnect creates a new

@@ -30,6 +30,7 @@
 #define PROTOCOL_MESSAGE_TYPE_START     0x07
 #define PROTOCOL_MESSAGE_TYPE_STOP      0x08
 #define PROTOCOL_MESSAGE_TYPE_CONTROL_ACK 0x09
+#define PROTOCOL_MESSAGE_TYPE_ARM       0x0A
 #define PROTOCOL_MESSAGE_TYPE_DATA      0x10
 #define PROTOCOL_MESSAGE_TYPE_HEARTBEAT 0x11
 #define PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA 0x12
@@ -52,6 +53,7 @@
 #define PROTOCOL_START_PAYLOAD_SIZE     16
 #define PROTOCOL_STOP_PAYLOAD_SIZE       0
 #define PROTOCOL_CONTROL_ACK_PAYLOAD_SIZE 16
+#define PROTOCOL_ARM_PAYLOAD_SIZE       20
 #define PROTOCOL_DATA_PAYLOAD_SIZE       14
 #define PROTOCOL_PHYSICAL_DATA_PAYLOAD_SIZE 26
 #define PROTOCOL_HEARTBEAT_PAYLOAD_SIZE  6
@@ -194,6 +196,13 @@ typedef struct {
     int64_t node_minus_coordinator_us;
 } protocol_start_t;
 
+/** Scheduled trigger arming boundary and coordinator-selected generation. */
+typedef struct {
+    uint64_t coordinator_arm_us;
+    int64_t node_minus_coordinator_us;
+    uint32_t arm_generation;
+} protocol_arm_t;
+
 /** Physical-unit capture. Sequence and timestamp remain in the common header. */
 typedef struct {
     uint8_t node_id;
@@ -317,6 +326,10 @@ void protocol_encode_sync_response(
 bool protocol_decode_start_payload(
     const uint8_t *payload, size_t payload_length,
     protocol_start_t *start
+);
+bool protocol_decode_arm_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_arm_t *arm
 );
 void protocol_encode_control_ack(
     uint8_t packet[PROTOCOL_CONTROL_ACK_PACKET_SIZE],

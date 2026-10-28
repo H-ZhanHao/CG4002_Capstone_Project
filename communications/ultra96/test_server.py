@@ -198,6 +198,30 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
 
 
 class PhysicalIntegrationTest(unittest.TestCase):
+    def confirm_arm(self, coordinator, *connections):
+        if not coordinator.arm_pending:
+            self.assertTrue(coordinator._arm_locked("test"))
+        sequence = server.unpack_header(connections[0].client.frames[-1])[7]
+        self.assertEqual(
+            server.unpack_header(connections[0].client.frames[-1])[2],
+            server.MESSAGE_TYPE_ARM)
+        decoded = [
+            struct.unpack("!QqI", connection.client.frames[-1][server.HEADER_SIZE:])
+            for connection in connections
+        ]
+        self.assertTrue(all(item[0] == decoded[0][0] for item in decoded))
+        self.assertEqual(
+            [item[1] for item in decoded],
+            [connection.mapping.node_minus_coordinator_us
+             for connection in connections])
+        self.assertTrue(all(item[2] == coordinator._arm_generation
+                            for item in decoded))
+        for connection in connections:
+            server.process_control_ack(build_control_ack(
+                connection, server.MESSAGE_TYPE_ARM, sequence), connection)
+        self.assertTrue(coordinator._arm_ready)
+        return coordinator._arm_generation, coordinator._armed_after_us
+
     def build_physical(self, node_id=1, session_id=101, sequence=7,
                        timestamp_us=7_000_000, status=None, values=None):
         if status is None:
@@ -291,7 +315,11 @@ class PhysicalIntegrationTest(unittest.TestCase):
         node2.mapping = server.ClockMapping(-200, 20, now_us)
         coordinator.register(node1)
         coordinator.register(node2)
-        trigger = self.build_trigger(node1)
+        arm_generation, arm_at_us = self.confirm_arm(
+            coordinator, node1, node2)
+        trigger = self.build_trigger(
+            node1, peak_us=arm_at_us + node1.mapping.node_minus_coordinator_us + 100,
+            arm_generation=arm_generation, detected_us=arm_at_us + 60_100)
         self.assertTrue(server.process_activity_trigger(trigger, node1))
         self.assertEqual(node1.get_physical_capture_generation(), 1)
         self.assertEqual(node2.get_physical_capture_generation(), 1)
@@ -322,18 +350,41 @@ class PhysicalIntegrationTest(unittest.TestCase):
         coordinator.register(node1)
         coordinator.register(node2)
 
-        node1.mapping = server.ClockMapping(10, 20, 30)
+        now_us = time.monotonic_ns() // 1000
+        node1.mapping = server.ClockMapping(10, 20, now_us)
         with self.assertNoLogs(server.LOGGER, level="INFO"):
             coordinator.mapping_updated(node1)
-        node2.mapping = server.ClockMapping(20, 20, 30)
+        node2.mapping = server.ClockMapping(20, 20, now_us)
         with self.assertLogs(server.LOGGER, level="INFO") as captured:
             coordinator.mapping_updated(node2)
         output = "\n".join(captured.output)
         self.assertIn("BOTH_NODES_SYNCED", output)
-        self.assertIn("waiting_for_activity_trigger", output)
+        self.assertIn("arming_activity_detection", output)
+        self.assertTrue(coordinator.arm_pending)
 
         with self.assertNoLogs(server.LOGGER, level="INFO"):
             coordinator.mapping_updated(node1)
+
+    def test_arm_ack_timeout_stops_and_requires_manual_start(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        node.mapping = server.ClockMapping(
+            0, 20, time.monotonic_ns() // 1000)
+        coordinator.register(node)
+
+        self.assertTrue(coordinator._arm_locked("test timeout"))
+        deadline_us = coordinator._arm_ack_deadline_us
+        self.assertFalse(coordinator.tick(deadline_us - 1))
+        with self.assertLogs(server.LOGGER, level="ERROR") as output:
+            self.assertTrue(coordinator.tick(deadline_us))
+        self.assertIn("ARM_ACK_TIMEOUT", "\n".join(output.output))
+        self.assertFalse(coordinator.desired_running)
+        self.assertFalse(coordinator.arm_pending)
+        self.assertEqual(server.unpack_header(sock.frames[-1])[2],
+                         server.MESSAGE_TYPE_STOP)
 
     def test_physical_stop_disarms_triggers_until_manual_start(self):
         coordinator = server.CaptureCoordinator(
@@ -365,10 +416,12 @@ class PhysicalIntegrationTest(unittest.TestCase):
 
         coordinator.request_start()
         self.assertFalse(server.process_activity_trigger(trigger, node1))
-        fresh_peak_us = coordinator._armed_after_us + 100 + 1
+        arm_generation, arm_at_us = self.confirm_arm(
+            coordinator, node1, node2)
+        fresh_peak_us = arm_at_us + 100 + 1
         fresh_trigger = self.build_trigger(
             node1, sequence=10, peak_us=fresh_peak_us,
-            arm_generation=2, detected_us=fresh_peak_us + 60_000)
+            arm_generation=arm_generation, detected_us=fresh_peak_us + 60_000)
         self.assertTrue(server.process_activity_trigger(fresh_trigger, node1))
         self.assertEqual(server.unpack_header(sock1.frames[-1])[2],
                          server.MESSAGE_TYPE_START_FLUSH)
@@ -388,9 +441,14 @@ class PhysicalIntegrationTest(unittest.TestCase):
         coordinator.register(node1)
         coordinator.register(node2)
 
-        initial_peak_us = now_us + 100
+        arm_generation, arm_at_us = self.confirm_arm(
+            coordinator, node1, node2)
+
+        initial_peak_us = (
+            arm_at_us + node1.mapping.node_minus_coordinator_us + 100)
         initial_trigger = self.build_trigger(
             node1, peak_us=initial_peak_us,
+            arm_generation=arm_generation,
             detected_us=initial_peak_us + 60_000)
         self.assertTrue(server.process_activity_trigger(initial_trigger, node1))
         start_sequence = server.unpack_header(sock1.frames[-1])[7]
@@ -406,17 +464,20 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertFalse(coordinator.run_active)
         self.assertIn("AI idle pause", assembler.stopped)
         stop_sequence = server.unpack_header(sock1.frames[-1])[7]
-        fresh_peak_us = coordinator._armed_after_us + 100 + 1
-        fresh_trigger = self.build_trigger(
-            node1, sequence=10, peak_us=fresh_peak_us,
-            arm_generation=2, detected_us=fresh_peak_us + 60_000)
 
         # A peak cannot race STOP acknowledgements and restart the old feeder.
-        self.assertFalse(server.process_activity_trigger(fresh_trigger, node1))
+        self.assertFalse(server.process_activity_trigger(initial_trigger, node1))
         server.process_control_ack(build_control_ack(
             node1, server.MESSAGE_TYPE_STOP, stop_sequence), node1)
         server.process_control_ack(build_control_ack(
             node2, server.MESSAGE_TYPE_STOP, stop_sequence), node2)
+
+        arm_generation, arm_at_us = self.confirm_arm(
+            coordinator, node1, node2)
+        fresh_peak_us = arm_at_us + 100 + 1
+        fresh_trigger = self.build_trigger(
+            node1, sequence=10, peak_us=fresh_peak_us,
+            arm_generation=arm_generation, detected_us=fresh_peak_us + 60_000)
 
         frame_counts = (len(sock1.frames), len(sock2.frames))
         self.assertFalse(server.process_activity_trigger(initial_trigger, node1))

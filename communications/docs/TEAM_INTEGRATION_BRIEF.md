@@ -26,7 +26,7 @@ The laptop bridges the private router network and the Ultra96 route through VPN/
 
 | Component | Behaviour |
 |---|---|
-| ESP32 firmware | Continuously captures a local MPU6050 at 50 Hz into bounded history, detects a generic peak, and flushes history before live `PHYSICAL_DATA`. Handles handshake, clock sync, START_FLUSH/STOP, status and reconnects. |
+| ESP32 firmware | Continuously captures a local MPU6050 at 50 Hz into bounded history, arms and resets generic peak detection on an acknowledged `ARM`, and flushes history before live `PHYSICAL_DATA`. Handles handshake, clock sync, ARM/START_FLUSH/STOP, status and reconnects. |
 | `laptop/tcp_relay.py` | Copies bytes in both directions, with an independent upstream connection per client. Used separately for sensor traffic and phone traffic. Does not interpret messages or terminate TLS. |
 | `laptop/interactive_hub_relay.py` | Alternative sensor relay for keyboard-triggered tests, benchmarks and file transfers. This version terminates ESP32 TLS on the laptop before forwarding protocol frames through SSH. |
 | `ultra96/server.py` | Handles nodes concurrently, authenticates HELLO, assigns sessions, validates/decodes sensor frames, tracks stream health, synchronizes clocks, coordinates capture, and feeds a shared neutral sliding-window assembler. It does not yet feed an AI model. |
@@ -39,7 +39,7 @@ The sensor connection enters Ultra96 at port **5000**. The gateway listens on **
 
 1. Each node connects through the laptop and sends HELLO. Ultra96 validates its identity and allocates a fresh Session ID.
 2. Ultra96 performs five clock-sync exchanges per node and estimates each node's clock offset using the three lowest-delay usable rounds.
-3. Once both nodes have fresh clock mappings, either node may report the first generic peak with `ACTIVITY_TRIGGER`. Ultra96 maps that peak and sends `START_FLUSH` to both nodes.
+3. Once both nodes have fresh clock mappings, Ultra96 schedules and confirms one shared `ARM` generation. Either node may then report the first generic peak with `ACTIVITY_TRIGGER`; Ultra96 maps that peak and sends `START_FLUSH` to both nodes.
 4. Each node normally produces one sample every 20 ms. It sends the preceding five seconds oldest-first, catches up to the live edge, and then sends each new sample once. Capture timestamps and sequences are assigned at acquisition and preserved through buffering.
 5. Ultra96 refreshes clock mappings every 60 seconds. It applies small consistent corrections directly, slews toward larger ones and rejects poor measurements while retaining the previous mapping.
 
