@@ -386,6 +386,156 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertEqual(server.unpack_header(sock.frames[-1])[2],
                          server.MESSAGE_TYPE_STOP)
 
+    def test_manual_start_with_expired_mapping_requests_sync_then_arms(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), auto_start=False, physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        now_us = time.monotonic_ns() // 1000
+        node.mapping = server.ClockMapping(
+            0, 20,
+            now_us - server.CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US - 1)
+        coordinator.register(node)
+
+        with self.assertLogs(server.LOGGER, level="INFO") as output:
+            self.assertFalse(coordinator.request_start())
+        rendered = "\n".join(output.output)
+        self.assertIn("ARM_DEFERRED reason=missing_or_expired_mapping", rendered)
+        self.assertIn("nodes=[1]", rendered)
+        self.assertTrue(node.arm_sync_requested())
+
+        node.tick(now_us + 1)
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2],
+            server.MESSAGE_TYPE_SYNC_REQ)
+
+        refreshed_at_us = time.monotonic_ns() // 1000
+        node.mapping = server.ClockMapping(10, 20, refreshed_at_us)
+        coordinator.mapping_updated(node)
+        self.assertFalse(node.arm_sync_requested())
+        self.assertTrue(coordinator.arm_pending)
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2], server.MESSAGE_TYPE_ARM)
+
+    def test_pending_arm_sync_retries_quickly_after_rejection(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), auto_start=False, physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(sock, 1, 101, coordinator)
+        now_us = time.monotonic_ns() // 1000
+        node.mapping = server.ClockMapping(
+            0, 20,
+            now_us - server.CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US - 1)
+        coordinator.register(node)
+        coordinator.request_start()
+
+        with self.assertLogs(server.LOGGER, level="INFO") as output:
+            node._pause_failed_initial_sync(now_us)
+        self.assertIn("delay_seconds=1.0", "\n".join(output.output))
+        frame_count = len(sock.frames)
+        node.tick(now_us + 999_999)
+        self.assertEqual(len(sock.frames), frame_count)
+        node.tick(now_us + 1_000_000)
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2],
+            server.MESSAGE_TYPE_SYNC_REQ)
+
+    def test_duplicate_manual_start_reports_already_armed(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        node.mapping = server.ClockMapping(
+            0, 20, time.monotonic_ns() // 1000)
+        coordinator.register(node)
+        self.confirm_arm(coordinator, node)
+        frame_count = len(sock.frames)
+
+        with self.assertLogs(server.LOGGER, level="INFO") as output:
+            self.assertFalse(coordinator.request_start())
+        self.assertIn("ARM_ALREADY_READY", "\n".join(output.output))
+        self.assertEqual(len(sock.frames), frame_count)
+
+    def test_manual_start_arms_with_holdover_and_refreshes_in_background(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), auto_start=False, physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        now_us = time.monotonic_ns() // 1000
+        node.mapping = server.ClockMapping(
+            10, 20, now_us - server.CLOCK_MAPPING_MAX_AGE_US - 1)
+        coordinator.register(node)
+
+        with self.assertLogs(server.LOGGER, level="INFO") as output:
+            self.assertTrue(coordinator.request_start())
+        self.assertIn("ARM_USING_MAPPING_HOLDOVER", "\n".join(output.output))
+        self.assertTrue(node.arm_sync_requested())
+        self.assertTrue(coordinator.arm_pending)
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2], server.MESSAGE_TYPE_ARM)
+
+        arm_generation, arm_at_us = self.confirm_arm(coordinator, node)
+        peak_us = arm_at_us + node.mapping.node_minus_coordinator_us + 100
+        trigger = self.build_trigger(
+            node, peak_us=peak_us, arm_generation=arm_generation,
+            detected_us=peak_us + 60_000)
+        self.assertTrue(server.process_activity_trigger(trigger, node))
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2],
+            server.MESSAGE_TYPE_START_FLUSH)
+
+    def test_trigger_after_holdover_expiry_requests_sync_and_rearm(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), auto_start=False, physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        node.mapping = server.ClockMapping(
+            10, 20, time.monotonic_ns() // 1000)
+        coordinator.register(node)
+        self.assertTrue(coordinator.request_start())
+        arm_generation, arm_at_us = self.confirm_arm(coordinator, node)
+
+        node.mapping = server.ClockMapping(
+            10, 20,
+            time.monotonic_ns() // 1000 -
+            server.CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US - 1)
+        peak_us = arm_at_us + node.mapping.node_minus_coordinator_us + 100
+        trigger = self.build_trigger(
+            node, peak_us=peak_us, arm_generation=arm_generation,
+            detected_us=peak_us + 60_000)
+        with self.assertLogs(server.LOGGER, level="WARNING") as output:
+            self.assertFalse(server.process_activity_trigger(trigger, node))
+        self.assertIn("mapping_holdover_expired", "\n".join(output.output))
+        self.assertFalse(coordinator._arm_ready)
+        self.assertTrue(node.arm_sync_requested())
+
+    def test_idle_stop_ack_with_stale_mapping_requests_sync(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        now_us = time.monotonic_ns() // 1000
+        node.mapping = server.ClockMapping(
+            0, 20,
+            now_us - server.CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US - 1)
+        coordinator.register(node)
+
+        self.assertTrue(coordinator.idle_pause())
+        stop_sequence = server.unpack_header(sock.frames[-1])[7]
+        with self.assertLogs(server.LOGGER, level="INFO") as output:
+            server.process_control_ack(build_control_ack(
+                node, server.MESSAGE_TYPE_STOP, stop_sequence), node)
+        self.assertIn(
+            "ARM_DEFERRED reason=missing_or_expired_mapping",
+            "\n".join(output.output))
+        self.assertTrue(node.arm_sync_requested())
+        self.assertFalse(coordinator.arm_pending)
+
     def test_physical_stop_disarms_triggers_until_manual_start(self):
         coordinator = server.CaptureCoordinator(
             auto_start=True, physical_mode=True)
@@ -516,6 +666,28 @@ class PhysicalIntegrationTest(unittest.TestCase):
             node, server.MESSAGE_TYPE_STOP, stop_sequence), node)
         self.assertEqual(coordinator._pending_stop_acks, {})
 
+    def test_operator_shutdown_does_not_rearm_after_stop_ack(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), physical_mode=True)
+        sock = RecordingSocket()
+        node = server.NodeControlConnection(
+            sock, 1, 101, coordinator, boot_id=0x11111111)
+        node.mapping = server.ClockMapping(
+            0, 20, time.monotonic_ns() // 1000)
+        coordinator.register(node)
+
+        coordinator.stop_all()
+        stop_sequence = server.unpack_header(sock.frames[-1])[7]
+        frame_count = len(sock.frames)
+
+        self.assertFalse(coordinator.desired_running)
+        self.assertFalse(coordinator.idle_paused)
+        server.process_control_ack(build_control_ack(
+            node, server.MESSAGE_TYPE_STOP, stop_sequence), node)
+        self.assertEqual(len(sock.frames), frame_count)
+        self.assertFalse(coordinator.arm_pending)
+        self.assertFalse(coordinator._arm_ready)
+
     def test_five_seconds_history_then_live_builds_one_two_node_window(self):
         config = server.WindowConfig(
             sample_rate_hz=50, window_us=5_000_000, hop_us=1_000_000)
@@ -571,6 +743,32 @@ class ClockSynchronizationTest(unittest.TestCase):
             result = connection.process_sync_response(
                 response, received_at_us)
         return result, received_at_us
+
+    def test_urgent_refresh_completion_automatically_sends_arm(self):
+        coordinator = server.CaptureCoordinator(
+            required_nodes=(1,), auto_start=False, physical_mode=True)
+        sock = RecordingSocket()
+        connection = server.NodeControlConnection(
+            sock, 1, 1234, coordinator, boot_id=0x11111111)
+        now_us = time.monotonic_ns() // 1000
+        connection.mapping = server.ClockMapping(
+            1_000, 20,
+            now_us - server.CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US - 1)
+        connection.last_sync_completed_us = now_us
+        coordinator.register(connection)
+
+        self.assertFalse(coordinator.request_start())
+        connection.tick(now_us + 1)
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2],
+            server.MESSAGE_TYPE_SYNC_REQ)
+
+        self.complete_sync(connection, sock, [(1_000, 100)] * 5)
+
+        self.assertFalse(connection.arm_sync_requested())
+        self.assertTrue(coordinator.arm_pending)
+        self.assertEqual(
+            server.unpack_header(sock.frames[-1])[2], server.MESSAGE_TYPE_ARM)
 
     def test_lowest_delay_mapping_drives_scheduled_start(self):
         coordinator = server.CaptureCoordinator(required_nodes=(1,))

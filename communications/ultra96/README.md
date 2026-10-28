@@ -49,6 +49,19 @@ inference-enabled `server_new.py` does this automatically after three consecutiv
 active-capture classifications whose exercise label is exactly `idle`; any
 non-idle classification resets the counter.
 
+If manual START or idle needs ARM while a validated same-Session clock mapping
+is older than 120 seconds but no older than ten minutes, the server uses it as
+a bounded holdover and arms immediately while requesting a synchronization
+refresh in the background. Missing mappings, mappings older than ten minutes,
+and new Sessions still block ARM. Rejected refreshes retry after 1, 2, 4, and
+then at most 8 seconds until synchronization succeeds or the operator manually
+stops. `ARM_USING_MAPPING_HOLDOVER` records bounded use; `ARM_DEFERRED` records
+an actual blocker and mapping ages;
+`CLOCK_SYNC_REFRESH_REQUESTED` and `CLOCK_SYNC_REFRESH_RETRY` expose recovery
+progress. Duplicate START and idle commands report `ARM_ALREADY_READY`,
+`ARM_ALREADY_PENDING`, or `IDLE_PAUSE_ALREADY_ARMED` instead of implying that a
+new command was sent.
+
 Each authorized `START_FLUSH` advances a per-connection physical capture
 generation before the command is sent. Replay and timestamp validation remain
 strict within that generation, while acquisition sequences intentionally

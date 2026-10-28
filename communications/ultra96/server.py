@@ -109,6 +109,7 @@ CLOCK_SYNC_RESPONSE_TIMEOUT_SECONDS = 1.0
 CLOCK_SYNC_MAX_DELAY_US = 500_000
 CLOCK_SYNC_MAX_ATTEMPTS = 10
 CLOCK_SYNC_INITIAL_RETRY_DELAY_SECONDS = 1.0
+CLOCK_SYNC_ARM_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0, 8.0)
 # Conservative defaults for the current Wi-Fi/TLS/relay path. Revisit these
 # during real-IMU integration using physical multi-node timing evidence.
 CLOCK_SYNC_SELECTED_ROUNDS = 3
@@ -132,6 +133,11 @@ PHYSICAL_HISTORY_DURATION_US = 5_000_000
 PHYSICAL_MAX_ACCEL_MPS2 = 160.0
 PHYSICAL_MAX_GYRO_RAD_S = 35.0
 CLOCK_MAPPING_MAX_AGE_US = int(CLOCK_SYNC_PERIOD_SECONDS * 2 * 1_000_000)
+# A validated mapping remains usable for ARM/trigger holdover in the same
+# Session while an urgent refresh continues in the background.  Ten minutes
+# covers the observed 133-365 second refresh gaps without allowing mappings to
+# survive reconnects (mappings are owned by NodeControlConnection Sessions).
+CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US = 10 * 60 * 1_000_000
 VISUALIZER_HOST = "127.0.0.1"
 VISUALIZER_PUBLISHER_PORT = 9100
 VISUALIZER_QUEUE_SIZE = 64
@@ -607,6 +613,11 @@ class NodeControlConnection:
         self.last_sync_completed_us = 0
         self.sync_attempts = 0
         self.next_sync_allowed_us = 0
+        self._arm_sync_lock = threading.Lock()
+        self._arm_sync_requested = False
+        self._arm_sync_reason = None
+        self._arm_sync_retry_index = 0
+        self._arm_sync_next_us = 0
 
     def begin_physical_capture(self):
         """Authorize a new PHYSICAL_DATA replay-validation epoch."""
@@ -623,6 +634,76 @@ class NodeControlConnection:
         """Serialize writes shared by the worker and group coordinator."""
         with self.send_lock:
             self.client.sendall(frame)
+
+    def request_arm_sync(self, reason, now_us=None):
+        """Ask the connection worker for a prompt sync needed by pending ARM."""
+        if now_us is None:
+            now_us = time.monotonic_ns() // 1000
+        with self._arm_sync_lock:
+            newly_requested = not self._arm_sync_requested
+            if newly_requested:
+                self._arm_sync_retry_index = 0
+                self._arm_sync_next_us = now_us
+            else:
+                self._arm_sync_next_us = min(self._arm_sync_next_us, now_us)
+            self._arm_sync_requested = True
+            self._arm_sync_reason = reason
+        if newly_requested:
+            log_hub(
+                logging.INFO, self.node_id,
+                f"CLOCK_SYNC_REFRESH_REQUESTED node={self.node_id} "
+                f"session={self.session_id} reason={reason}",
+            )
+        return newly_requested
+
+    def cancel_arm_sync(self):
+        """Cancel urgent retries when the operator no longer wants an ARM."""
+        with self._arm_sync_lock:
+            self._arm_sync_requested = False
+            self._arm_sync_reason = None
+            self._arm_sync_retry_index = 0
+            self._arm_sync_next_us = 0
+
+    def arm_sync_requested(self):
+        with self._arm_sync_lock:
+            return self._arm_sync_requested
+
+    def _arm_sync_due(self, now_us):
+        with self._arm_sync_lock:
+            return (self._arm_sync_requested and
+                    now_us >= self._arm_sync_next_us)
+
+    def _schedule_arm_sync_retry(self, now_us):
+        with self._arm_sync_lock:
+            if not self._arm_sync_requested:
+                return False
+            index = min(
+                self._arm_sync_retry_index,
+                len(CLOCK_SYNC_ARM_RETRY_DELAYS_SECONDS) - 1,
+            )
+            delay_seconds = CLOCK_SYNC_ARM_RETRY_DELAYS_SECONDS[index]
+            self._arm_sync_retry_index = min(
+                self._arm_sync_retry_index + 1,
+                len(CLOCK_SYNC_ARM_RETRY_DELAYS_SECONDS) - 1,
+            )
+            self._arm_sync_next_us = now_us + int(delay_seconds * 1_000_000)
+            reason = self._arm_sync_reason
+        log_hub(
+            logging.INFO, self.node_id,
+            f"CLOCK_SYNC_REFRESH_RETRY node={self.node_id} "
+            f"session={self.session_id} delay_seconds={delay_seconds:.1f} "
+            f"reason={reason}",
+        )
+        return True
+
+    def _complete_arm_sync(self):
+        with self._arm_sync_lock:
+            requested = self._arm_sync_requested
+            self._arm_sync_requested = False
+            self._arm_sync_reason = None
+            self._arm_sync_retry_index = 0
+            self._arm_sync_next_us = 0
+        return requested
 
     def begin_sync(self, now_us=None, preserve_confirmation=False):
         """Start a fresh multi-round exchange without reusing an older mapping."""
@@ -655,6 +736,8 @@ class NodeControlConnection:
     def _pause_failed_initial_sync(self, now_us):
         """Pace another initial batch while retaining an established mapping."""
         self.last_sync_completed_us = now_us
+        if self._schedule_arm_sync_retry(now_us):
+            return
         if self.mapping is None:
             self.next_sync_allowed_us = now_us + int(
                 CLOCK_SYNC_INITIAL_RETRY_DELAY_SECONDS * 1_000_000)
@@ -986,7 +1069,10 @@ class NodeControlConnection:
         if confirmation_required:
             self.begin_sync(received_at_us, preserve_confirmation=True)
         elif mapping_updated:
+            self._complete_arm_sync()
             self.coordinator.mapping_updated(self)
+        else:
+            self._pause_failed_initial_sync(received_at_us)
         return mapping
 
     def tick(self, now_us=None):
@@ -1008,7 +1094,9 @@ class NodeControlConnection:
                 )
                 self._request_another_sync_round(now_us)
             return
-        if (self.mapping is None and now_us >= self.next_sync_allowed_us):
+        if self._arm_sync_due(now_us):
+            self.begin_sync(now_us)
+        elif (self.mapping is None and now_us >= self.next_sync_allowed_us):
             self.begin_sync(now_us)
         elif (self.mapping is not None and
               now_us - self.last_sync_completed_us >=
@@ -1054,6 +1142,10 @@ class CaptureCoordinator:
         self._control_sequence = (sequence + 1) & 0xFFFFFFFF
         return sequence
 
+    def _cancel_arm_sync_locked(self):
+        for connection in self._connections.values():
+            connection.cancel_arm_sync()
+
     def register(self, connection):
         with self._lock:
             previous = self._connections.get(connection.node_id)
@@ -1076,6 +1168,7 @@ class CaptureCoordinator:
                     self._arm_ready):
                 self._stop_locked(f"Node {connection.node_id} disconnected")
             del self._connections[connection.node_id]
+            connection.cancel_arm_sync()
             self._announced_sync_sessions = None
             self._pending_start_acks.pop(connection.node_id, None)
             self._pending_stop_acks.pop(connection.node_id, None)
@@ -1098,7 +1191,9 @@ class CaptureCoordinator:
                             "BOTH_NODES_SYNCED nodes=%s sessions=%s "
                             "arming_activity_detection",
                             sorted(self.required_nodes), dict(sessions))
-                    if self.desired_running:
+                    if (self.desired_running and not self.run_active and
+                            not self.start_pending and not self.arm_pending and
+                            not self._arm_ready):
                         self._arm_locked("both nodes synchronized")
             else:
                 self._maybe_start_locked()
@@ -1150,9 +1245,29 @@ class CaptureCoordinator:
                 node_id: item.get_mapping(now_us)
                 for node_id, item in self._connections.items()
             }
-            if any(mapping is None or
-                   now_us - mapping.synchronized_at_us > CLOCK_MAPPING_MAX_AGE_US
-                   for mapping in mappings.values()):
+            unusable_nodes = []
+            mapping_ages_ms = {}
+            for node_id, mapping in mappings.items():
+                if mapping is None:
+                    unusable_nodes.append(node_id)
+                    mapping_ages_ms[node_id] = None
+                    continue
+                age_us = max(0, now_us - mapping.synchronized_at_us)
+                mapping_ages_ms[node_id] = age_us // 1000
+                if age_us > CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US:
+                    unusable_nodes.append(node_id)
+            if unusable_nodes:
+                self._arm_ready = False
+                self._armed_after_us = None
+                for node_id in unusable_nodes:
+                    self._connections[node_id].request_arm_sync(
+                        "activity trigger mapping expired", now_us)
+                LOGGER.warning(
+                    "ACTIVITY_TRIGGER_IGNORED reason=mapping_holdover_expired "
+                    "nodes=%s mapping_ages_ms=%s max_holdover_ms=%d "
+                    "rearming_after_sync",
+                    sorted(unusable_nodes), mapping_ages_ms,
+                    CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US // 1000)
                 return False
             source_mapping = mappings[connection.node_id]
             coordinator_t0_us = (
@@ -1207,20 +1322,81 @@ class CaptureCoordinator:
 
     def _arm_locked(self, reason):
         """Schedule one shared, acknowledged trigger-arm generation."""
-        if (not self.physical_mode or not self.desired_running or
-                self.run_active or self.start_pending or self.arm_pending or
-                self._arm_ready or self._pending_stop_acks or
-                set(self._connections) != self.required_nodes):
+        if not self.physical_mode:
+            LOGGER.info("ARM_DEFERRED reason=physical_mode_disabled request=%r",
+                        reason)
+            return False
+        if not self.desired_running:
+            LOGGER.info("ARM_DEFERRED reason=running_not_requested request=%r",
+                        reason)
+            return False
+        if self.run_active:
+            LOGGER.info("ARM_DEFERRED reason=already_running request=%r", reason)
+            return False
+        if self.start_pending:
+            LOGGER.info("ARM_DEFERRED reason=start_pending request=%r", reason)
+            return False
+        if self.arm_pending:
+            LOGGER.info("ARM_ALREADY_PENDING request=%r", reason)
+            return False
+        if self._arm_ready:
+            LOGGER.info(
+                "ARM_ALREADY_READY arm_generation=%d waiting_for_activity_trigger "
+                "request=%r", self._arm_generation, reason)
+            return False
+        if self._pending_stop_acks:
+            LOGGER.info(
+                "ARM_DEFERRED reason=waiting_for_stop_ack nodes=%s request=%r",
+                sorted(self._pending_stop_acks), reason)
+            return False
+        connected_nodes = set(self._connections)
+        if connected_nodes != self.required_nodes:
+            LOGGER.info(
+                "ARM_DEFERRED reason=waiting_for_nodes missing_nodes=%s "
+                "connected_nodes=%s request=%r",
+                sorted(self.required_nodes - connected_nodes),
+                sorted(connected_nodes), reason)
             return False
         now_us = time.monotonic_ns() // 1000
         mappings = {
             node_id: item.get_mapping(now_us)
             for node_id, item in self._connections.items()
         }
-        if any(mapping is None or
-               now_us - mapping.synchronized_at_us > CLOCK_MAPPING_MAX_AGE_US
-               for mapping in mappings.values()):
+        holdover_nodes = []
+        unusable_nodes = []
+        mapping_ages_ms = {}
+        for node_id, mapping in mappings.items():
+            if mapping is None:
+                unusable_nodes.append(node_id)
+                mapping_ages_ms[node_id] = None
+                continue
+            age_us = max(0, now_us - mapping.synchronized_at_us)
+            mapping_ages_ms[node_id] = age_us // 1000
+            if age_us > CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US:
+                unusable_nodes.append(node_id)
+            elif age_us > CLOCK_MAPPING_MAX_AGE_US:
+                holdover_nodes.append(node_id)
+        refresh_nodes = sorted(set(holdover_nodes + unusable_nodes))
+        for node_id in refresh_nodes:
+            self._connections[node_id].request_arm_sync(
+                "ARM mapping holdover refresh", now_us)
+        if unusable_nodes:
+            LOGGER.info(
+                "ARM_DEFERRED reason=missing_or_expired_mapping nodes=%s "
+                "mapping_ages_ms=%s max_holdover_ms=%d request=%r",
+                sorted(unusable_nodes), mapping_ages_ms,
+                CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US // 1000, reason)
             return False
+        if holdover_nodes:
+            LOGGER.warning(
+                "ARM_USING_MAPPING_HOLDOVER nodes=%s mapping_ages_ms=%s "
+                "fresh_age_ms=%d max_holdover_ms=%d "
+                "background_refresh=true request=%r",
+                sorted(holdover_nodes), mapping_ages_ms,
+                CLOCK_MAPPING_MAX_AGE_US // 1000,
+                CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US // 1000, reason)
+        else:
+            self._cancel_arm_sync_locked()
         sequence = self._next_sequence()
         self._arm_generation = (self._arm_generation + 1) & 0xFFFFFFFF
         if self._arm_generation == 0:
@@ -1300,6 +1476,7 @@ class CaptureCoordinator:
         return True
 
     def _stop_locked(self, reason):
+        self._cancel_arm_sync_locked()
         if self._pending_arm_acks:
             self._cancelled_arm_sequence = next(
                 iter(self._pending_arm_acks.values()))
@@ -1499,6 +1676,11 @@ class CaptureCoordinator:
 
     def stop_all(self, reason="operator shutdown"):
         with self._lock:
+            # Shutdown is terminal, unlike an idle pause.  Clear the resume
+            # intent before STOP acknowledgements can drive the normal
+            # stop-then-ARM transition.
+            self.desired_running = False
+            self.idle_paused = False
             self._stop_locked(reason)
 
     def request_start(self):
@@ -1510,12 +1692,8 @@ class CaptureCoordinator:
                 started = self._arm_locked("manual START")
             else:
                 started = self._maybe_start_locked()
-        if not started:
-            if self.physical_mode:
-                LOGGER.info(
-                    "START_REQUESTED waiting_for_stop_ack_or_synchronization")
-            else:
-                LOGGER.info("START_REQUESTED waiting_for_both_synchronized_nodes")
+        if not started and not self.physical_mode:
+            LOGGER.info("START_REQUESTED waiting_for_both_synchronized_nodes")
         return started
 
     def manual_stop(self):
@@ -1524,6 +1702,7 @@ class CaptureCoordinator:
             self.desired_running = False
             self.idle_paused = False
             self._armed_after_us = None
+            self._cancel_arm_sync_locked()
             if self._pending_stop_acks and not self.run_active and not self.start_pending:
                 LOGGER.info("MANUAL_STOP_DISARMED pending_stop_acknowledgements")
                 return
@@ -1540,8 +1719,15 @@ class CaptureCoordinator:
                 LOGGER.warning("IDLE_PAUSE_IGNORED physical_mode_is_disabled")
                 return False
             if self.idle_paused and not self.run_active and not self.start_pending:
-                LOGGER.info("IDLE_PAUSE_ALREADY_ARMED")
-                return False
+                if self._arm_ready:
+                    LOGGER.info(
+                        "IDLE_PAUSE_ALREADY_ARMED arm_generation=%d",
+                        self._arm_generation)
+                    return False
+                if self.arm_pending:
+                    LOGGER.info("IDLE_PAUSE_ALREADY_ARMING")
+                    return False
+                return self._arm_locked("AI idle pause retry")
             self.desired_running = True
             self.idle_paused = True
             self._stop_locked("AI idle pause")
