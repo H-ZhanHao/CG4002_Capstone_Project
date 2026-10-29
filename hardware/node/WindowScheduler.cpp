@@ -79,9 +79,14 @@ bool WindowScheduler::update(uint32_t now, const SensorHistory& history) {
 bool WindowScheduler::take(ScheduledWindow& destination) {
   if (!status_.queued) return false;
   const ScheduledWindow& slot = queue_[head_];
-  destination.info = slot.info;
   if (slot.info.window.copied())
     memcpy(destination.samples, slot.samples, slot.info.window.count * sizeof(SensorSample));
+  return discard(destination.info);
+}
+
+bool WindowScheduler::discard(ScheduledWindowInfo& destination) {
+  if (!status_.queued) return false;
+  destination = queue_[head_].info;
   head_ = (head_ + 1) % WindowSchedulerConfig::QUEUE_CAPACITY;
   --status_.queued;
   return true;

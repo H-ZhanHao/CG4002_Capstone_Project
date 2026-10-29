@@ -62,13 +62,13 @@ local uptime in milliseconds (timestamped at read start), acceleration XYZ in
 m/s2 including gravity, and gyro XYZ in rad/s. Values are saved before exercise
 filtering or gyro correction. Failed reads do not insert zero or stale samples.
 
-SensorHistoryConfig in SensorHistory.h sets a 3000 ms window and 8000 ms retention.
-At the configured 100 Hz this uses 801 ring slots, about 22 KB. The manual window
-command shares a static 302-sample scratch snapshot (about 8.5 KB); neither array
-uses the main task stack. Data is in RAM only and is lost on reboot. ACTIVATE,
-STANDBY, RESET, exercise changes and mode changes preserve this history and the
-sampling cadence. Generic peak detection is described below; automatic window
-transmission is not implemented yet.
+SensorHistoryConfig in SensorHistory.h sets a 3000 ms window and 7000 ms retention.
+At the configured 100 Hz this uses 701 ring slots, about 19.6 KB. The manual window
+command inspects metadata directly without allocating a full sample snapshot.
+The history array is static, off the main task stack. Data is in RAM only and is
+lost on reboot. ACTIVATE, STANDBY, RESET, exercise changes and mode changes preserve
+this history and the sampling cadence. Generic peak detection is described below;
+automatic window transmission is not implemented yet.
 
 Bench inspection, on each board's USB or Bluetooth serial monitor:
 1. Send BUFFER after boot. It reports the node, stored sample count, oldest/newest
@@ -76,17 +76,19 @@ Bench inspection, on each board's USB or Bluetooth serial monitor:
 2. Send WINDOW before three seconds of samples are available. Expect EMPTY or
    INSUFFICIENT_HISTORY. No samples are padded or invented.
 3. After at least three seconds of successful sampling, send WINDOW again. It
-   copies [latest sample time - 3000, latest sample time] and prints a summary.
+   inspects [latest sample time - 3000, latest sample time] and prints a summary.
    READY means enough history with no gap greater than 20 ms. SAMPLE_GAP means
-   the actual samples were copied, but at least one interval/edge gap exceeds
+   the actual samples are present, but at least one interval/edge gap exceeds
    20 ms. max_gap_ms reports the largest gap; smaller jitter is not resampled.
    At exactly 100 Hz with both endpoints included, there are 301 samples. With
    real timing jitter or a t0 between samples, counts/endpoints can differ.
 4. To simulate a delayed trigger, note newest_ms from BUFFER and send
    WINDOW:<that timestamp>, for example WINDOW:12000. This selects [9000,12000]
    regardless of when the command arrives, provided those times are retained.
-   At nominal cadence, the extra history allows up to five seconds of delay,
+   At nominal cadence, the extra history allows up to four seconds of delay,
    shared between peak confirmation and any later trigger/transport handling.
+   Peak confirmation is capped at 2500 ms, leaving at least 1500 ms for delivery
+   at that limit. This is a budget, not a guarantee of real transport latency.
    END_NOT_AVAILABLE means t0 is newer than the last successful sample.
    INSUFFICIENT_HISTORY means the requested history is unavailable/expired.
 5. RESET or change the exercise, then repeat WINDOW. The history should remain.
@@ -185,8 +187,8 @@ If the loop stalls, at most the three most recent due slots are caught up, one
 per update; older slots increment skipped. Sequence numbers retain their original
 positions, so missing windows remain visible. The cadence never shifts to now.
 
-There is a FIFO queue of three snapshots (about 25.5 KB), in addition to the 22 KB
-history ring and 8.5 KB shared diagnostic scratch. All large arrays are static.
+There is a FIFO queue of three snapshots (about 25.5 KB), in addition to the 19.6 KB
+history ring. Diagnostics need no full-window scratch. All large arrays are static.
 Each snapshot holds 302 samples at the configured 100 Hz: 301 inclusive samples
 plus one for boundary timing jitter. If an interval exceeds that capacity, its
 record reports OUTPUT_TOO_SMALL with no payload; samples are never truncated.
@@ -317,7 +319,7 @@ Clock measurement and translation:
   target_local_t0 = coordinator_t0 + target_offset.
   Thus different printed t0 numbers may describe the same physical instant.
 - Node clocks continue unchanged; no clock is reset. All time arithmetic assumes
-  intervals less than 2^31 ms. The eight-second ring allows about five seconds
+  intervals less than 2^31 ms. The seven-second ring allows about four seconds
   for peak confirmation PLUS coordination/delivery delay. A late JOIN reports
   INSUFFICIENT_HISTORY rather than inventing/reanchoring the first window; subsequent
   windows can recover. A coordinator must handle these data-quality failures.

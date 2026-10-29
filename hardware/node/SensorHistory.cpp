@@ -28,6 +28,22 @@ bool SensorHistory::push(const SensorSample& sample) {
 
 SensorWindowResult SensorHistory::extract(uint32_t endMs, SensorSample* destination,
                                          size_t capacity) const {
+  SensorWindowResult result = inspect(endMs, capacity);
+  if (!result.copied()) return result;
+  if (!destination) {
+    result.status = SensorWindowStatus::OUTPUT_TOO_SMALL;
+    return result;
+  }
+  size_t copied = 0;
+  for (size_t i = 0; i < count_; ++i) {
+    const SensorSample& sample = at(i);
+    if (endMs - sample.timestampMs <= SensorHistoryConfig::WINDOW_MS)
+      destination[copied++] = sample;
+  }
+  return result;
+}
+
+SensorWindowResult SensorHistory::inspect(uint32_t endMs, size_t capacity) const {
   SensorWindowResult result;
   result.endMs = endMs;
   result.startMs = endMs - SensorHistoryConfig::WINDOW_MS;
@@ -58,15 +74,9 @@ SensorWindowResult SensorHistory::extract(uint32_t endMs, SensorSample* destinat
     result.status = SensorWindowStatus::INSUFFICIENT_HISTORY;
     return result;
   }
-  if (!destination || capacity < result.count) {
+  if (capacity < result.count) {
     result.status = SensorWindowStatus::OUTPUT_TOO_SMALL;
     return result;
-  }
-  size_t copied = 0;
-  for (size_t i = 0; i < count_; ++i) {
-    const SensorSample& sample = at(i);
-    if (endMs - sample.timestampMs <= SensorHistoryConfig::WINDOW_MS)
-      destination[copied++] = sample;
   }
   result.status = result.maxGapMs > SensorHistoryConfig::MAX_GAP_MS
     ? SensorWindowStatus::SAMPLE_GAP : SensorWindowStatus::READY;

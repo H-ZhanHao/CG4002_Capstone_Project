@@ -42,6 +42,9 @@ int main() {
   assert(!scheduler.update(6000, history));
   frame.info.sequence = 99;
   assert(!scheduler.take(frame) && frame.info.sequence == 99);
+  ScheduledWindowInfo discarded;
+  discarded.sequence = 99;
+  assert(!scheduler.discard(discarded) && discarded.sequence == 99);
 
   // A delayed peak still captures t0 first, then catches up on the original grid.
   fill(history, 0, 7500);
@@ -55,8 +58,11 @@ int main() {
   scheduler.arm();
   assert(scheduler.status().state == WindowStreamState::RUNNING);
   assert(scheduler.update(7500, history));
-  assert(scheduler.take(frame));
-  checkWindow(frame, 1, 1, 5000, 6000);
+  assert(scheduler.discard(discarded));
+  assert(discarded.session == 1 && discarded.sequence == 1 && discarded.triggerMs == 5000);
+  assert(discarded.window.status == SensorWindowStatus::READY && discarded.window.count == 151);
+  assert(discarded.window.startMs == 3000 && discarded.window.endMs == 6000);
+  assert(scheduler.status().queued == 0);
   assert(scheduler.update(7500, history));
   assert(scheduler.take(frame));
   checkWindow(frame, 1, 2, 5000, 7000);

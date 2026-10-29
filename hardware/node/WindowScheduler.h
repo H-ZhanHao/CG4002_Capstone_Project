@@ -59,6 +59,9 @@ class WindowScheduler {
   // Copy before removing; the caller owns the result. False leaves it unchanged.
   // Use static/heap storage on ESP32: a full snapshot is larger than the task stack.
   bool take(ScheduledWindow& destination);
+  // Diagnostic consumer: remove the oldest window and return only its metadata.
+  // False leaves destination unchanged. Sample payload is discarded.
+  bool discard(ScheduledWindowInfo& destination);
   WindowStreamStatus status() const { return status_; }
   const WindowPreparation& lastPreparation() const { return last_; }
 

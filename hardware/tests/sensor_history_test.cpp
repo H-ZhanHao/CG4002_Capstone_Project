@@ -44,19 +44,26 @@ int main() {
   assert(result.status == SensorWindowStatus::OUTPUT_TOO_SMALL && result.count == 301);
   assert(!result.copied() && window[0].timestampMs == 123);
   assert(history.extract(3000, nullptr, capacity).status == SensorWindowStatus::OUTPUT_TOO_SMALL);
+  const auto summary = history.inspect(3000, capacity);
+  assert(summary.status == SensorWindowStatus::READY && summary.count == 301);
+  assert(summary.startMs == 0 && summary.endMs == 3000);
+  assert(summary.firstMs == 0 && summary.lastMs == 3000 && summary.maxGapMs == 10);
+  assert(history.inspect(3000, 300).status == SensorWindowStatus::OUTPUT_TOO_SMALL);
+  assert(history.inspect(3010, capacity).status == SensorWindowStatus::END_NOT_AVAILABLE);
+  assert(history.size() == 301 && window[0].timestampMs == 123);
 
-  // Repeated physical ring wrap; a trigger delayed by five seconds still fits.
+  // Repeated physical ring wrap; four seconds of combined detection/delivery delay.
   for (uint32_t t = 3010; t <= 40000; t += 10) assert(history.push(sample(t)));
-  assert(history.size() == capacity && history.oldestMs() == 32000 && history.newestMs() == 40000);
-  result = history.extract(35000, window, capacity);
+  assert(history.size() == capacity && history.oldestMs() == 33000 && history.newestMs() == 40000);
+  result = history.extract(36000, window, capacity);
   assert(result.status == SensorWindowStatus::READY && result.count == 301);
-  assert(window[0].timestampMs == 32000 && window[300].timestampMs == 35000);
-  assert(history.extract(34999, window, capacity).status == SensorWindowStatus::INSUFFICIENT_HISTORY);
+  assert(window[0].timestampMs == 33000 && window[300].timestampMs == 36000);
+  assert(history.extract(35999, window, capacity).status == SensorWindowStatus::INSUFFICIENT_HISTORY);
   assert(history.extract(40001, window, capacity).status == SensorWindowStatus::END_NOT_AVAILABLE);
   // New writes must not mutate a previously copied snapshot.
   for (uint32_t t = 40010; t <= 50000; t += 10) assert(history.push(sample(t)));
-  assert(window[0].timestampMs == 32000 && window[300].timestampMs == 35000);
-  assert(history.extract(35000, window, capacity).status == SensorWindowStatus::INSUFFICIENT_HISTORY);
+  assert(window[0].timestampMs == 33000 && window[300].timestampMs == 36000);
+  assert(history.extract(36000, window, capacity).status == SensorWindowStatus::INSUFFICIENT_HISTORY);
 
   // Invalid samples and bad timestamps cannot replace good history.
   const size_t before = history.size();
@@ -78,6 +85,9 @@ int main() {
   result = history.extract(8000, window, capacity);
   assert(result.status == SensorWindowStatus::SAMPLE_GAP && result.copied());
   assert(result.count == 271 && result.maxGapMs == 310);
+  const auto gapSummary = history.inspect(8000, capacity);
+  assert(gapSummary.status == result.status && gapSummary.count == result.count);
+  assert(gapSummary.maxGapMs == result.maxGapMs);
   for (size_t i = 0; i < result.count; ++i)
     assert(window[i].timestampMs < 6000 || window[i].timestampMs >= 6300);
   assert(history.push(sample(20000))); // Long outage expires old history.

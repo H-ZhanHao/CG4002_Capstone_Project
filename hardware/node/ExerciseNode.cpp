@@ -31,8 +31,6 @@ GenericPeakEvent pendingGenericPeak;
 bool genericPeakPending = false;
 WindowScheduler windowScheduler;
 NodeStreamControl streamControl(windowScheduler, sensorHistory);
-// Shared diagnostic scratch: keep full sensor windows off the ESP-IDF task stack.
-ScheduledWindow windowScratch;
 
 ExerciseSettings genericSettings = getGenericSettings();
 
@@ -268,7 +266,7 @@ void reportBuffer(unsigned long now) {
 
 void reportWindow(uint32_t endMs) {
   // Only a small summary is printed; never dump hundreds of samples in update().
-  const SensorWindowResult result = copySensorWindow(endMs, windowScratch.samples, WindowSchedulerConfig::SAMPLE_CAPACITY);
+  const SensorWindowResult result = sensorHistory.inspect(endMs, WindowSchedulerConfig::SAMPLE_CAPACITY);
   char line[220];
   snprintf(line, sizeof(line),
     "[WINDOW | %s | %s | start_ms=%lu | t0_ms=%lu | samples=%u | first_ms=%lu | last_ms=%lu | max_gap_ms=%lu]",
@@ -420,12 +418,12 @@ void processCommand(char* command, unsigned long now) {
     return;
   }
   if (!strcmp(text, "STREAM:NEXT")) {
-    if (!takeSensorWindow(windowScratch)) {
+    ScheduledWindowInfo info;
+    if (!windowScheduler.discard(info)) {
       wirelessStreamer.message("[FRAME TAKEN | EMPTY]");
       return;
     }
     char line[192];
-    const ScheduledWindowInfo& info = windowScratch.info;
     snprintf(line, sizeof(line),
       "[FRAME TAKEN | %s | coord=%lu | session=%lu | seq=%lu | %s | start_ms=%lu | end_ms=%lu | samples=%u]",
       nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)info.coordinator, (unsigned long)info.session, (unsigned long)info.sequence,
