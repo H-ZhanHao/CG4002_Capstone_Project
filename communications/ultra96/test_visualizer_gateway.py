@@ -16,8 +16,10 @@ import websockets
 
 from visualizer_gateway import (
     COLOR_RESET,
+    EXERCISE_SWITCH_THRESHOLD,
     MAX_PUBLISHER_LINE_BYTES,
     VISUALIZER_SENT_COLOR,
+    ExerciseSwitchFilter,
     GatewayConfig,
     VisualizerColorFormatter,
     VisualizerGateway,
@@ -50,6 +52,58 @@ class VisualizerColorFormatterTests(unittest.TestCase):
         self.assertEqual(plain_formatter.format(self._record(sent)), sent)
         connected = "Unity visualizer connected from ('127.0.0.1', 12345)"
         self.assertEqual(color_formatter.format(self._record(connected)), connected)
+
+
+class ExerciseSwitchFilterTests(unittest.TestCase):
+    """Verify that noisy classifications cannot immediately change the UI."""
+
+    @staticmethod
+    def _message(run_id, seq, exercise):
+        return build_message(
+            run_id=run_id, seq=seq, ts_us=seq, exercise=exercise
+        )
+
+    def setUp(self):
+        self.filter = ExerciseSwitchFilter()
+
+    def test_first_exercise_and_confirmed_repetitions_pass_immediately(self):
+        self.assertTrue(self.filter.accept(self._message(1, 0, "push_up")))
+        self.assertTrue(self.filter.accept(self._message(1, 1, "push_up")))
+
+    def test_two_different_classifications_are_suppressed(self):
+        self.filter.accept(self._message(1, 0, "push_up"))
+        self.assertFalse(self.filter.accept(self._message(1, 1, "jumping_jack")))
+        self.assertFalse(self.filter.accept(self._message(1, 2, "jumping_jack")))
+
+    def test_third_consecutive_classification_confirms_switch(self):
+        self.filter.accept(self._message(1, 0, "push_up"))
+        decisions = [
+            self.filter.accept(self._message(1, seq, "jumping_jack"))
+            for seq in range(1, EXERCISE_SWITCH_THRESHOLD + 1)
+        ]
+        self.assertEqual(decisions, [False, False, True])
+        self.assertTrue(
+            self.filter.accept(self._message(1, 4, "jumping_jack"))
+        )
+
+    def test_confirmed_label_cancels_pending_switch(self):
+        self.filter.accept(self._message(1, 0, "push_up"))
+        self.assertFalse(self.filter.accept(self._message(1, 1, "jumping_jack")))
+        self.assertFalse(self.filter.accept(self._message(1, 2, "jumping_jack")))
+        self.assertTrue(self.filter.accept(self._message(1, 3, "push_up")))
+        self.assertFalse(self.filter.accept(self._message(1, 4, "jumping_jack")))
+
+    def test_different_candidate_restarts_streak(self):
+        self.filter.accept(self._message(1, 0, "push_up"))
+        self.assertFalse(self.filter.accept(self._message(1, 1, "jumping_jack")))
+        self.assertFalse(self.filter.accept(self._message(1, 2, "squat")))
+        self.assertFalse(self.filter.accept(self._message(1, 3, "squat")))
+        self.assertTrue(self.filter.accept(self._message(1, 4, "squat")))
+
+    def test_new_run_resets_filter_and_passes_first_exercise(self):
+        self.filter.accept(self._message(1, 0, "push_up"))
+        self.assertFalse(self.filter.accept(self._message(1, 1, "jumping_jack")))
+        self.assertTrue(self.filter.accept(self._message(2, 0, "jumping_jack")))
 
 
 class VisualizerGatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -107,14 +161,33 @@ class VisualizerGatewayTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+    async def test_gateway_exposes_switch_only_on_third_consecutive_result(self):
+        self.assertTrue(self.gateway.publish(
+            build_message(run_id=1, seq=0, ts_us=0, exercise="push_up")
+        ))
+        retained = self.gateway.updates.latest
+
+        self.assertFalse(self.gateway.publish(
+            build_message(run_id=1, seq=1, ts_us=1, exercise="jumping_jack")
+        ))
+        self.assertFalse(self.gateway.publish(
+            build_message(run_id=1, seq=2, ts_us=2, exercise="jumping_jack")
+        ))
+        self.assertEqual(self.gateway.updates.latest, retained)
+
+        self.assertTrue(self.gateway.publish(
+            build_message(run_id=1, seq=3, ts_us=3, exercise="jumping_jack")
+        ))
+        self.assertEqual(json.loads(self.gateway.updates.latest)["seq"], 3)
+
     async def test_newest_update_replaces_pending_update_for_slow_client(self):
         self.gateway.publish(build_message(run_id=1, seq=0, ts_us=0, exercise="unknown"))
         client = await self._connect()
         try:
             self.assertEqual(json.loads(await client.recv())["seq"], 0)
-            self.gateway.publish(build_message(run_id=1, seq=1, ts_us=1, exercise="squat"))
+            self.gateway.publish(build_message(run_id=1, seq=1, ts_us=1, exercise="unknown"))
             await asyncio.sleep(0.02)
-            self.gateway.publish(build_message(run_id=1, seq=2, ts_us=2, exercise="push_up"))
+            self.gateway.publish(build_message(run_id=1, seq=2, ts_us=2, exercise="unknown"))
             received = json.loads(await asyncio.wait_for(client.recv(), 1.0))
             self.assertEqual(received["seq"], 2)
         finally:
@@ -127,11 +200,14 @@ class VisualizerGatewayTests(unittest.IsolatedAsyncioTestCase):
         await first.close()
         await asyncio.sleep(0.05)
 
-        self.gateway.publish(build_message(run_id=8, seq=11, ts_us=11, exercise="push_up"))
+        for seq in (11, 12, 13):
+            self.gateway.publish(
+                build_message(run_id=8, seq=seq, ts_us=seq, exercise="push_up")
+            )
         second = await self._connect()
         try:
             received = json.loads(await asyncio.wait_for(second.recv(), 1.0))
-            self.assertEqual(received["seq"], 11)
+            self.assertEqual(received["seq"], 13)
         finally:
             await second.close()
 
