@@ -1,10 +1,10 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
 #include "NodeTypes.h"
 
 namespace NodeConfig {
-  // Roles are fixed in hip/hip.ino and wrist/wrist.ino; no role edits needed here.
+  // Roles are selected by the PlatformIO environment; no role edits needed here.
 
   // Enter each board's Wi-Fi STA MAC, printed on its USB monitor at startup.
   // Bluetooth MAC addresses are different. Zero addresses disable the peer link
@@ -57,16 +57,26 @@ inline ExerciseSettings getGenericSettings() {
 }
 
 namespace GeneralConfig {
-  constexpr int LED_PIN = LED_BUILTIN;
-  constexpr int LED_ON = HIGH;
-  constexpr int LED_OFF = LOW;
+  // Original FireBeetle ESP32 GPIO numbers (not printed D-pin numbers).
+  constexpr int LED_PIN = 2;
+  constexpr int LED_ON = 1;
+  constexpr int LED_OFF = 0;
+  constexpr int I2C_SDA_PIN = 21;
+  constexpr int I2C_SCL_PIN = 22;
+  constexpr uint8_t MPU6050_ADDRESS = 0x68;
 
-  constexpr unsigned long SAMPLE_INTERVAL_US = 20000;
+  constexpr unsigned long SAMPLE_INTERVAL_US = 10000;
   // Same USB/Bluetooth output cadence as the remote baseline.
   constexpr unsigned long OUTPUT_INTERVAL_MS = 100;
 
   constexpr float FILTER_ALPHA = 0.20f;
 
+  // Nominal sensor references: preset startup never waits for stillness.
+  // These are assumptions, not measured offsets; verify with the worn sensors.
+  constexpr float GRAVITY_MPS2 = 9.81f;
+  constexpr float GYRO_BIAS_RAD_S[3] = {0.0f, 0.0f, 0.0f};
+
+  // Retained for the legacy calibration API/tests, not firmware startup.
   constexpr unsigned long BASELINE_TIME_MS = 3000;
   constexpr int REQUIRED_STABLE_REPS = 2;
 
@@ -76,10 +86,6 @@ namespace GeneralConfig {
   constexpr unsigned long QUIET_TIME_MS = 350;
   // Includes the quiet period that completes a movement.
   constexpr unsigned long MIN_REP_GAP_MS = 300;
-
-  constexpr float POSITIONING_MOVEMENT_GYRO = 0.30f;
-  constexpr float STATIONARY_MAX_GYRO = 0.15f;
-  constexpr float STATIONARY_MAX_ACCEL_CHANGE = 0.05f;
 
   constexpr unsigned long CALIBRATION_LED_OFF_MS = 200;
   // Mirrored ready/rep pulse durations are shared in NodeSession.h: LedTiming.
@@ -121,7 +127,7 @@ namespace ContinuousConfig {
 }
 
 namespace FallConfig {
-  constexpr int BUZZER_PIN = D3;
+  constexpr int BUZZER_PIN = 26; // FireBeetle D3
 
   constexpr float FREE_FALL_THRESHOLD = 4.0f;
   constexpr unsigned long FREE_FALL_MIN_TIME_MS = 100;

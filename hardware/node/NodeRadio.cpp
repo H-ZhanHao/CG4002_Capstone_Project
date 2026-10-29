@@ -1,7 +1,9 @@
 #include "NodeRadio.h"
 #include "ExerciseConfig.h"
 
-#include <WiFi.h>
+#include "NodePlatform.h"
+#include <esp_event.h>
+#include <esp_netif.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_idf_version.h>
@@ -49,15 +51,22 @@ namespace {
 
 bool NodeRadio::begin(NodeRole nodeRole) {
   role = nodeRole;
-  if (!WiFi.mode(WIFI_STA)) return false;
-  Serial.printf("[Role: %s | Wi-Fi STA MAC: %s | ESP-NOW channel: %u]\n",
-    role == HIP ? "HIP" : "WRIST", WiFi.macAddress().c_str(), NodeConfig::RADIO_CHANNEL);
+  if (esp_netif_init() != ESP_OK || esp_event_loop_create_default() != ESP_OK) return false;
+  if (!esp_netif_create_default_wifi_sta()) return false;
+  wifi_init_config_t wifi = WIFI_INIT_CONFIG_DEFAULT();
+  if (esp_wifi_init(&wifi) != ESP_OK ||
+      esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK ||
+      esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
+      esp_wifi_start() != ESP_OK) return false;
   uint8_t ownMac[6];
-  WiFi.macAddress(ownMac);
+  if (esp_wifi_get_mac(WIFI_IF_STA, ownMac) != ESP_OK) return false;
+  usbConsole.printf("[Role: %s | Wi-Fi STA MAC: %02X:%02X:%02X:%02X:%02X:%02X | ESP-NOW channel: %u]\n",
+    role == HIP ? "HIP" : "WRIST", ownMac[0], ownMac[1], ownMac[2],
+    ownMac[3], ownMac[4], ownMac[5], NodeConfig::RADIO_CHANNEL);
   const uint8_t* peer = peerMac();
   const uint8_t zero[6] = {};
   if (!memcmp(peer, zero, 6) || (peer[0] & 1) || !memcmp(peer, ownMac, 6)) {
-    Serial.println("[ESP-NOW disabled: enter the OTHER board's Wi-Fi STA MAC in ExerciseConfig.h]");
+    usbConsole.println("[ESP-NOW disabled: enter the OTHER board's Wi-Fi STA MAC in ExerciseConfig.h]");
     return false;
   }
   if (esp_wifi_set_channel(NodeConfig::RADIO_CHANNEL, WIFI_SECOND_CHAN_NONE) != ESP_OK) return false;
@@ -75,7 +84,7 @@ bool NodeRadio::begin(NodeRole nodeRole) {
       esp_now_register_recv_cb(onReceive) != ESP_OK ||
       esp_now_register_send_cb(onSent) != ESP_OK) return false;
   started = true;
-  Serial.println("[ESP-NOW ready; activation, mode and LED events; no heartbeats or sensor streaming]");
+  usbConsole.println("[ESP-NOW ready; activation, mode and LED events; no heartbeats or sensor streaming]");
   return true;
 }
 

@@ -1,0 +1,506 @@
+/**
+ * @file protocol.h
+ * @brief Public interface for the ESP32–Ultra96 application protocol.
+ *
+ * Version 1 DATA messages contain a 24-byte fixed header followed by a
+ * 14-byte IMU payload, producing a 38-byte frame.
+ *
+ * All multibyte fields are serialized in network byte order. Callers pass
+ * logical IMU samples to the encoder and must not send in-memory structures
+ * directly because structure layout and host byte order are not portable.
+ */
+
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "imu_source.h"
+
+#define PROTOCOL_MAGIC                  0xA55A
+#define PROTOCOL_VERSION                1
+#define PROTOCOL_MESSAGE_TYPE_HELLO     0x01
+#define PROTOCOL_MESSAGE_TYPE_HELLO_ACK 0x02
+#define PROTOCOL_MESSAGE_TYPE_SYNC_REQ  0x03
+#define PROTOCOL_MESSAGE_TYPE_SYNC_RESP 0x04
+#define PROTOCOL_MESSAGE_TYPE_ACTIVITY_TRIGGER 0x05
+#define PROTOCOL_MESSAGE_TYPE_START_FLUSH 0x06
+#define PROTOCOL_MESSAGE_TYPE_START     0x07
+#define PROTOCOL_MESSAGE_TYPE_STOP      0x08
+#define PROTOCOL_MESSAGE_TYPE_CONTROL_ACK 0x09
+#define PROTOCOL_MESSAGE_TYPE_ARM       0x0A
+#define PROTOCOL_MESSAGE_TYPE_DATA      0x10
+#define PROTOCOL_MESSAGE_TYPE_HEARTBEAT 0x11
+#define PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA 0x12
+#define PROTOCOL_MESSAGE_TYPE_TEST_REQUEST 0x20
+#define PROTOCOL_MESSAGE_TYPE_TEST_RESPONSE 0x21
+#define PROTOCOL_MESSAGE_TYPE_BENCHMARK_CONTROL 0x22
+#define PROTOCOL_MESSAGE_TYPE_BENCHMARK_REPORT 0x23
+#define PROTOCOL_MESSAGE_TYPE_FILE_BEGIN 0x30
+#define PROTOCOL_MESSAGE_TYPE_FILE_CHUNK 0x31
+#define PROTOCOL_MESSAGE_TYPE_FILE_END 0x32
+#define PROTOCOL_MESSAGE_TYPE_FILE_RESULT 0x33
+#define PROTOCOL_MESSAGE_TYPE_ERROR     0x7F
+#define PROTOCOL_HEADER_SIZE             24
+#define PROTOCOL_HELLO_PAYLOAD_SIZE      44
+#define PROTOCOL_HELLO_ACK_PAYLOAD_SIZE 0
+#define PROTOCOL_SYNC_REQ_PAYLOAD_SIZE   8
+#define PROTOCOL_SYNC_RESP_PAYLOAD_SIZE 24
+#define PROTOCOL_ACTIVITY_TRIGGER_PAYLOAD_SIZE 16
+#define PROTOCOL_START_FLUSH_PAYLOAD_SIZE 28
+#define PROTOCOL_START_PAYLOAD_SIZE     16
+#define PROTOCOL_STOP_PAYLOAD_SIZE       0
+#define PROTOCOL_CONTROL_ACK_PAYLOAD_SIZE 16
+#define PROTOCOL_ARM_PAYLOAD_SIZE       20
+#define PROTOCOL_DATA_PAYLOAD_SIZE       14
+#define PROTOCOL_PHYSICAL_DATA_PAYLOAD_SIZE 26
+#define PROTOCOL_HEARTBEAT_PAYLOAD_SIZE  6
+#define PROTOCOL_ERROR_PAYLOAD_SIZE      4
+#define PROTOCOL_ERROR_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_ERROR_PAYLOAD_SIZE)
+
+#define PROTOCOL_ERROR_INVALID_SESSION       4
+#define PROTOCOL_ERROR_UNAUTHORIZED_NODE     5
+#define PROTOCOL_ERROR_INVALID_FRAME         6
+#define PROTOCOL_ERROR_UNEXPECTED_MESSAGE    7
+#define PROTOCOL_ERROR_SEQUENCE_REUSE        8
+#define PROTOCOL_TEST_PAYLOAD_SIZE        PROTOCOL_DATA_PAYLOAD_SIZE
+#define PROTOCOL_BENCHMARK_CONTROL_PAYLOAD_SIZE 8
+#define PROTOCOL_BENCHMARK_REPORT_PAYLOAD_SIZE 24
+#define PROTOCOL_FILE_BEGIN_PAYLOAD_SIZE  44
+#define PROTOCOL_FILE_CHUNK_PREFIX_SIZE   16
+#define PROTOCOL_FILE_END_PAYLOAD_SIZE    40
+#define PROTOCOL_FILE_RESULT_PAYLOAD_SIZE 44
+#define PROTOCOL_SHA256_SIZE               32
+#define PROTOCOL_FILE_CHUNK_MAX_DATA_SIZE \
+    (PROTOCOL_MAX_PAYLOAD_SIZE - PROTOCOL_FILE_CHUNK_PREFIX_SIZE)
+#define PROTOCOL_DEVICE_TOKEN_SIZE       32
+#define PROTOCOL_MAX_PAYLOAD_SIZE        1024
+#define PROTOCOL_MAX_FRAME_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_MAX_PAYLOAD_SIZE)
+
+/** Total size of a version-1 DATA frame. */
+#define PROTOCOL_DATA_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_DATA_PAYLOAD_SIZE)
+#define PROTOCOL_PHYSICAL_DATA_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_PHYSICAL_DATA_PAYLOAD_SIZE)
+#define PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_ACTIVITY_TRIGGER_PAYLOAD_SIZE)
+
+/** Total size of a version-1 HEARTBEAT frame. */
+#define PROTOCOL_HEARTBEAT_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_HEARTBEAT_PAYLOAD_SIZE)
+
+/** Total size of a version-1 HELLO frame. */
+#define PROTOCOL_HELLO_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_HELLO_PAYLOAD_SIZE)
+
+#define PROTOCOL_TEST_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_TEST_PAYLOAD_SIZE)
+#define PROTOCOL_SYNC_RESP_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_SYNC_RESP_PAYLOAD_SIZE)
+#define PROTOCOL_CONTROL_ACK_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_CONTROL_ACK_PAYLOAD_SIZE)
+
+/** Capability bit indicating support for 50 Hz sampling. */
+#define PROTOCOL_SAMPLE_RATE_50_HZ 0x0001
+/** Capability bit indicating support for 100 Hz sampling. */
+#define PROTOCOL_SAMPLE_RATE_100_HZ 0x0002
+
+/** Status bit indicating that a sample contains synthetic test data. */
+#define PROTOCOL_STATUS_MOCK_DATA 0x8000
+
+/** Status bit indicating that a hub has no current data for a source. */
+#define PROTOCOL_STATUS_SOURCE_UNAVAILABLE 0x4000
+
+/** Status bit indicating that a TEST_REQUEST was processed by a hub. */
+#define PROTOCOL_STATUS_TEST_REQUEST_PROCESSED 0x2000
+/** Status bit indicating DATA generated by maximum-throughput mode. */
+#define PROTOCOL_STATUS_BENCHMARK 0x1000
+#define PROTOCOL_STATUS_SENSOR_VALID 0x0001
+#define PROTOCOL_STATUS_HISTORICAL 0x0002
+#define PROTOCOL_STATUS_HISTORY_OVERWRITE 0x0004
+
+#define PROTOCOL_BENCHMARK_ACTION_STOP  0
+#define PROTOCOL_BENCHMARK_ACTION_START 1
+
+#define PROTOCOL_BENCHMARK_REPORT_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_BENCHMARK_REPORT_PAYLOAD_SIZE)
+#define PROTOCOL_FILE_RESULT_PACKET_SIZE \
+    (PROTOCOL_HEADER_SIZE + PROTOCOL_FILE_RESULT_PAYLOAD_SIZE)
+
+/** Final receiver result returned after a streamed file transfer. */
+typedef enum {
+    PROTOCOL_FILE_RESULT_SUCCESS = 0,
+    PROTOCOL_FILE_RESULT_INVALID_STATE = 1,
+    PROTOCOL_FILE_RESULT_UNEXPECTED_OFFSET = 2,
+    PROTOCOL_FILE_RESULT_CRC_MISMATCH = 3,
+    PROTOCOL_FILE_RESULT_SIZE_MISMATCH = 4,
+    PROTOCOL_FILE_RESULT_SHA256_MISMATCH = 5,
+    PROTOCOL_FILE_RESULT_ABORTED = 6,
+} protocol_file_result_code_t;
+
+/** Logical view of the common 24-byte header after network-order decoding. */
+typedef struct {
+    uint16_t magic;
+    uint8_t version;
+    uint8_t message_type;
+    uint8_t node_id;
+    uint8_t flags;
+    uint16_t payload_length;
+    uint32_t session_id;
+    uint32_t sequence;
+    uint64_t timestamp_us;
+} protocol_header_t;
+
+/** Hub identity and capabilities sent before the server assigns a Session. */
+typedef struct {
+    uint8_t hub_node_id;
+    uint8_t firmware_major;
+    uint8_t firmware_minor;
+    uint8_t firmware_patch;
+    uint32_t boot_id;
+    uint16_t supported_sampling_rates;
+    uint8_t assigned_node_mask;
+    uint8_t device_token[PROTOCOL_DEVICE_TOKEN_SIZE];
+} protocol_hello_t;
+
+/** Decoded ERROR details identifying the rejected message category. */
+typedef struct {
+    uint16_t error_code;
+    uint8_t offending_message_type;
+} protocol_error_t;
+
+/** Latest per-source state emitted when normal DATA has been absent. */
+typedef struct {
+    uint8_t node_id;
+    uint8_t flags;
+    uint32_t sequence;
+    uint64_t timestamp_us;
+    uint16_t status;
+    uint32_t overflow_count;
+} protocol_heartbeat_t;
+
+/** One NTP-style clock exchange, in coordinator and local monotonic domains. */
+typedef struct {
+    uint64_t coordinator_send_us;
+    uint64_t node_receive_us;
+    uint64_t node_send_us;
+} protocol_sync_response_t;
+
+/** Common scheduled start and the Session-scoped local-minus-coordinator offset. */
+typedef struct {
+    uint64_t coordinator_start_us;
+    int64_t node_minus_coordinator_us;
+} protocol_start_t;
+
+/** Scheduled trigger arming boundary and coordinator-selected generation. */
+typedef struct {
+    uint64_t coordinator_arm_us;
+    int64_t node_minus_coordinator_us;
+    uint32_t arm_generation;
+} protocol_arm_t;
+
+/** Physical-unit capture. Sequence and timestamp remain in the common header. */
+typedef struct {
+    uint8_t node_id;
+    uint8_t flags;
+    uint32_t sequence;
+    uint64_t timestamp_us;
+    float ax, ay, az;
+    float gx, gy, gz;
+    uint16_t status;
+} protocol_physical_sample_t;
+
+/** Idempotent peak notification from one armed node. */
+typedef struct {
+    uint32_t boot_id;
+    uint32_t arm_generation;
+    uint64_t peak_timestamp_us;
+} protocol_activity_trigger_t;
+
+/** Coordinator-selected historical interval, translated by the node. */
+typedef struct {
+    uint64_t coordinator_t0_us;
+    int64_t node_minus_coordinator_us;
+    uint32_t history_duration_us;
+    uint8_t trigger_node_id;
+    uint32_t trigger_sequence;
+} protocol_start_flush_t;
+
+#define PROTOCOL_CONTROL_RESULT_APPLIED         0
+#define PROTOCOL_CONTROL_RESULT_ALREADY_STOPPED 1
+#define PROTOCOL_CONTROL_RESULT_INVALID_STATE   2
+#define PROTOCOL_CONTROL_RESULT_DUPLICATE       3
+#define PROTOCOL_CONTROL_RESULT_INSUFFICIENT_HISTORY 4
+#define PROTOCOL_CONTROL_RESULT_STALE_IDENTITY  5
+#define PROTOCOL_CONTROL_RESULT_BUSY            6
+
+/** Positive or negative result for one START/STOP command Sequence. */
+typedef struct {
+    uint8_t command_type;
+    uint8_t result;
+    uint32_t command_sequence;
+    uint64_t effective_local_us;
+} protocol_control_ack_t;
+
+/** Requested benchmark action, bounded batch size, and duration. */
+typedef struct {
+    uint8_t action;
+    uint16_t batch_frames;
+    uint32_t duration_ms;
+} protocol_benchmark_control_t;
+
+/** Counters produced when maximum-throughput mode finishes. */
+typedef struct {
+    uint32_t control_sequence;
+    uint32_t elapsed_ms;
+    uint32_t frames_sent;
+    uint32_t application_bytes_sent;
+    uint32_t queue_drops;
+    uint32_t send_failures;
+} protocol_benchmark_report_t;
+
+/** Whole-file metadata that opens one ordered transfer. */
+typedef struct {
+    uint32_t file_id;
+    uint32_t total_size;
+    uint16_t chunk_data_size;
+    uint8_t expected_sha256[PROTOCOL_SHA256_SIZE];
+} protocol_file_begin_t;
+
+/** One CRC-protected slice whose offset must match receiver progress. */
+typedef struct {
+    uint32_t file_id;
+    uint32_t offset;
+    uint16_t data_length;
+    uint32_t crc32;
+    const uint8_t *data;
+} protocol_file_chunk_t;
+
+/** Whole-file metadata repeated when the sender closes a transfer. */
+typedef struct {
+    uint32_t file_id;
+    uint32_t total_size;
+    uint8_t expected_sha256[PROTOCOL_SHA256_SIZE];
+} protocol_file_end_t;
+
+/** Receiver result containing byte count and calculated SHA-256 digest. */
+typedef struct {
+    uint32_t file_id;
+    uint16_t result_code;
+    uint32_t bytes_received;
+    uint8_t calculated_sha256[PROTOCOL_SHA256_SIZE];
+} protocol_file_result_t;
+
+/**
+ * @brief Decode a complete fixed header from network byte order.
+ *
+ * This function only decodes fields. The caller decides which message types
+ * and payload lengths are valid for the current development stage.
+ */
+bool protocol_decode_header(
+    const uint8_t *data,
+    size_t data_length,
+    protocol_header_t *header
+);
+
+/** Decode the fixed four-byte ERROR payload. */
+bool protocol_decode_error_payload(
+    const uint8_t *payload,
+    size_t payload_length,
+    protocol_error_t *error
+);
+
+bool protocol_decode_sync_request_payload(
+    const uint8_t *payload, size_t payload_length,
+    uint64_t *coordinator_send_us
+);
+void protocol_encode_sync_response(
+    uint8_t packet[PROTOCOL_SYNC_RESP_PACKET_SIZE],
+    uint8_t node_id, uint32_t session_id, uint32_t sequence,
+    const protocol_sync_response_t *response
+);
+bool protocol_decode_start_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_start_t *start
+);
+bool protocol_decode_arm_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_arm_t *arm
+);
+void protocol_encode_control_ack(
+    uint8_t packet[PROTOCOL_CONTROL_ACK_PACKET_SIZE],
+    uint8_t node_id, uint32_t session_id, uint32_t response_sequence,
+    uint64_t timestamp_us, const protocol_control_ack_t *ack
+);
+
+bool protocol_decode_start_flush_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_start_flush_t *start
+);
+void protocol_encode_activity_trigger(
+    uint8_t packet[PROTOCOL_ACTIVITY_TRIGGER_PACKET_SIZE],
+    uint8_t node_id, uint32_t session_id, uint32_t sequence,
+    uint64_t detected_timestamp_us,
+    const protocol_activity_trigger_t *trigger
+);
+bool protocol_decode_activity_trigger(
+    const uint8_t *frame, size_t frame_length,
+    protocol_header_t *header, protocol_activity_trigger_t *trigger
+);
+bool protocol_encode_physical_data(
+    uint8_t packet[PROTOCOL_PHYSICAL_DATA_PACKET_SIZE],
+    const protocol_physical_sample_t *sample, uint32_t session_id
+);
+bool protocol_decode_physical_data(
+    const uint8_t *frame, size_t frame_length,
+    protocol_header_t *header, protocol_physical_sample_t *sample
+);
+
+void protocol_encode_error(
+    uint8_t packet[PROTOCOL_ERROR_PACKET_SIZE],
+    uint8_t node_id,
+    uint32_t session_id,
+    uint32_t sequence,
+    uint64_t timestamp_us,
+    uint16_t error_code,
+    uint8_t offending_message_type
+);
+
+/**
+ * @brief Decode one complete version-1 DATA frame.
+ *
+ * The caller remains responsible for link-specific authorization checks,
+ * including sender MAC address, permitted Node ID, and Session ID policy.
+ */
+bool protocol_decode_data(
+    const uint8_t *frame,
+    size_t frame_length,
+    protocol_header_t *header,
+    imu_sample_t *sample
+);
+
+/** Encode/decode TEST messages, which reuse the canonical IMU payload. */
+void protocol_encode_test_request(
+    uint8_t packet[PROTOCOL_TEST_PACKET_SIZE],
+    const imu_sample_t *sample,
+    uint32_t session_id
+);
+void protocol_encode_test_response(
+    uint8_t packet[PROTOCOL_TEST_PACKET_SIZE],
+    const imu_sample_t *sample,
+    uint32_t session_id
+);
+bool protocol_decode_test_request(
+    const uint8_t *frame, size_t frame_length,
+    protocol_header_t *header, imu_sample_t *sample
+);
+bool protocol_decode_test_response(
+    const uint8_t *frame, size_t frame_length,
+    protocol_header_t *header, imu_sample_t *sample
+);
+
+/** Saturating arithmetic and the deterministic individual-demo transform. */
+int16_t protocol_saturating_add_i16(int16_t value, int16_t increment);
+bool protocol_transform_test_sample(
+    const imu_sample_t *request,
+    uint8_t local_node_id,
+    imu_sample_t *response
+);
+
+void protocol_encode_benchmark_control_payload(
+    uint8_t payload[PROTOCOL_BENCHMARK_CONTROL_PAYLOAD_SIZE],
+    const protocol_benchmark_control_t *control
+);
+bool protocol_decode_benchmark_control_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_benchmark_control_t *control
+);
+void protocol_encode_benchmark_report_payload(
+    uint8_t payload[PROTOCOL_BENCHMARK_REPORT_PAYLOAD_SIZE],
+    const protocol_benchmark_report_t *report
+);
+bool protocol_decode_benchmark_report_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_benchmark_report_t *report
+);
+void protocol_encode_benchmark_report(
+    uint8_t packet[PROTOCOL_BENCHMARK_REPORT_PACKET_SIZE],
+    uint8_t node_id, uint32_t session_id, uint32_t sequence,
+    uint64_t timestamp_us, const protocol_benchmark_report_t *report
+);
+
+void protocol_encode_file_begin_payload(
+    uint8_t payload[PROTOCOL_FILE_BEGIN_PAYLOAD_SIZE],
+    const protocol_file_begin_t *begin
+);
+bool protocol_decode_file_begin_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_file_begin_t *begin
+);
+bool protocol_encode_file_chunk_payload(
+    uint8_t *payload, size_t payload_capacity,
+    const protocol_file_chunk_t *chunk,
+    size_t *encoded_length
+);
+bool protocol_decode_file_chunk_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_file_chunk_t *chunk
+);
+void protocol_encode_file_end_payload(
+    uint8_t payload[PROTOCOL_FILE_END_PAYLOAD_SIZE],
+    const protocol_file_end_t *end
+);
+bool protocol_decode_file_end_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_file_end_t *end
+);
+void protocol_encode_file_result_payload(
+    uint8_t payload[PROTOCOL_FILE_RESULT_PAYLOAD_SIZE],
+    const protocol_file_result_t *result
+);
+bool protocol_decode_file_result_payload(
+    const uint8_t *payload, size_t payload_length,
+    protocol_file_result_t *result
+);
+void protocol_encode_file_result(
+    uint8_t packet[PROTOCOL_FILE_RESULT_PACKET_SIZE],
+    uint8_t node_id, uint32_t session_id, uint32_t sequence,
+    uint64_t timestamp_us, const protocol_file_result_t *result
+);
+
+/**
+ * @brief Encode one IMU sample as a version-1 DATA frame.
+ *
+ * @param[out] packet Destination buffer containing exactly
+ *                    PROTOCOL_DATA_PACKET_SIZE bytes.
+ * @param[in] sample  Sample and source metadata to encode.
+ *
+ * The caller supplies the active nonzero Hub-to-Ultra96 Session ID for an
+ * upstream frame. A leaf uses Session ID zero on the Stage 5 ESP-NOW hop;
+ * its hub re-encodes the logical sample under the active upstream session.
+ */
+void protocol_encode_data(
+    uint8_t packet[PROTOCOL_DATA_PACKET_SIZE],
+    const imu_sample_t *sample,
+    uint32_t session_id
+);
+
+/** Encode the hub's initial, session-zero HELLO frame. */
+void protocol_encode_hello(
+    uint8_t packet[PROTOCOL_HELLO_PACKET_SIZE],
+    const protocol_hello_t *hello,
+    uint64_t timestamp_us
+);
+
+/** Encode one source's status when it has not sent DATA for one second. */
+void protocol_encode_heartbeat(
+    uint8_t packet[PROTOCOL_HEARTBEAT_PACKET_SIZE],
+    const protocol_heartbeat_t *heartbeat,
+    uint32_t session_id
+);
+
+#endif

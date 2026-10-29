@@ -38,7 +38,7 @@ bool NodeSession::feedbackLedOn(uint32_t now) const {
   const uint32_t elapsed = now - ledStartedAt_;
   if (!ledDuration_ || elapsed >= ledDuration_) return false;
   // Start with a brief OFF interval so all three blinks are visible even if
-  // the active node's calibration LED was already lit. No blocking delays.
+  // the active node's LED was already lit. No blocking delays.
   return !ledReadyPattern_ || (elapsed / LedTiming::READY_STEP_MS) % 2 == 1;
 }
 
@@ -92,7 +92,7 @@ void NodeSession::selectExerciseMode(CountingMode mode, uint32_t now) {
   selectedMode_ = mode;
   if (localActive()) setMode(mode, now);
   // An exercise change resets the counter even when its mode is unchanged.
-  // Coalesce the exercise and mode changes into one baseline restart.
+  // Coalesce the exercise and mode changes into one counter restart.
   restart_ = true;
 }
 
@@ -125,7 +125,7 @@ LinkPacket NodeSession::packet(PacketKind kind, uint32_t request, uint32_t targe
 void NodeSession::activate(uint32_t now) {
   expire(now);
   if (localActive()) {
-    log_("[Already active; send RESET to clear reps and restart baseline]");
+    log_("[Already active; send RESET to clear reps and reload the preset]");
     return;
   }
   if (waiting()) {
@@ -252,8 +252,8 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
     activePeerBoot_ = p.boot;
     ledDuration_ = 0;
     restart_ = true;
-    log_(role_ == HIP ? "[Hip active; wrist acknowledged standby. Starting baseline]"
-                     : "[Wrist active; hip acknowledged standby. Starting baseline]");
+    log_(role_ == HIP ? "[Hip active; wrist acknowledged standby. Loading preset]"
+                     : "[Wrist active; hip acknowledged standby. Loading preset]");
     // Apply only after the peer acknowledges standby. Even equal modes must
     // synchronize: the peer may have rebooted or missed the previous update.
     setMode(selectedMode_, now);

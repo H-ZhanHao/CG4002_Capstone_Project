@@ -1,0 +1,11 @@
+{
+    "cmake.configureOnOpen": false,
+    "C_Cpp.default.configurationProvider": "platformio.platformio-ide",
+    "files.associations": {
+        "*.ino": "cpp"
+    },
+    "files.watcherExclude": {
+        "**/.pio/**": true,
+        "**/.build/**": true
+    }
+}

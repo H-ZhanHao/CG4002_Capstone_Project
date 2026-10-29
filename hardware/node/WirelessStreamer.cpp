@@ -14,19 +14,15 @@ namespace {
       snprintf(status, sizeof(status), "ACTIVATION FAILED | Reps: -- | Check other node; send ACTIVATE to retry");
     } else if (data.repState == NODE_STANDBY) {
       snprintf(status, sizeof(status), "STANDBY | Reps: -- | Send ACTIVATE to start");
-    } else if (data.repState == 0) {
-      snprintf(status, sizeof(status), "BASELINE | %s", data.positioningSeen
-        ? "Hold still for 3 seconds"
-        : "Move into your starting position");
     } else if (data.repState == 1) {
       snprintf(status, sizeof(status), "FINDING AXIS | Reps: 0 | Start moving; initial movement may not count");
     } else {
       if (data.mode == PAUSE_MODE) {
         snprintf(status, sizeof(status),
-          "COUNTING | Reps: %d | Motion: %.2f | Peak: %.2f m/s2",
-          data.reps, data.pauseMotion, data.pausePeak);
+          "COUNTING | Reps: %ld | Motion: %.2f | Peak: %.2f m/s2",
+          static_cast<long>(data.reps), data.pauseMotion, data.pausePeak);
       } else {
-        snprintf(status, sizeof(status), "COUNTING | Reps: %d", data.reps);
+        snprintf(status, sizeof(status), "COUNTING | Reps: %ld", static_cast<long>(data.reps));
       }
     }
 
@@ -42,7 +38,7 @@ namespace {
   }
 }
 
-void printTelemetry(Print& output, const TelemetryData& data) {
+void printTelemetry(NodeStream& output, const TelemetryData& data) {
   char line[320];
   const size_t length = formatTelemetry(line, sizeof(line), data);
   if (length > 0) {
@@ -70,7 +66,7 @@ bool WirelessStreamer::consumeConnectionEvent() {
 }
 
 bool WirelessStreamer::readCommand(
-  Stream& input, CommandBuffer& buffer, char* destination, size_t capacity
+  NodeStream& input, CommandBuffer& buffer, char* destination, size_t capacity
 ) {
   if (capacity == 0) {
     return false;
@@ -78,8 +74,13 @@ bool WirelessStreamer::readCommand(
 
   // Limit work per loop so partial commands never hold up sensor sampling.
   unsigned int budget = 64;
-  while (input.available() > 0 && budget-- > 0) {
+  while (budget-- > 0) {
     const int value = input.read();
+    if (value == -2) {
+      buffer = CommandBuffer{};
+      buffer.overflow = true;
+      continue;
+    }
     if (value < 0) {
       break;
     }
@@ -113,12 +114,16 @@ bool WirelessStreamer::readCommand(
 }
 
 bool WirelessStreamer::pollCommand(char* destination, size_t capacity) {
+  if (started_) bluetooth_.service();
   const bool connected = started_ && bluetooth_.hasClient();
-  if (!connected) {
+  const uint32_t session = bluetooth_.connectionId();
+  if (!connected || session != bluetoothSession_) {
     bluetoothInput_ = CommandBuffer{};
+    bluetoothSession_ = session;
+    if (connected) connectionEvent_ = true;
   }
 
-  if (readCommand(Serial, usbInput_, destination, capacity)) {
+  if (readCommand(usbConsole, usbInput_, destination, capacity)) {
     return true;
   }
 
@@ -133,7 +138,7 @@ void WirelessStreamer::message(const char* text) {
     return;
   }
 
-  Serial.write((const uint8_t*)line, (size_t)length);
+  usbConsole.write((const uint8_t*)line, (size_t)length);
   if (started_ && bluetooth_.hasClient()) {
     bluetooth_.write((const uint8_t*)line, (size_t)length);
   }
@@ -158,21 +163,18 @@ void WirelessStreamer::update(const TelemetryData& data, unsigned long now) {
     return;
   }
 
-  // One complete line creates one queued packet instead of many small packets.
-  // BluetoothSerial::write can still wait if its internal queue is full.
+  // One complete line per queued packet. Queue saturation drops a whole line.
   char line[320];
   const size_t length = formatTelemetry(line, sizeof(line), data);
   if (length == 0) {
     return;
   }
 
-  const unsigned long started = millis();
   const size_t written = bluetooth_.write((const uint8_t*)line, length);
-  const unsigned long elapsed = millis() - started;
 
   // USB-only diagnostics remain visible when the Bluetooth link has stalled.
-  if (written != length || elapsed >= 100) {
-    Serial.printf("[Bluetooth send: %u/%u bytes queued, blocked %lu ms]\n",
-      (unsigned int)written, (unsigned int)length, elapsed);
+  if (written != length) {
+    usbConsole.printf("[Bluetooth send: %u/%u bytes queued; line dropped]\n",
+      (unsigned int)written, (unsigned int)length);
   }
 }

@@ -5,12 +5,6 @@
 #include "RepCounter.h"
 #include "ContinuousCounter.h"
 
-static void baseline(RepCounter& counter, unsigned long& now, float gravity) {
-  counter.begin(now);
-  for (int i = 0; i < 151; ++i) counter.update(gravity, now += 20);
-  assert(counter.state() == MOVEMENT_CALIBRATION);
-}
-
 static void movement(RepCounter& counter, unsigned long& now, float gravity,
                      float peak, int samples = 25) {
   for (int i = 0; i < samples; ++i) counter.update(gravity + peak, now += 20);
@@ -28,21 +22,22 @@ int main() {
     assert(!ExercisePresets::allowed(roles[i] == HIP ? WRIST : HIP, exercise));
     RepCounter counter(getGenericSettings());
     const PauseCalibration preset = ExercisePresets::pause(exercise);
-    // Reset and reboot both load the same fixed limits, with a fresh baseline.
+    // Activation/reset load fixed limits without collecting baseline samples.
     for (int session = 0; session < 2; ++session) {
-      const float gravity = session ? 10.2f : 9.81f;
-      counter.begin(now);
-      assert(!counter.loadPreset(preset)); // Baseline cannot be skipped.
-      baseline(counter, now, gravity);
-      assert(counter.loadPreset(preset));
+      const float gravity = GeneralConfig::GRAVITY_MPS2;
+      const unsigned long startedAt = now;
+      assert(counter.beginPreset(now, preset));
+      assert(counter.baselineMagnitude() == gravity);
       assert(counter.state() == REP_COUNTING);
       assert(counter.repetitionCount() == 0 && counter.calibrationCount() == 0);
       assert(!counter.consumeRepEvent() && !counter.consumeCalibrationEvent());
-      for (int n = 0; n < 100; ++n) counter.update(gravity, now += 20);
-      assert(counter.repetitionCount() == 0);
+      // Start moving immediately, including at uptime zero; no quiet warm-up.
       movement(counter, now, gravity, preset.requiredPeak + 0.1f);
       assert(counter.repetitionCount() == 1); // First rep, no calibration pair.
+      assert(now - startedAt < GeneralConfig::BASELINE_TIME_MS);
       assert(counter.consumeRepEvent());
+      for (int n = 0; n < 100; ++n) counter.update(gravity, now += 20);
+      assert(counter.repetitionCount() == 1);
       movement(counter, now, gravity, (preset.highThreshold + preset.requiredPeak) / 2);
       assert(counter.repetitionCount() == 1);
       assert(counter.consumeRepResult() == REP_TOO_WEAK);
@@ -54,16 +49,14 @@ int main() {
     ContinuousCounter continuous;
     // Each new session discovers the axis and either starting direction anew.
     for (int session = 0; session < 2; ++session) {
-      const float bias[3] = {0.1f + session, -0.2f, 0.3f};
+      const float* bias = GeneralConfig::GYRO_BIAS_RAD_S;
       const int axis = (i + session) % 3;
       const float sign = session ? -1.0f : 1.0f;
       continuous.beginPreset(bias, now, ExercisePresets::continuous(exercise));
       assert(continuous.calibrated());
       assert(continuous.axis() == -1 && continuous.calibrationCount() == 0);
       assert(continuous.repetitionCount() == 0 && !continuous.consumeRepEvent());
-      for (int n = 0; n < 100; ++n) continuous.update(bias, true, now += 20);
-      assert(continuous.axis() == -1 && continuous.repetitionCount() == 0);
-      // Discover the axis; do not complete any cycles yet.
+      // Discover the axis from immediate movement, without prior stillness.
       for (int n = 0; n < 65; ++n) {
         float gyro[3] = {bias[0], bias[1], bias[2]};
         gyro[axis] += sign * 3.0f;
@@ -90,5 +83,19 @@ int main() {
   assert(squat.requiredPeak == lunge.requiredPeak && squat.minDuration == lunge.minDuration);
   assert(squat.maxDuration == lunge.maxDuration);
   assert(!ExercisePresets::allowed(HIP, EXERCISE_COUNT));
+  // A reset discards an incomplete movement rather than completing it later.
+  RepCounter resetCounter(getGenericSettings());
+  assert(resetCounter.beginPreset(now, squat));
+  for (int n = 0; n < 25; ++n)
+    resetCounter.update(GeneralConfig::GRAVITY_MPS2 + 1.5f, now += 20);
+  assert(resetCounter.beginPreset(now, ExercisePresets::pause(PUSHUP)));
+  for (int n = 0; n < 30; ++n)
+    resetCounter.update(GeneralConfig::GRAVITY_MPS2, now += 20);
+  assert(resetCounter.repetitionCount() == 0 && !resetCounter.consumeRepEvent());
+  movement(resetCounter, now, GeneralConfig::GRAVITY_MPS2, 0.8f);
+  assert(resetCounter.repetitionCount() == 1);
+  PauseCalibration invalid;
+  assert(!resetCounter.beginPreset(now, invalid));
+  assert(resetCounter.state() != REP_COUNTING);
   puts("Exercise preset tests passed");
 }

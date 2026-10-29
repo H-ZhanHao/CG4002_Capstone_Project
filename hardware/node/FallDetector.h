@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdint.h>
 
 enum FallDetectorState {
   MONITORING_NORMAL = 0,

@@ -1,0 +1,23 @@
+{
+    "name": "CG4002.Visualizer.Tests",
+    "rootNamespace": "CG4002.Visualizer.Tests",
+    "references": [
+        "CG4002.Visualizer"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
