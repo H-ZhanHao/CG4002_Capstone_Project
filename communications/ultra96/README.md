@@ -219,11 +219,6 @@ publishes deterministic `unknown`, `squat`, `push_up`, `sit_up`, `lunge`, and
 
 A real inference process can connect locally to port 9100 and write one compact
 version-1 JSON object followed by a newline. Never forward or relay port 9100.
-The gateway sends the first exercise in each `run_id` immediately. It then
-requires three consecutive classifications of a different exercise before
-exposing that switch to the phone. One or two isolated classifications are
-suppressed, and either the confirmed exercise or a third label resets the
-pending candidate streak.
 
 ## Tests
 

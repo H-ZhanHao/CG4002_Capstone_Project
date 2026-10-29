@@ -33,7 +33,6 @@ from visualizer_protocol import (
 LOGGER = logging.getLogger("visualizer_gateway")
 LOOPBACK_HOST = "127.0.0.1"
 MAX_PUBLISHER_LINE_BYTES = 16 * 1024
-EXERCISE_SWITCH_THRESHOLD = 3
 VISUALIZER_SENT_COLOR = "\033[38;5;135m"  # purple
 COLOR_RESET = "\033[0m"
 
@@ -100,60 +99,6 @@ class LatestValue:
         return queue
 
 
-class ExerciseSwitchFilter:
-    """Require repeated evidence before exposing a different exercise label.
-
-    The first label in a publisher run is accepted immediately. Thereafter,
-    the confirmed label continues to pass through, while a different label is
-    suppressed until it appears in three consecutive classifications. A return
-    to the confirmed label or the appearance of another candidate clears the
-    pending streak.
-    """
-
-    def __init__(self, threshold: int = EXERCISE_SWITCH_THRESHOLD) -> None:
-        """Create an empty filter with a positive confirmation threshold."""
-        if threshold <= 0:
-            raise ValueError("exercise switch threshold must be greater than zero")
-        self.threshold = threshold
-        self._run_id: int | None = None
-        self._confirmed_exercise: str | None = None
-        self._candidate_exercise: str | None = None
-        self._candidate_count = 0
-
-    def accept(self, message: dict[str, Any]) -> bool:
-        """Return whether this validated update should be exposed to the phone."""
-        run_id = message["run_id"]
-        exercise = message["exercise"]
-
-        if run_id != self._run_id or self._confirmed_exercise is None:
-            self._run_id = run_id
-            self._confirmed_exercise = exercise
-            self._clear_candidate()
-            return True
-
-        if exercise == self._confirmed_exercise:
-            self._clear_candidate()
-            return True
-
-        if exercise == self._candidate_exercise:
-            self._candidate_count += 1
-        else:
-            self._candidate_exercise = exercise
-            self._candidate_count = 1
-
-        if self._candidate_count < self.threshold:
-            return False
-
-        self._confirmed_exercise = exercise
-        self._clear_candidate()
-        return True
-
-    def _clear_candidate(self) -> None:
-        """Discard any unconfirmed exercise transition."""
-        self._candidate_exercise = None
-        self._candidate_count = 0
-
-
 def create_server_ssl_context(cert_file: str, key_file: str) -> ssl.SSLContext:
     """Build WSS TLS, failing closed on missing or invalid key material.
 
@@ -190,7 +135,6 @@ class VisualizerGateway:
             raise ValueError("maximum update rate must be greater than zero")
         self.config = config
         self.updates = LatestValue()
-        self._exercise_filter = ExerciseSwitchFilter()
         self._websocket_server: Any = None
         self._publisher_server: asyncio.AbstractServer | None = None
         self._active_client: Any = None
@@ -263,22 +207,13 @@ class VisualizerGateway:
             await self._publisher_server.wait_closed()
             self._publisher_server = None
 
-    def publish(self, message: dict[str, Any]) -> bool:
-        """Validate an update and expose it after exercise-switch confirmation."""
+    def publish(self, message: dict[str, Any]) -> None:
+        """Validate, serialize, and expose one update to the active subscriber."""
         serialized = serialize_message(message)
-        if not self._exercise_filter.accept(message):
-            LOGGER.debug(
-                "Suppressed unconfirmed exercise run_id=%d seq=%d exercise=%s",
-                message["run_id"],
-                message["seq"],
-                message["exercise"],
-            )
-            return False
         self.updates.publish(serialized)
         LOGGER.debug(
             "Accepted update run_id=%d seq=%d", message["run_id"], message["seq"]
         )
-        return True
 
     async def _handle_visualizer(self, websocket: Any, _path: str = "") -> None:
         """Serve one Unity client with latest-only, rate-limited delivery."""
