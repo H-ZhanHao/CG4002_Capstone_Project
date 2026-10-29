@@ -1,0 +1,2 @@
+D:\NUS\CG4002-communications\unity\Ultra96VisualizerDemo\Library\Bee\Android\Prj\IL2CPP\Gradle\unityLibrary\src\main\cpp\CMakeLists.txt
+D:\NUS\CG4002-communications\unity\Ultra96VisualizerDemo\Library\Bee\Android\Prj\IL2CPP\Gradle\unityLibrary\src\main\cpp\GameActivity\CMakeLists.txt
