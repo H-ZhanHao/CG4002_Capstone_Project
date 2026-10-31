@@ -3,6 +3,7 @@
 from collections import deque
 from dataclasses import dataclass
 import logging
+import math
 import threading
 
 
@@ -16,8 +17,9 @@ class WindowConfig:
     window_us: int
     hop_us: int
     required_nodes: tuple[int, ...] = (1, 2)
-    max_missing_per_node: int = 5
+    max_missing_per_node: int | None = None
     max_extra_per_node: int = 2
+    max_missing_fraction: float = 0.03
 
     def __post_init__(self):
         if self.sample_rate_hz <= 0 or self.window_us <= 0 or self.hop_us <= 0:
@@ -29,10 +31,19 @@ class WindowConfig:
             raise ValueError("required nodes must be non-empty and unique")
         if self.window_us * self.sample_rate_hz % 1_000_000:
             raise ValueError("window length must contain a whole sample count")
-        if self.max_missing_per_node < 0:
+        if self.max_missing_per_node is not None and self.max_missing_per_node < 0:
             raise ValueError("maximum missing samples must not be negative")
         if self.max_extra_per_node < 0:
             raise ValueError("maximum extra samples must not be negative")
+        if not math.isfinite(self.max_missing_fraction) or not 0 <= self.max_missing_fraction < 1:
+            raise ValueError("missing fraction must be finite and in [0, 1)")
+
+    @property
+    def missing_limit(self):
+        """An explicit count overrides the proportional default for legacy callers."""
+        if self.max_missing_per_node is not None:
+            return self.max_missing_per_node
+        return math.floor(self.expected_per_node * self.max_missing_fraction)
 
     @property
     def expected_per_node(self):
@@ -257,7 +268,7 @@ class WindowAssembler:
                           missing_sequences, has_gap):
         """Return an expected-length tuple, or None when padding is unsafe."""
         padding_needed = expected - len(samples)
-        if padding_needed < 0 or padding_needed > self.config.max_missing_per_node:
+        if padding_needed < 0 or padding_needed > self.config.missing_limit:
             return None
         if has_gap and len(missing_sequences) > padding_needed:
             # A gap without a corresponding count deficit indicates a duplicate,
@@ -268,15 +279,7 @@ class WindowAssembler:
 
         period_us = 1_000_000 / self.config.sample_rate_hz
         if not samples:
-            return tuple(
-                self._padding_sample(
-                    node_id,
-                    sequence=index,
-                    timestamp_us=start + round(index * period_us),
-                    coordinator_timestamp_us=start + round(index * period_us),
-                )
-                for index in range(expected)
-            )
+            return None
 
         internal = []
         internal_padding = 0
@@ -296,14 +299,19 @@ class WindowAssembler:
 
         padded = []
         first = samples[0]
+        # Fit synthetic edge timestamps into the available interval rather than
+        # clamping several samples to the same start/end timestamp. Keep real
+        # timestamps unchanged and use the same delta in both clock domains.
+        leading_step = (min(period_us,
+                            (first.coordinator_timestamp_us - start) / leading_count)
+                        if leading_count else period_us)
         for offset in range(leading_count, 0, -1):
+            delta = round(offset * leading_step)
             padded.append(self._padding_sample(
                 node_id,
                 sequence=first.sequence - offset,
-                timestamp_us=first.timestamp_us - round(offset * period_us),
-                coordinator_timestamp_us=max(
-                    start,
-                    first.coordinator_timestamp_us - round(offset * period_us)),
+                timestamp_us=first.timestamp_us - delta,
+                coordinator_timestamp_us=first.coordinator_timestamp_us - delta,
                 session_id=first.session_id,
             ))
 
@@ -327,16 +335,26 @@ class WindowAssembler:
         padded.append(samples[-1])
 
         last = samples[-1]
+        trailing_step = min(period_us,
+                            (end - last.coordinator_timestamp_us) / (trailing_count + 1))
         for offset in range(1, trailing_count + 1):
+            delta = round(offset * trailing_step)
             padded.append(self._padding_sample(
                 node_id,
                 sequence=last.sequence + offset,
-                timestamp_us=last.timestamp_us + round(offset * period_us),
-                coordinator_timestamp_us=min(
-                    end - 1,
-                    last.coordinator_timestamp_us + round(offset * period_us)),
+                timestamp_us=last.timestamp_us + delta,
+                coordinator_timestamp_us=last.coordinator_timestamp_us + delta,
                 session_id=last.session_id,
             ))
+        # Reject intervals too narrow to hold distinct integer-microsecond
+        # padding, including rounded internal gaps. Never hand invalid times to AI.
+        if (len(padded) != expected or
+                any(item.timestamp_us < 0 or not start <= item.coordinator_timestamp_us < end
+                    for item in padded) or
+                any(right.timestamp_us <= left.timestamp_us or
+                    right.coordinator_timestamp_us <= left.coordinator_timestamp_us
+                    for left, right in zip(padded, padded[1:]))):
+            return None
         return tuple(padded)
 
     def _assemble_next_locked(self):
@@ -379,6 +397,11 @@ class WindowAssembler:
                     dropped_sequences.extend(grid_dropped)
 
             normalized[node_id] = unique
+            if not node_invalid and unique:
+                if any(right.timestamp_us <= left.timestamp_us or
+                       right.coordinator_timestamp_us <= left.coordinator_timestamp_us
+                       for left, right in zip(unique, unique[1:])):
+                    node_invalid, node_reason = True, "invalid_timestamps"
             dropped[node_id] = tuple(dropped_sequences)
             invalid[node_id] = node_invalid
             invalid_reasons[node_id] = node_reason

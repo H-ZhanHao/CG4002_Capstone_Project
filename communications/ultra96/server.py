@@ -2766,7 +2766,13 @@ def parse_args(argv=None):
         default=1.0,
         help="time between window starts in seconds (default: 1.0)",
     )
+    parser.add_argument(
+        "--max-missing-fraction", type=float, default=0.03,
+        help="maximum missing samples as a fraction per node/window (default: 0.03)",
+    )
     args = parser.parse_args(argv)
+    if not math.isfinite(args.max_missing_fraction) or not 0 <= args.max_missing_fraction < 1:
+        parser.error("--max-missing-fraction must be finite and in [0, 1)")
     if args.hop_seconds > args.window_seconds:
         parser.error("--hop-seconds must not exceed --window-seconds")
     return args
@@ -2788,13 +2794,15 @@ def main(argv=None):
         sample_rate_hz=args.sample_rate_hz,
         window_us=round(args.window_seconds * 1_000_000),
         hop_us=round(args.hop_seconds * 1_000_000),
+        max_missing_fraction=args.max_missing_fraction,
     )
     window_assembler = WindowAssembler(window_config)
     LOGGER.info(
         "WINDOW_CONFIG sample_rate=%dHz window=%.3fs hop=%.3fs "
-        "expected_per_node=%d",
+        "expected_per_node=%d max_missing_per_node=%d",
         window_config.sample_rate_hz, window_config.window_us / 1_000_000,
-        window_config.hop_us / 1_000_000, window_config.expected_per_node)
+        window_config.hop_us / 1_000_000, window_config.expected_per_node,
+        window_config.missing_limit)
 
     visualizer_publisher = VisualizerEventPublisher()
     coordinator = CaptureCoordinator(

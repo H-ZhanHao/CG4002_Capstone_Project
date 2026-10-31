@@ -5,13 +5,17 @@ import hashlib
 import logging
 import os
 import struct
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import zlib
 
 import server
+import server_AI
 from visualizer_protocol import validate_message
 
 
@@ -90,6 +94,23 @@ class RecordingAssembler:
 
 
 class SlidingWindowIntegrationTest(unittest.TestCase):
+    def test_quality_policy_arguments_for_both_servers(self):
+        # The AI teammate's model config is external; stub only its minimum
+        # window length to test argument handling without loading VART/models.
+        with patch.dict(sys.modules, {"config": SimpleNamespace(WINDOW_SECONDS=3)}):
+            for module in (server, server_AI):
+                with self.subTest(server=module.__name__):
+                    defaults = module.parse_args([])
+                    self.assertEqual(defaults.max_missing_fraction, 0.03)
+                    explicit = module.parse_args([
+                        "--max-missing-fraction", "0.02"])
+                    self.assertEqual(explicit.max_missing_fraction, 0.02)
+                    for args in (["--max-missing-fraction", "nan"],
+                                 ["--max-missing-fraction", "1"],
+                                 ["--max-missing-fraction", "-0.01"]):
+                        with patch("sys.stderr"), self.assertRaises(SystemExit):
+                            module.parse_args(args)
+
     def build_data(self, status=server.STATUS_MOCK_DATA):
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,

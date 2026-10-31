@@ -105,13 +105,14 @@ is emitted. To keep the terminal readable, one normal
 sample summary is printed per node per second. Window and hop
 values must be positive, and the hop cannot exceed the window. Completed or
 rejected windows are summarized as `WINDOW_READY` or `WINDOW_REJECTED` without
-printing their sample contents. Each node may be missing up to five samples per
-window. Accepted windows are padded to the expected per-node length with
+printing their sample contents. By default, each node may be missing up to 3%
+of its expected samples per window, rounded down: nine of 300 samples at
+100 Hz with three-second windows. Accepted windows are padded to the expected per-node length with
 inference-only samples whose six IMU values are zero; internal sequence gaps
 are filled in place and edge losses are padded at the corresponding edge. The
 summary reports both the received and padded counts, for example
-`node1=296/300 padded=4 node2=295/300 padded=5`. If either node is missing more
-than five samples, or its sequence gaps cannot be reconciled with its count
+`node1=296/300 padded=4 node2=295/300 padded=5`. If either node exceeds the
+missing-sample allowance, or its sequence gaps cannot be reconciled with its count
 deficit, the whole synchronized two-node window is rejected. Up to two extra
 samples per node are also tolerated. Identical duplicate sequences are removed
 first; unique extras are removed by an order-preserving minimum-error match
@@ -119,7 +120,36 @@ against the expected timestamp grid. The summary reports `dropped=` and
 `dropped_sequences=`. More than two extras, conflicting duplicate contents, or
 a sequence gap mixed with unique extras rejects the window. `server.py` remains
 a window/logging adapter; `server_new.py` sends accepted windows to the AI
-inference pipeline.
+inference pipeline. The checked-in `server_AI.py` uses the same assembler and
+quality settings; its model/runtime dependencies are supplied separately.
+
+Both servers accept `--max-missing-fraction 0.03`. There is no separate
+elapsed-time gap rejection rule: a long internal or edge gap alone does not
+reject an otherwise valid window. Invalid real timestamp order still reports
+`reason=invalid_timestamps`. Startup `WINDOW_CONFIG` reports the effective
+missing-sample count. A count deficit may reflect capture timing delays rather
+than missing network packets; sequence checks remain enforced.
+
+Padding preserves real readings and their timestamps. Synthetic edge samples
+are spaced within the available edge interval, using the same time delta in
+the local and coordinator clock domains, rather than repeatedly clamping to
+the final microsecond. Accepted samples must be strictly increasing in both
+clock domains and remain inside the half-open coordinator window. If integer
+timestamp space is insufficient, the window is rejected. Synthetic IMU values
+remain zero and `is_padding=True`; this change does not resample real sensor
+values or establish model accuracy with padded inputs.
+
+To deploy this policy, copy the updated `window_assembler.py` and the server
+entry point actually used on Ultra96 (`server_AI.py` for inference), then
+restart that process. Keep existing model paths and launch options. The new
+policy defaults apply automatically; the fraction option above can override
+the missing-sample allowance. Remove any former `--max-sample-gap-ms` option
+from launch commands; it is no longer supported.
+No ESP firmware rebuild is needed for these server-side changes. Verify that
+`WINDOW_CONFIG` shows `expected_per_node=300 max_missing_per_node=9`, inspect
+rejection reasons, and compare inference
+results on real exercises. The external `late_fusion_vart.py` timestamp
+validator still requires an on-device integration check.
 
 Clock synchronization uses five exchanges and builds its candidate from the
 median offset of the three lowest-delay usable rounds. Periodic refreshes apply
