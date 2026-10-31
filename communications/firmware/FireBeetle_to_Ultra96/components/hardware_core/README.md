@@ -44,25 +44,28 @@ both the pause and continuous counters, allowing counter and LED timing to be
 tested without MPU6050s or provisioned peer MAC addresses.
 
 The bridge exposes the hardware `LinkPacket` as an opaque, fixed 24-byte C
-object and stores outgoing control events in a bounded 12-entry queue. A later
-ESP-NOW adapter must copy callback input into a bounded queue and deliver it to
-the physical-pipeline task; callbacks must never call bridge state methods.
-Bluetooth commands must follow the same command-queue ownership rule.
+object and stores outgoing control events in a bounded 12-entry queue. These
+legacy peer interfaces have no transport connected. The planned AR feedback
+path uses phone -> Ultra96 -> both ESPs over the existing Wi-Fi/TLS connections,
+so it does not require ESP-NOW LED mirroring.
 
-## Bluetooth SPP integration
+## Wi-Fi-only communications runtime
 
-The communications target builds the hardware teammate's original
-`hardware/node/NodePlatform.cpp` directly. Its `BluetoothSpp` implementation
-retains pairing, connection, congestion, and bounded byte/line queues without
-copying or editing that source. The communications-owned
-`bluetooth_bridge.cpp` supplies only the command adapter needed by this runtime.
+Bluetooth SPP startup, polling, and the communications Bluetooth bridge have
+been removed. The component no longer builds `hardware/node/NodePlatform.cpp`
+or depends on the Bluetooth component. The copied MPU6050 driver uses FreeRTOS
+delays directly, retaining its original initialization delays.
 
-SPP callbacks enqueue bytes in the original bounded queue. The physical
-pipeline task calls `bluetooth_bridge_poll`, parses at most 64 bytes per pass,
-and is the only context that changes exercise/counter/LED state. Bluetooth can
-select exercises and modes, activate/standby/reset the local exercise session,
-and report status. It cannot start an IMU flush or replace Ultra96 as stream and
-clock coordinator.
+`sdkconfig.defaults` disables Bluetooth and software Wi-Fi/Bluetooth coexistence.
+The `node1_integration_100HZ` and `node2_integration_100HZ` configurations have
+also been regenerated with Bluetooth disabled. This releases the controller,
+host, task, and queue memory for Wi-Fi/TLS. Existing generated configurations
+for other profiles may still contain their older Bluetooth settings.
+
+USB serial logging remains available through ESP-IDF. The removed Bluetooth
+command interface is not replaced by a USB command parser in this change.
+Future local feedback diagnostics must add their own command adapter. The
+standalone hardware application's Bluetooth implementation is unchanged.
 
 The checked-in `partitions_2mb.csv` provides a 0x1e0000-byte factory slot on
 the boards' detected 2 MiB flash. This project already used a single factory

@@ -175,9 +175,10 @@ pio run -e node2_mock_tls
 - MPU6050 identity, scale, axis orientation, peak threshold and long-duration
   100 Hz behavior have not been validated on physical sensors.
 - The communications target does not import the hardware `StreamCoordinator`;
-  Ultra96 owns coordination. The original hardware Bluetooth and ESP-NOW
-  activation/mode/LED sources remain unchanged and are not exercised by this
-  direct-TLS vertical slice.
+  Ultra96 owns coordination. Bluetooth is removed from this communications
+  runtime and disabled in the 100 Hz profiles to recover RAM for TLS. The
+  standalone hardware Bluetooth/ESP-NOW sources remain unchanged; their peer
+  activation/mode/LED transport is not connected in this direct-TLS slice.
 - PlatformIO reports a 16 MB configured versus 2 MB detected flash-size
   warning during builds. The build succeeds, but the board flash setting
   should be reconciled before final deployment.

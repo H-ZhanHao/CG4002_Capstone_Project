@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include "app_config.h"
-#include "bluetooth_bridge.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -147,7 +146,6 @@ static void pipeline_task(void *unused)
             trigger_armed = true;
             scheduled_arm_us = 0;
         }
-        bluetooth_bridge_poll(now_us);
         if (now_us >= next_capture_us) {
             protocol_physical_sample_t captured = {0};
             hardware_bridge_sample_t hardware_sample;
@@ -210,10 +208,6 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     if (exercise_boot_id == 0) exercise_boot_id = 1;
     ESP_RETURN_ON_ERROR(exercise_bridge_begin(node_id, exercise_boot_id), TAG,
         "exercise core initialization");
-    esp_err_t bluetooth_result = bluetooth_bridge_begin(node_id);
-    if (bluetooth_result != ESP_OK)
-        ESP_LOGW(TAG, "Bluetooth unavailable; TLS sampling will continue: %s",
-            esp_err_to_name(bluetooth_result));
     command_queue = xQueueCreate(PIPELINE_COMMAND_QUEUE_LENGTH, sizeof(pipeline_command_t));
     trigger_queue = xQueueCreate(PIPELINE_TRIGGER_QUEUE_LENGTH, sizeof(physical_trigger_event_t));
     if (command_queue == NULL || trigger_queue == NULL) return ESP_ERR_NO_MEM;

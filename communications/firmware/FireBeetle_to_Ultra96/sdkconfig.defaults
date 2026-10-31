@@ -1,0 +1,11 @@
+# Match the physical flash detected on both FireBeetle boards.
+CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_2mb.csv"
+
+# Communications uses Wi-Fi/TLS; no Bluetooth controller, host, or SPP queues.
+# CONFIG_BT_ENABLED is not set
+# CONFIG_ESP_COEX_SW_COEXIST_ENABLE is not set
+
+# Leave instruction-flash headroom for TLS and Wi-Fi.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y

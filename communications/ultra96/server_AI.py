@@ -137,7 +137,7 @@ CONTROL_RESULT_DUPLICATE = 3
 CONTROL_RESULT_INSUFFICIENT_HISTORY = 4
 CONTROL_RESULT_STALE_IDENTITY = 5
 CONTROL_RESULT_BUSY = 6
-PHYSICAL_HISTORY_DURATION_US = 5_000_000
+PHYSICAL_HISTORY_DURATION_US = 3_000_000
 PHYSICAL_MAX_ACCEL_MPS2 = 160.0
 PHYSICAL_MAX_GYRO_RAD_S = 35.0
 CLOCK_MAPPING_MAX_AGE_US = int(CLOCK_SYNC_PERIOD_SECONDS * 2 * 1_000_000)
@@ -2822,8 +2822,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--window-seconds",
         type=positive_float,
-        default=5.0,
-        help="sliding-window length in seconds (default: 5.0)",
+        default=3.0,
+        help="sliding-window length in seconds (default: 3.0)",
     )
     parser.add_argument(
         "--hop-seconds",

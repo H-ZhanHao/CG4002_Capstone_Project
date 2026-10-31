@@ -1,7 +1,8 @@
 #include "Mpu6050.h"
 #include "Mpu6050Sample.h"
 #include "ExerciseConfig.h"
-#include "NodePlatform.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 bool Mpu6050::writeRegister(uint8_t address, uint8_t value) {
   const uint8_t bytes[] = {address, value};
@@ -31,9 +32,9 @@ bool Mpu6050::begin() {
   uint8_t identity = 0;
   if (!readRegisters(0x75, &identity, 1) || identity != 0x68) return false;
   if (!writeRegister(0x6b, 0x80)) return false; // Device reset.
-  NodePlatform::delayMs(100);
+  vTaskDelay(pdMS_TO_TICKS(100));
   if (!writeRegister(0x6b, 0x01)) return false; // Wake, X-gyro PLL clock.
-  NodePlatform::delayMs(10);
+  vTaskDelay(pdMS_TO_TICKS(10));
   // Match the former Adafruit setup: +/-8g, +/-500 deg/s, 21 Hz DLPF.
   return writeRegister(0x6c, 0x00) && writeRegister(0x19, 0x00) &&
          writeRegister(0x1a, 0x04) && writeRegister(0x1b, 0x08) &&
