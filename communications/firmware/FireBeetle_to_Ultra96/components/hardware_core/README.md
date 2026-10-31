@@ -13,11 +13,16 @@ monotonic origin, and returns plain C sample and peak structures.
 
 The communications-owned `src/sensor_history.c` is intentionally separate
 from the hardware `SensorHistory` class. The original class prepares fixed
-five-second snapshots without capture sequences. Transport history must retain
+three-second snapshots without capture sequences. Transport history must retain
 a sequence assigned at acquisition, continue accepting samples while a flush
 drains, retry a rejected queue offer, and transition exactly once from history
 to live. Keeping that adapter separate avoids changing the teammate's class or
 bringing its overlapping-window workflow into the node runtime.
+
+The communications transport ring retains seven seconds at 100 Hz: three
+seconds for the requested pre-peak window plus four seconds for peak
+confirmation and command delivery. Its 701 entries live in static DRAM rather
+than on the physical-pipeline task stack.
 
 Do not add `hardware/main.cpp`, `StreamCoordination`, or `WindowScheduler` to
 this component. The communications project retains one `app_main`, and

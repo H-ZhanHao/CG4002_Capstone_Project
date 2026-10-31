@@ -3,17 +3,18 @@
 #include "SensorHistory.h"
 
 namespace GenericPeakConfig {
-  // Provisional movement gates, independent of all exercise counting presets.
+  // Keep amplitude gates below the weakest exercise preset peaks.
+  // Reject brief noise using MIN_ACTIVE_MS instead of raising these gates.
   constexpr float ACCELERATION_GATE_MPS2 = 0.50f;
   constexpr float GYRO_GATE_RAD_S = 0.60f;
   constexpr float REARM_FRACTION = 0.45f;
   constexpr float PEAK_DROP_FRACTION = 0.25f;
-  constexpr uint32_t MIN_ACTIVE_MS = 60;
+  constexpr uint32_t MIN_ACTIVE_MS = 100;
   constexpr uint32_t FALL_CONFIRM_MS = 40;
   constexpr uint32_t REARM_MS = 80;
   constexpr uint32_t MIN_TRIGGER_GAP_MS = 1000;
   constexpr uint32_t MAX_SAMPLE_GAP_MS = 100;
-  // Keep confirmation delay inside the buffer's extra three seconds of history.
+  // Keep confirmation delay inside the buffer's extra retained history.
   constexpr uint32_t MAX_CANDIDATE_MS = 2500;
   static_assert(MAX_CANDIDATE_MS < SensorHistoryConfig::RETENTION_MS - SensorHistoryConfig::WINDOW_MS,
                 "Peak confirmation must fit retained history");

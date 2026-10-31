@@ -9,8 +9,8 @@ leaf-hub relationship and ESP-NOW forwarding is disabled.
 
 | Board | Protocol ID | Assigned source mask | PlatformIO profile |
 |---|---:|---:|---|
-| Node 1 | `1` | `0x02` | `node1_integration_update` (`node1_mock_tls` without an IMU) |
-| Node 2 | `2` | `0x04` | `node2_integration_update` (`node2_mock_tls` without an IMU) |
+| Node 1 | `1` | `0x02` | `node1_integration_100HZ` (`node1_mock_tls` without an IMU) |
+| Node 2 | `2` | `0x04` | `node2_integration_100HZ` (`node2_mock_tls` without an IMU) |
 
 The assigned masks reserve one source bit per node. They are validated by the
 Ultra96 during the `HELLO` handshake.
@@ -34,13 +34,13 @@ Ultra96 during the `HELLO` handshake.
 From this firmware directory, flash Node 1:
 
 ```powershell
-pio run -e node1_integration_update -t upload --upload-port COM7
+pio run -e node1_integration_100HZ -t upload --upload-port COM7
 ```
 
 Flash Node 2:
 
 ```powershell
-pio run -e node2_integration_update -t upload --upload-port COM9
+pio run -e node2_integration_100HZ -t upload --upload-port COM9
 ```
 
 Change the COM ports if Windows assigns different ones.
@@ -57,7 +57,7 @@ Node 2 --Wi-Fi--/
 ```
 
 The Ultra96 should accept two `HELLO` messages: `node=1` with assigned mask
-`0x02`, and `node=2` with assigned mask `0x04`. Both nodes advertise 50 Hz and
+`0x02`, and `node=2` with assigned mask `0x04`. Both nodes advertise 100 Hz and
 receive a different Session ID for each connection. They capture continuously,
 but do not send `PHYSICAL_DATA` until Ultra96 commands a flush.
 
@@ -69,7 +69,7 @@ Clock synchronization completes before Ultra96 sends a scheduled, acknowledged
 at the shared arm boundary. Either node may then detect the first generic motion
 peak and send `ACTIVITY_TRIGGER`. Ultra96 maps
 the peak into its own clock and then into both ESP32 `esp_timer` domains. It
-sends `START_FLUSH` to each node for the preceding five seconds. Each ESP
+sends `START_FLUSH` to each node for the preceding three seconds. Each ESP
 acknowledges the command, exposes matching history oldest-first, catches up to
 the live edge, and then sends every new sample once. Acquisition sequences and
 timestamps are assigned before buffering; a live sample cannot overtake an
@@ -150,17 +150,17 @@ start or stop sampling. START_FLUSH uses that mapping to translate the one
 reported peak into each node's local history boundary. Periodic SYNC refreshes the
 mapping so timestamp alignment does not gradually degrade as the clocks drift.
 
-## 50 Hz physical and mock modes
+## 100 Hz physical and mock modes
 
 The normal Node 1 and Node 2 profiles now use the local MPU6050 rather than
-the mock producer. The firmware verifies `WHO_AM_I`, configures the sensor for
-50 Hz, and converts measurements to SI units before storing them. Ultra96
-checks its sliding windows against 50 samples per second per node. Battery is
+the mock producer. The firmware verifies `WHO_AM_I`, captures the sensor at
+100 Hz, and converts measurements to SI units before storing them. Ultra96
+checks its sliding windows against 100 samples per second per node. Battery is
 not part of `PHYSICAL_DATA`.
 
 Without MPU6050s, build `node1_mock_tls` and `node2_mock_tls`. These profiles
 run the real bounded history, peak detector, feeder, protocol, TLS and Ultra96
-paths with deterministic 50 Hz samples and a periodic synthetic motion
+paths with deterministic 100 Hz samples and a periodic synthetic motion
 excursion. The synthetic peak provides trigger support without a second mock
 transport implementation:
 
@@ -173,7 +173,7 @@ pio run -e node2_mock_tls
 
 - Physical two-board timing accuracy still requires measurement after flashing.
 - MPU6050 identity, scale, axis orientation, peak threshold and long-duration
-  50 Hz behavior have not been validated on physical sensors.
+  100 Hz behavior have not been validated on physical sensors.
 - The communications target does not import the hardware `StreamCoordinator`;
   Ultra96 owns coordination. The original hardware Bluetooth and ESP-NOW
   activation/mode/LED sources remain unchanged and are not exercised by this

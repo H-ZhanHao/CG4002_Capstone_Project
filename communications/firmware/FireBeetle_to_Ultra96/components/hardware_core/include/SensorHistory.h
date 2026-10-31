@@ -5,8 +5,8 @@
 #include "ExerciseConfig.h"
 
 namespace SensorHistoryConfig {
-  constexpr uint32_t WINDOW_MS = 5000;
-  constexpr uint32_t RETENTION_MS = 8000; // Three seconds for a delayed trigger.
+  constexpr uint32_t WINDOW_MS = 3000;
+  constexpr uint32_t RETENTION_MS = 7000; // Four seconds for peak confirmation + delivery.
   static_assert(GeneralConfig::SAMPLE_INTERVAL_US >= 1000, "Use millisecond sample timestamps");
   constexpr size_t CAPACITY = RETENTION_MS * 1000 / GeneralConfig::SAMPLE_INTERVAL_US + 1;
   constexpr uint32_t MAX_GAP_MS = 2 * GeneralConfig::SAMPLE_INTERVAL_US / 1000;
@@ -46,10 +46,12 @@ class SensorHistory {
   uint32_t oldestMs() const { return count_ ? at(0).timestampMs : 0; }
   uint32_t newestMs() const { return count_ ? at(count_ - 1).timestampMs : 0; }
 
-  // Copy [endMs - 5000, endMs] in time order. Never pad, resample or truncate.
+  // Copy [endMs - WINDOW_MS, endMs] in time order. Never pad, resample or truncate.
   // Failure leaves destination unchanged. SAMPLE_GAP copies real samples and
   // flags a gap > MAX_GAP_MS (including the requested interval's edge gaps).
   SensorWindowResult extract(uint32_t endMs, SensorSample* destination, size_t capacity) const;
+  // Same metadata/status as extraction with this capacity, without copying samples.
+  SensorWindowResult inspect(uint32_t endMs, size_t capacity) const;
 
  private:
   SensorSample samples_[SensorHistoryConfig::CAPACITY] = {};

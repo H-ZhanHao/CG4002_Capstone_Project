@@ -164,8 +164,7 @@ static void wifi_connected(void *context)
         .firmware_major = 1,
         .firmware_minor = 0,
         .firmware_patch = 0,
-        .supported_sampling_rates = APP_PHYSICAL_INTEGRATION
-            ? PROTOCOL_SAMPLE_RATE_50_HZ : PROTOCOL_SAMPLE_RATE_100_HZ,
+        .supported_sampling_rates = PROTOCOL_SAMPLE_RATE_100_HZ,
         .assigned_node_mask = ASSIGNED_NODE_MASK,
         .active_node_mask = ACTIVE_NODE_MASK,
         .device_token = DEVELOPMENT_DEVICE_TOKEN,
@@ -282,7 +281,7 @@ static void start_hub(void)
         TAG,
         "Hub Node %u started; local %s stream ready; ESP-NOW %s",
         HUB_NODE_ID,
-        APP_PHYSICAL_INTEGRATION ? "continuous 50 Hz physical" : "100 Hz raw",
+        APP_PHYSICAL_INTEGRATION ? "continuous 100 Hz physical" : "100 Hz raw",
         APP_HUB_LOCAL_ONLY ? "disabled" : "enabled"
     );
 #endif

@@ -104,7 +104,7 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
         self.assertEqual(
             (defaults.sample_rate_hz, defaults.window_seconds,
              defaults.hop_seconds),
-            (100, 5.0, 1.0))
+            (100, 3.0, 1.0))
         explicit = server.parse_args([
             "--sample-rate-hz", "100", "--window-seconds", "4.5",
             "--hop-seconds", "0.5"])
@@ -329,6 +329,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
         right = struct.unpack("!QqIB3xI", sock2.frames[-1][server.HEADER_SIZE:])
         self.assertEqual(left[0], right[0])
         self.assertEqual((left[1], right[1]), (100, -200))
+        self.assertEqual(left[2], 3_000_000)
+        self.assertEqual(right[2], 3_000_000)
         frame_counts = (len(sock1.frames), len(sock2.frames))
         self.assertFalse(server.process_activity_trigger(trigger, node1))
         self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)

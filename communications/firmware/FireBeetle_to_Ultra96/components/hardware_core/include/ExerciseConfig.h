@@ -65,7 +65,7 @@ namespace GeneralConfig {
   constexpr int I2C_SCL_PIN = 22;
   constexpr uint8_t MPU6050_ADDRESS = 0x68;
 
-  constexpr unsigned long SAMPLE_INTERVAL_US = 20000;
+  constexpr unsigned long SAMPLE_INTERVAL_US = 10000;
   // Same USB/Bluetooth output cadence as the remote baseline.
   constexpr unsigned long OUTPUT_INTERVAL_MS = 100;
 

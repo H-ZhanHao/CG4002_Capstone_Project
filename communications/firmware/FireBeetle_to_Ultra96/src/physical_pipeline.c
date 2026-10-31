@@ -41,7 +41,7 @@ static TaskHandle_t task_handle;
 static uint8_t configured_node_id;
 static volatile uint32_t observable_overwrites;
 /*
- * The 401-entry history is intentionally bounded, but it is much larger than
+ * The 701-entry history is intentionally bounded, but it is much larger than
  * this task's 4 KiB stack. Keep task-owned state in static DRAM so entering the
  * task cannot overwrite FreeRTOS queue control blocks before its first read.
  * Only pipeline_task accesses these objects after startup.
@@ -221,7 +221,7 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     configured_node_id = node_id;
     if (xTaskCreate(pipeline_task, "physical_pipeline", PIPELINE_TASK_STACK, NULL,
         PIPELINE_TASK_PRIORITY, &task_handle) != pdPASS) return ESP_ERR_NO_MEM;
-    ESP_LOGI(TAG, "Node %u continuous 50 Hz %s pipeline started", node_id,
+    ESP_LOGI(TAG, "Node %u continuous 100 Hz %s pipeline started", node_id,
         APP_USE_MOCK_IMU ? "mock" : "MPU6050");
     return ESP_OK;
 }

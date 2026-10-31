@@ -15,7 +15,7 @@ gcc -std=c11 -Wall -Wextra -Werror `
 .tmp/protocol_host_tests.exe
 ```
 
-The history/feeder test is independent of ESP-IDF and verifies a five-second
+The history/feeder test is independent of ESP-IDF and verifies a three-second
 historical flush followed by live delivery, chronological exactly-once capture
 sequences, and bounded-ring overwrite reporting:
 
@@ -28,15 +28,14 @@ gcc -std=c11 -Wall -Wextra -Werror `
 .tmp/sensor_history_tests.exe
 ```
 
-The copied C++ generic detector is checked with the hardware team's original
-host test so filtering, duration qualification, cooldown, gaps, invalid values
-and timer rollover remain equivalent:
+The copied C++ generic detector has a focused communications-side regression
+test for its 100 Hz duration guard and weak sustained peaks:
 
 ```powershell
 g++ -std=c++17 -Wall -Wextra -Werror `
   -Icommunications/firmware/FireBeetle_to_Ultra96/components/hardware_core/include `
   communications/firmware/FireBeetle_to_Ultra96/components/hardware_core/src/GenericPeakDetector.cpp `
-  hardware/tests/generic_peak_detector_test.cpp `
+  communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/test_generic_peak_detector.cpp `
   -o .tmp/generic_peak_detector_tests.exe
 .tmp/generic_peak_detector_tests.exe
 ```

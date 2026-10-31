@@ -34,7 +34,7 @@ boundary without clearing IMU history. Only then does the server accept an
 `ACTIVITY_TRIGGER` from either node. It maps the reported peak into the Ultra96
 clock and sends one
 `START_FLUSH` to each node. Both commands must receive `CONTROL_ACK` within
-three seconds. The server then opens its assembler at five seconds before the
+three seconds. The server then opens its assembler at three seconds before the
 common peak. A timeout sends STOP to both and requires a manual `start` to
 re-arm trigger handling. The terminal also accepts `start` and `stop`.
 
@@ -65,14 +65,14 @@ new command was sent.
 Each authorized `START_FLUSH` advances a per-connection physical capture
 generation before the command is sent. Replay and timestamp validation remain
 strict within that generation, while acquisition sequences intentionally
-resent by an overlapping five-second history are accepted in the new
-generation. This permits a user to resume within five seconds of an idle or
+resent by an overlapping three-second history are accepted in the new
+generation. This permits a user to resume within the retained-history budget after an idle or
 manual stop without the historical backfill being mistaken for a protocol
 replay.
 
 After START_FLUSH is confirmed, the server assembles provisional two-node windows
 using mapped capture timestamps. The defaults are a 100 Hz expected rate, a
-five-second window, and a one-second hop. This complete example makes both the
+three-second window, and a one-second hop. This complete example makes both the
 window and rotating-log settings explicit:
 
 ```sh
@@ -81,7 +81,7 @@ python server.py \
   --log-max-mb 10 \
   --log-backups 5 \
   --sample-rate-hz 100 \
-  --window-seconds 5 \
+  --window-seconds 3 \
   --hop-seconds 1
 ```
 
@@ -93,14 +93,13 @@ The server options are:
 | `--log-max-mb` | `10` | Maximum size of each log file before rotation. |
 | `--log-backups` | `5` | Number of older rotated log files retained. Use `0` to retain none. |
 | `--sample-rate-hz` | `100` | Expected sampling rate used for window quality checks. |
-| `--window-seconds` | `5.0` | Duration of each assembled window. |
+| `--window-seconds` | `3.0` | Duration of each assembled window. |
 | `--hop-seconds` | `1.0` | Time between consecutive window starts. |
 
 `--sample-rate-hz` changes only the expected sample count used for window
 quality checks and the server's sample-interval diagnostics; it does not
-change the ESP32 sampling rate. The physical firmware currently advertises and
-produces 50 Hz, so it must be updated to 100 Hz before using the new server
-default, or the server must be launched with `--sample-rate-hz 50`. Normal
+change the ESP32 sampling rate. The physical firmware advertises and produces
+100 Hz, matching the server default. Normal
 sample intervals may vary by 10% around the configured rate before a warning
 is emitted. To keep the terminal readable, one normal
 sample summary is printed per node per second. Window and hop
@@ -111,7 +110,7 @@ window. Accepted windows are padded to the expected per-node length with
 inference-only samples whose six IMU values are zero; internal sequence gaps
 are filled in place and edge losses are padded at the corresponding edge. The
 summary reports both the received and padded counts, for example
-`node1=496/500 padded=4 node2=495/500 padded=5`. If either node is missing more
+`node1=296/300 padded=4 node2=295/300 padded=5`. If either node is missing more
 than five samples, or its sequence gaps cannot be reconciled with its count
 deficit, the whole synchronized two-node window is rejected. Up to two extra
 samples per node are also tolerated. Identical duplicate sequences are removed
