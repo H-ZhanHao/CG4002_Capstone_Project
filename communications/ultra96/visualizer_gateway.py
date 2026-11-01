@@ -23,6 +23,7 @@ from typing import Any
 
 import websockets
 from websockets.exceptions import ConnectionClosed
+from fall_delivery import parse_fall
 
 from visualizer_protocol import (
     VisualizerProtocolError,
@@ -264,7 +265,9 @@ class VisualizerGateway:
                         if not line or len(line) > 4096:
                             raise ConnectionError("rep control disconnected")
                         message = json.loads(line)
-                        if message.get("type") not in ("rep_result", "rep_delivery") or message.get("v") != 1:
+                        if message.get("type") == "fall_event":
+                            message = parse_fall(line, "fall_event")
+                        elif message.get("type") not in ("rep_result", "rep_delivery") or message.get("v") != 1:
                             raise ValueError("invalid rep control response")
                         await respond(message)
                 except (OSError, ValueError, asyncio.TimeoutError) as error:
@@ -290,7 +293,15 @@ class VisualizerGateway:
                         await websocket.close(code=1008, reason="phone message rate_limit")
                         return
                     request_times.append(now)
-                    message = parse_rep_message(payload)
+                    if len(payload.encode() if isinstance(payload, str) else payload) > 1024:
+                        raise VisualizerProtocolError("phone message exceeds 1024 bytes")
+                    try:
+                        envelope = json.loads(payload)
+                        message = (parse_fall(payload, "fall_ack")
+                                   if isinstance(envelope, dict) and envelope.get("type") == "fall_ack"
+                                   else parse_rep_message(payload))
+                    except (ValueError, UnicodeError) as error:
+                        raise VisualizerProtocolError(str(error)) from error
                     if control_writer is None:
                         raise VisualizerProtocolError("rep control unavailable")
                     # No replay queue: forward only on this live phone/control link.
@@ -306,6 +317,13 @@ class VisualizerGateway:
                     return
 
         async def send_messages():
+            async def send_response(payload):
+                await websocket.send(payload)
+                message = json.loads(payload)
+                if message.get("type") == "fall_event":
+                    LOGGER.info("FALL_AR_SENT node=%d boot=%d event=%s",
+                                message["node_id"], message["boot_id"], message["event_id"])
+
             # Exactly one WSS writer; receipts never enter the replaceable
             # exercise slot. Outstanding response memory is bounded to 32 items.
             update = asyncio.create_task(queue.get())
@@ -315,7 +333,7 @@ class VisualizerGateway:
                 while True:
                     await asyncio.wait((update, receipt), return_when=asyncio.FIRST_COMPLETED)
                     if receipt.done():
-                        await websocket.send(receipt.result())
+                        await send_response(receipt.result())
                         receipt = asyncio.create_task(responses.get())
                     if update.done():
                         payload = update.result()
@@ -326,7 +344,7 @@ class VisualizerGateway:
                             ready, _ = await asyncio.wait((receipt,),
                                 timeout=max(0, deadline - time.monotonic()))
                             if receipt in ready:
-                                await websocket.send(receipt.result())
+                                await send_response(receipt.result())
                                 receipt = asyncio.create_task(responses.get())
                         while not queue.empty():
                             payload = queue.get_nowait()

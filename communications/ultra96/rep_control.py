@@ -1,4 +1,4 @@
-"""Stage 3: explicit rep sessions and bounded gateway->coordinator loopback IPC.
+"""Rep sessions and acknowledged fall delivery over bounded loopback IPC.
 
 Only the coordinator owns ESP connections. This service binds IPv4 loopback,
 accepts at most four local links, limits lines to 1024 bytes and phone requests
@@ -13,6 +13,7 @@ import threading
 import time
 
 from visualizer_protocol import parse_rep_message, VisualizerProtocolError, MAX_PHONE_BYTES
+from fall_delivery import parse_fall
 
 CONTROL_PORT = 9101
 
@@ -162,6 +163,8 @@ class _Handler(socketserver.BaseRequestHandler):
         self.request.settimeout(0.05)
         buffer = bytearray()
         notifications = []
+        fall_sent = {}
+        next_fall_poll = 0.0
 
         def send(message):
             self.request.sendall((json.dumps(message, separators=(",", ":")) + "\n").encode())
@@ -170,6 +173,12 @@ class _Handler(socketserver.BaseRequestHandler):
             send(controller.welcome())
             while not self.server.stopping.is_set():
                 controller.coordinator.feedback_delivery.tick()
+                # Only the current gateway link can deliver/ack falls; no rep sync needed.
+                with controller.lock:
+                    if controller.active == link["epoch"] and time.monotonic() >= next_fall_poll:
+                        next_fall_poll = time.monotonic() + 0.5
+                        for event in controller.coordinator.device_events.falls.due(fall_sent):
+                            send(event)
                 for original, deadline in list(notifications):
                     nodes = controller.coordinator.feedback_delivery.event_status(original["feedback_event_id"])
                     if all(node["status"] != "pending" for node in nodes) or time.monotonic() >= deadline:
@@ -187,6 +196,16 @@ class _Handler(socketserver.BaseRequestHandler):
                     line, _, rest = buffer.partition(b"\n")
                     buffer = bytearray(rest)
                     if len(line) > MAX_PHONE_BYTES:
+                        return
+                    try:
+                        envelope = json.loads(line)
+                        if isinstance(envelope, dict) and envelope.get("type") == "fall_ack":
+                            message = parse_fall(bytes(line), "fall_ack")
+                            with controller.lock:
+                                if controller.active == link["epoch"]:
+                                    controller.coordinator.device_events.falls.acknowledge(message, fall_sent)
+                            continue
+                    except (ValueError, UnicodeError):
                         return
                     if len(notifications) >= 16:
                         send(controller.response(reason="delivery_queue_full"))

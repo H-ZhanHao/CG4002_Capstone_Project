@@ -68,7 +68,51 @@ a dedicated DEVICE_EVENT_ACK (0x14). The ESP retains up to eight pending reports
 for 30 seconds, with 500 ms retries. STOP does not clear them. Receiver receipts
 are bounded and retained only for the server process lifetime; neither side uses
 durable storage. Logs identify synthetic events and report queue loss/expiry.
-No fall JSON, gateway forwarding, Unity or AR reporting is implemented yet.
+Fall AR reporting now extends this receipt path through the existing loopback
+control connection (9101) and gateway WSS connection. Deploy `fall_delivery.py`
+beside `device_events.py`, `rep_control.py`, `visualizer_protocol.py`, and
+`feedback_delivery.py`, with the updated gateway and your selected server.
+Both `server.py` and `server_AI.py` use the shared receiver; their inference and
+capture paths are unchanged. Update/rebuild the Unity client as described in
+`../unity/Ultra96VisualizerDemo/README.md`. Existing firmware, laptop relay
+commands, SSH forwards and TLS certificates need no changes.
+
+The exact outbound JSON is:
+
+```json
+{"v":1,"type":"fall_event","node_id":1,"boot_id":12345,"event_id":"42"}
+```
+
+The phone replies with the same identity and `type: "fall_ack"`. The event ID
+is a canonical positive decimal uint64 string; boot ID is a positive uint32
+JSON integer. Other fields/types are rejected. Identity is node/boot/event,
+independent of rep sessions and inference runs. `occurred_node_us`, synthetic
+status and local alarm duration stay internal. Synthetic `fall inject` reports
+are ACKed by Ultra96 but deliberately filtered from AR alerts.
+
+Ultra96 retains up to 32 pending AR reports for 30 seconds from server receipt,
+retries no faster than once per second per event, and replays unacknowledged
+reports when the gateway/phone reconnects. At most eight are offered per 500 ms
+poll to leave room for rep traffic. Full queues preserve pending reports and
+drop new AR reports with `FALL_AR_OVERFLOW`; expired reports log
+`FALL_AR_EXPIRED`. ESP acceptance/ACK is independent of AR availability and
+does not claim AR delivery. `FALL_AR_ACKED` means the Unity client accepted the
+notification, not that a human saw/dismissed it. No extra buzzer command or
+automatic STOP is issued. Exercise updates never replace fall events.
+
+This is bounded in-memory delivery: server restart loses pending reports and
+receipts; phone restart loses its deduplication state. The 30-second limit
+bounds server retention/retries, not the age of bytes already in transit.
+
+Host verification (from this directory, with requirements installed):
+
+```sh
+python -m unittest -v test_fall_reporting test_stage5_fall test_rep_control
+```
+
+The fall tests exercise both server entrypoints over real loopback TLS, including
+retries, reconnects, gateway restart, synthetic filtering, and concurrent rep/
+exercise traffic. A physical detector-to-phone check remains required.
 Hip USB `fall inject` explicitly tests the alarm/event path; `feedback fall-alarm`
 still tests output only. See firmware `test/protocol_host/STAGE5_CHECKPOINT.md`
 for the wire layout, saved builds, limitations and physical test procedure.

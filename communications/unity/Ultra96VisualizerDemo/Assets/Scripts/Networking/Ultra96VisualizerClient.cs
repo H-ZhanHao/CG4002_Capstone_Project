@@ -57,6 +57,11 @@ namespace CG4002.Visualizer
         public string RepSessionId { get; private set; }
         public bool RepSessionReady { get; private set; }
         public event Action<RepFeedbackResponse> RepFeedbackReceived;
+        private readonly FallReceiptTracker fallReceipts = new();
+        public FallEventMessage LatestFall { get; private set; }
+        public bool FallAlertVisible { get; private set; }
+        public event Action<FallEventMessage> FallReceived;
+        public void DismissFallAlert() => FallAlertVisible = false;
 
         public string Url { get; private set; } = DefaultUrl;
         public VisualizerConnectionState State { get; private set; } =
@@ -206,6 +211,29 @@ namespace CG4002.Visualizer
         /// </summary>
         private void ProcessMessage(string json, PinnedWebSocketConnection source)
         {
+            if (FallProtocol.TryParse(json, out FallEventMessage fall))
+            {
+                QueueOnMainThread(() =>
+                {
+                    if (activeSocket != source) return;
+                    // Bound memory without evicting identities and re-alerting old events.
+                    if (!fallReceipts.Accept(fall, out bool isNew))
+                    {
+                        Debug.LogWarning("Fall identity capacity exhausted; restart client");
+                        return;
+                    }
+                    if (isNew)
+                    {
+                        LatestFall = fall;
+                        FallAlertVisible = true;
+                        Debug.Log($"FALL_AR_RECEIVED boot={fall.BootId} event={fall.EventId}");
+                        try { FallReceived?.Invoke(fall); }
+                        catch (Exception error) { Debug.LogException(error); }
+                    }
+                    _ = SendFallAckAsync(source, fall);
+                });
+                return;
+            }
             if (RepFeedbackProtocol.TryParse(json, out RepFeedbackResponse response))
             {
                 QueueOnMainThread(() =>
@@ -298,6 +326,18 @@ namespace CG4002.Visualizer
                 throw new ArgumentException("Start a rep session; use a new session to reset its count");
             currentRepCount = repIndex;
             return RepSessionReady ? SendRepRequestAsync("rep_event") : Task.FromResult(false);
+        }
+
+        private async Task SendFallAckAsync(PinnedWebSocketConnection source, FallEventMessage fall)
+        {
+            try
+            {
+                if (activeSocket == source)
+                    await source.SendTextAsync(FallProtocol.BuildAck(fall), connectionToken);
+            }
+            catch (Exception error) when (error is IOException || error is OperationCanceledException ||
+                                          error is ObjectDisposedException)
+            { Debug.LogWarning($"Fall ACK deferred until retry: {error.Message}"); }
         }
 
         private async Task<bool> SendRepRequestAsync(string type)

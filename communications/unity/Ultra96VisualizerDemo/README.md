@@ -61,3 +61,30 @@ Android Internet permission is explicitly enabled in `ProjectSettings.asset`.
 In Unity, open **Window > General > Test Runner**, select **EditMode**, and run
 all tests. `ExerciseUpdateProtocolTests` verifies required fields and covers
 malformed JSON, unsupported versions/types, and invalid ranges.
+
+## Fall notifications
+
+The client accepts the five-field `fall_event` JSON over its existing pinned
+WSS connection and sends `fall_ack` with the same node/boot/event identity after
+main-thread acceptance. It exposes `FallReceived`, `LatestFall`,
+`FallAlertVisible`, and `DismissFallAlert()` for AR integration. These work before
+any rep session starts and independently of exercise update freshness.
+
+The existing demo debug panel displays a red **FALL DETECTED** banner, boot/event
+identity and a Dismiss alert button. Dismissal is a local UI operation; receipt
+ACK is automatic. Duplicate/retried events are ACKed without raising the callback
+again or redisplaying a dismissed alert. Deduplication survives WSS reconnects
+for the client component lifetime. Up to 64 boot identities are retained, with
+event high-water marks; reaching capacity fails closed and logs a warning until
+the client is restarted. This assumes increasing event order from the existing
+Ultra96 receiver. Rebuilding/installing this client is necessary; existing APKs
+do not understand fall notifications.
+
+For a physical check, update the Ultra96 files listed in its README, rebuild the
+demo, connect normally, and use a safe sensor test fixture to produce a real
+detector event. Expect `DEVICE_EVENT_ACCEPTED`, `FALL_AR_QUEUED`, Unity's
+`FALL_AR_RECEIVED`, the visible banner, and `FALL_AR_ACKED`. Confirm delivery
+while capture is stopped, dismiss the alert, and verify a distinct later event
+shows another alert. USB `fall inject` intentionally remains local/server-only;
+do not use it as proof of AR delivery. Automated tests provide controlled fall
+frames without requiring a person to fall.

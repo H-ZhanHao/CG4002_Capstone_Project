@@ -60,6 +60,16 @@ namespace CG4002.Visualizer
             GUILayout.Space(8f);
             GUILayout.Label(client.StatusDetail, bodyStyle);
             GUILayout.EndArea();
+            if (client.FallAlertVisible && client.LatestFall != null)
+            {
+                GUILayout.BeginArea(new Rect(16f, 340f, width, 160f), GUI.skin.box);
+                GUI.color = Color.red;
+                GUILayout.Label("FALL DETECTED", headingStyle);
+                GUI.color = previousColor;
+                GUILayout.Label($"Hip · boot {client.LatestFall.BootId} · event {client.LatestFall.EventId}", bodyStyle);
+                if (GUILayout.Button("Dismiss alert")) client.DismissFallAlert();
+                GUILayout.EndArea();
+            }
         }
 
         /// <summary>Map connection health to the assessment panel's status colour.</summary>

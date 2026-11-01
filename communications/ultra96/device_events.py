@@ -1,4 +1,4 @@
-"""Hip fall receipt and ACK only. No gateway, AR message or capture control.
+"""Hip fall receipt, ESP ACK and nonblocking AR outbox insertion.
 
 Identity is (node, boot, event), independent of the reconnect transport Session.
 Retention is bounded; evicted old IDs fail closed. Receipt state is in memory
@@ -7,6 +7,10 @@ for the server process lifetime, not a durable emergency notification service.
 from collections import OrderedDict
 import logging
 import struct
+try:
+    from fall_delivery import FallDelivery
+except ImportError:
+    from .fall_delivery import FallDelivery
 
 MESSAGE_TYPE_DEVICE_EVENT = 0x13
 MESSAGE_TYPE_DEVICE_EVENT_ACK = 0x14
@@ -23,6 +27,7 @@ class DeviceEventReceiver:
 
     def __init__(self):
         self.boots = {}
+        self.falls = FallDelivery()
 
     def receive(self, frame, connection, build_header):
         if len(frame) != HEADER.size + EVENT_PAYLOAD.size:
@@ -58,8 +63,10 @@ class DeviceEventReceiver:
             result = 0
             LOGGER.warning(
                 "DEVICE_EVENT_ACCEPTED node=%d boot=%d event=%d kind=FALL_STARTED "
-                "occurred_node_us=%d alarm_duration_ms=%d synthetic=%s ar_reporting=deferred",
+                "occurred_node_us=%d alarm_duration_ms=%d synthetic=%s",
                 node, boot, event, occurred, duration, bool(synthetic))
+            # Nonblocking memory enqueue precedes the ESP ACK, including failed ACK writes.
+            self.falls.enqueue(node, boot, event, bool(synthetic))
         ack = build_header(MESSAGE_TYPE_DEVICE_EVENT_ACK, node_id=0,
                            payload_length=ACK_PAYLOAD.size, session_id=session,
                            sequence=seq) + ACK_PAYLOAD.pack(boot, event, result)
