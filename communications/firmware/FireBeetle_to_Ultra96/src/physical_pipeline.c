@@ -14,6 +14,8 @@
 #include "freertos/task.h"
 #include "hardware_bridge.h"
 #include "sensor_history.h"
+#include "fall_bridge.h"
+#include "device_events.h"
 
 #define PIPELINE_TASK_STACK 4096
 #define PIPELINE_TASK_PRIORITY 4
@@ -52,6 +54,43 @@ static volatile uint32_t observable_overwrites;
  */
 static physical_history_t pipeline_history;
 static physical_feeder_t pipeline_feeder;
+static device_events_t device_events;
+static portMUX_TYPE event_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t board_boot_id;
+static uint64_t last_fall_us;
+
+static bool record_fall(bool synthetic)
+{
+    uint64_t now = (uint64_t)esp_timer_get_time();
+    if (configured_node_id != 1 || (last_fall_us && now-last_fall_us < 3000000ULL)) return false;
+    last_fall_us = now;
+    // Alarm is local and immediate, even if delivery storage is full/offline.
+    (void)feedback_bridge_trigger(FEEDBACK_FALL_ALARM, (uint32_t)(now/1000));
+    portENTER_CRITICAL(&event_lock);
+    bool queued = device_events_push(&device_events, now, synthetic);
+    uint64_t id = device_events.next_id;
+    portEXIT_CRITICAL(&event_lock);
+    ESP_LOGW(TAG, "FALL_STARTED boot=%lu event=%llu synthetic=%d queued=%d duration_ms=3000",
+        (unsigned long)board_boot_id, (unsigned long long)id, synthetic, queued);
+    return true;
+}
+static bool inject_fall(void) { return record_fall(true); }
+
+uint32_t physical_pipeline_boot_id(void) { return board_boot_id; }
+bool physical_pipeline_event_due(uint64_t now, protocol_device_event_t *event)
+{
+    portENTER_CRITICAL(&event_lock);
+    bool due = device_events_due(&device_events, now, event);
+    portEXIT_CRITICAL(&event_lock);
+    return due;
+}
+bool physical_pipeline_event_ack(const protocol_device_event_ack_t *ack)
+{
+    portENTER_CRITICAL(&event_lock);
+    bool accepted = device_events_ack(&device_events, ack);
+    portEXIT_CRITICAL(&event_lock);
+    return accepted;
+}
 
 static bool apply_feedback(uint8_t action, uint64_t now_us, void *context)
 {
@@ -159,6 +198,7 @@ static void pipeline_task(void *unused)
     physical_history_clear(&pipeline_history);
     physical_feeder_stop(&pipeline_feeder);
     uint64_t next_capture_us = (uint64_t)esp_timer_get_time();
+    uint32_t expired_before = 0, overflow_before = 0;
     for (;;) {
         feedback_bridge_service((uint32_t)((uint64_t)esp_timer_get_time() / 1000U));
         pipeline_command_t command;
@@ -179,6 +219,8 @@ static void pipeline_task(void *unused)
             hardware_bridge_sample_t hardware_sample;
             hardware_bridge_peak_t peak;
             if (hardware_bridge_capture(sequence, &hardware_sample, &peak)) {
+                if (fall_bridge_update(hardware_sample.acceleration,
+                        hardware_sample.timestamp_us, true)) (void)record_fall(false);
                 exercise_bridge_update(hardware_sample.timestamp_us,
                     hardware_sample.acceleration, hardware_sample.gyro);
                 captured.node_id = configured_node_id;
@@ -206,6 +248,8 @@ static void pipeline_task(void *unused)
                     if (xQueueSend(trigger_queue, &event, 0) == pdPASS)
                         trigger_armed = false;
                 }
+            } else {
+                (void)fall_bridge_update(NULL, now_us, false);
             }
             next_capture_us += PHYSICAL_SAMPLE_PERIOD_US;
             if (next_capture_us <= now_us) next_capture_us = now_us + PHYSICAL_SAMPLE_PERIOD_US;
@@ -222,6 +266,15 @@ static void pipeline_task(void *unused)
         /* Expose only an actual history-to-live delivery gap. Routine eviction
          * from the bounded rolling history is expected before a trigger. */
         observable_overwrites = pipeline_feeder.lost_before_send;
+        portENTER_CRITICAL(&event_lock);
+        device_events_expire(&device_events, now_us);
+        uint32_t expired = device_events.expired, overflow = device_events.overflow;
+        portEXIT_CRITICAL(&event_lock);
+        if (expired != expired_before || overflow != overflow_before) {
+            ESP_LOGW(TAG, "DEVICE_EVENT_LOSS expired=%lu overflow=%lu",
+                (unsigned long)expired, (unsigned long)overflow);
+            expired_before = expired; overflow_before = overflow;
+        }
         vTaskDelay(1);
     }
 }
@@ -244,6 +297,10 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     if (command_queue == NULL || trigger_queue == NULL || feedback_ack_queue == NULL) return ESP_ERR_NO_MEM;
     sample_queue = output_queue;
     configured_node_id = node_id;
+    do { board_boot_id = esp_random(); } while (!board_boot_id);
+    device_events_init(&device_events, board_boot_id);
+    fall_bridge_begin(node_id);
+    feedback_bridge_set_fall_injector(inject_fall);
     if (xTaskCreate(pipeline_task, "physical_pipeline", PIPELINE_TASK_STACK, NULL,
         PIPELINE_TASK_PRIORITY, &task_handle) != pdPASS) return ESP_ERR_NO_MEM;
     ESP_LOGI(TAG, "Node %u continuous 100 Hz %s pipeline started", node_id,

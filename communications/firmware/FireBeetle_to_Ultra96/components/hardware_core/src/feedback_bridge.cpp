@@ -14,6 +14,7 @@
 
 namespace {
 FeedbackController controller;
+bool (*fallInjector)(void) = nullptr;
 #if APP_FEEDBACK_DIAGNOSTICS
 FeedbackDiagnostic diagnostic;
 const char *TAG = "feedback";
@@ -62,7 +63,7 @@ extern "C" esp_err_t feedback_bridge_begin(uint8_t node_id) {
   static_assert(CONFIG_ESP_CONSOLE_UART_NUM == 0, "Diagnostics require UART0 console");
   err = uart_driver_install(UART_NUM_0, 256, 0, 0, nullptr, 0);
   if (err != ESP_OK) return err;
-  ESP_LOGI(TAG, "USB diagnostics: feedback rep|ready|idle|fall-alarm|status (115200)");
+  ESP_LOGI(TAG, "USB diagnostics: feedback rep|ready|idle|fall-alarm|status; fall inject (synthetic) (115200)");
 #endif
   drive();
   return ESP_OK;
@@ -83,6 +84,10 @@ extern "C" bool feedback_bridge_trigger(feedback_action_t action, uint32_t now_m
   return accepted;
 }
 
+extern "C" void feedback_bridge_set_fall_injector(bool (*injector)(void)) {
+  fallInjector = injector;
+}
+
 extern "C" void feedback_bridge_service(uint32_t now_ms) {
   controller.update(now_ms);
   drive(); // Always expire outputs, even with no valid sensor sample.
@@ -93,8 +98,14 @@ extern "C" void feedback_bridge_service(uint32_t now_ms) {
     using Command = FeedbackDiagnostic::Command;
     const Command command = diagnostic.feed(static_cast<char>(bytes[i]));
     if (command == Command::None) continue;
+    if (command == Command::FallEvent) {
+      const bool accepted = fallInjector && fallInjector();
+      ESP_LOGW(TAG, "SYNTHETIC_FALL %s (test injection, not sensor detection)",
+          accepted ? "accepted" : "rejected");
+      continue;
+    }
     if (command == Command::Invalid) {
-      ESP_LOGW(TAG, "Invalid/oversized command: feedback rep|ready|idle|fall-alarm|status");
+      ESP_LOGW(TAG, "Invalid/oversized command: feedback rep|ready|idle|fall-alarm|status; fall inject (synthetic)");
       continue;
     }
     if (command != Command::Status) {

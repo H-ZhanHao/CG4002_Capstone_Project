@@ -39,6 +39,36 @@
 #define PROTOCOL_MESSAGE_TYPE_DATA      0x10
 #define PROTOCOL_MESSAGE_TYPE_HEARTBEAT 0x11
 #define PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA 0x12
+#define PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT 0x13
+#define PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT_ACK 0x14
+#define PROTOCOL_DEVICE_EVENT_PAYLOAD_SIZE 32
+#define PROTOCOL_DEVICE_EVENT_PACKET_SIZE (PROTOCOL_HEADER_SIZE + PROTOCOL_DEVICE_EVENT_PAYLOAD_SIZE)
+#define PROTOCOL_DEVICE_EVENT_ACK_PAYLOAD_SIZE 16
+#define PROTOCOL_DEVICE_EVENT_ACK_PACKET_SIZE (PROTOCOL_HEADER_SIZE + PROTOCOL_DEVICE_EVENT_ACK_PAYLOAD_SIZE)
+#define PROTOCOL_EVENT_FALL_STARTED 1
+#define PROTOCOL_EVENT_ACK_ACCEPTED 0
+#define PROTOCOL_EVENT_ACK_DUPLICATE 1
+
+typedef struct {
+    uint32_t boot_id;
+    uint64_t event_id;
+    uint64_t occurred_us;
+    uint32_t duration_ms;
+    uint8_t kind;
+    uint8_t synthetic;
+} protocol_device_event_t;
+typedef struct {
+    uint32_t boot_id;
+    uint64_t event_id;
+    uint8_t result;
+} protocol_device_event_ack_t;
+
+bool protocol_encode_device_event(uint8_t *packet, uint32_t session_id,
+                                  const protocol_device_event_t *event);
+bool protocol_decode_device_event(const uint8_t *frame, size_t length,
+                                  protocol_device_event_t *event);
+bool protocol_decode_device_event_ack(const uint8_t *frame, size_t length,
+                                      protocol_device_event_ack_t *ack);
 #define PROTOCOL_MESSAGE_TYPE_TEST_REQUEST 0x20
 #define PROTOCOL_MESSAGE_TYPE_TEST_RESPONSE 0x21
 #define PROTOCOL_MESSAGE_TYPE_BENCHMARK_CONTROL 0x22

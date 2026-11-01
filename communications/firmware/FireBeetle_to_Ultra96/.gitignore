@@ -17,3 +17,6 @@
 
 !sdkconfig.node1_stage4
 !sdkconfig.node2_stage4
+
+!sdkconfig.node1_stage5
+!sdkconfig.node2_stage5

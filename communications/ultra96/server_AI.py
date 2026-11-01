@@ -58,6 +58,12 @@ except ImportError:
     from .rep_control import RepControlServer
 
 
+try:
+    from device_events import DeviceEventReceiver, MESSAGE_TYPE_DEVICE_EVENT
+except ImportError:
+    from .device_events import DeviceEventReceiver, MESSAGE_TYPE_DEVICE_EVENT
+
+
 HOST = "0.0.0.0"
 PORT = 5000
 
@@ -1186,6 +1192,7 @@ class CaptureCoordinator:
         self._lock = threading.RLock()
         self._control_sequence = 0
         self.feedback_delivery = FeedbackDelivery()
+        self.device_events = DeviceEventReceiver()
         self.run_active = False
         self.start_pending = False
         self._pending_start_acks = {}
@@ -1757,6 +1764,18 @@ class CaptureCoordinator:
                 ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
                 f"Unsupported acknowledged command 0x{command_type:02X}",
             )
+
+    def receive_device_event(self, frame, connection):
+        """Accept fall reports independently of acquisition/idle state."""
+        with self._lock:
+            if self._connections.get(connection.node_id) is not connection:
+                raise ProtocolError(ERROR_INVALID_SESSION, MESSAGE_TYPE_DEVICE_EVENT,
+                                    "DEVICE_EVENT from obsolete connection")
+            try:
+                return self.device_events.receive(frame, connection, build_header)
+            except ValueError as error:
+                raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_DEVICE_EVENT,
+                                    str(error)) from error
 
     def request_feedback(self, action):
         """Submit bounded feedback through the shared per-node delivery path."""
@@ -2707,6 +2726,11 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
                                 "SYNC_RESP is not enabled for this connection",
                             )
                         control_connection.process_sync_response(frame)
+                    elif message_type == MESSAGE_TYPE_DEVICE_EVENT:
+                        if control_connection is None:
+                            raise ProtocolError(ERROR_UNEXPECTED_MESSAGE, message_type,
+                                                "DEVICE_EVENT requires a coordinator")
+                        coordinator.receive_device_event(frame, control_connection)
                     elif message_type == MESSAGE_TYPE_CONTROL_ACK:
                         if control_connection is None:
                             raise ProtocolError(

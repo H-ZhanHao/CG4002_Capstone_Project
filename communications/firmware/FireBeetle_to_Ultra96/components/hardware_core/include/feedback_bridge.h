@@ -14,6 +14,8 @@ esp_err_t feedback_bridge_begin(uint8_t node_id);
 // Call only on the pipeline task; no GPIO or state access from other tasks.
 bool feedback_bridge_trigger(feedback_action_t action, uint32_t now_ms);
 void feedback_bridge_service(uint32_t now_ms);
+// Optional explicitly synthetic fall event diagnostic, invoked on pipeline task.
+void feedback_bridge_set_fall_injector(bool (*injector)(void));
 #ifdef __cplusplus
 }
 #endif

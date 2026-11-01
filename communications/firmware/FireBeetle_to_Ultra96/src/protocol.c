@@ -774,3 +774,54 @@ void protocol_encode_file_result(
     write_u64_be(&packet[16], timestamp_us);
     protocol_encode_file_result_payload(&packet[PROTOCOL_HEADER_SIZE], result);
 }
+
+/* Device event v1 payload: kind:u8, synthetic:u8, reserved:u16,
+ * boot:u32, event:u64, occurred_us:u64, duration_ms:u32, reserved:u32. */
+bool protocol_encode_device_event(uint8_t *p, uint32_t session,
+                                  const protocol_device_event_t *e)
+{
+    if (!p || !e || !session || !e->boot_id || !e->event_id ||
+        !e->occurred_us || e->kind != PROTOCOL_EVENT_FALL_STARTED ||
+        e->synthetic > 1 || e->duration_ms != 3000) return false;
+    memset(p, 0, PROTOCOL_DEVICE_EVENT_PACKET_SIZE);
+    write_u16_be(p, PROTOCOL_MAGIC); p[2] = PROTOCOL_VERSION;
+    p[3] = PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT; p[4] = 1;
+    write_u16_be(p+6, PROTOCOL_DEVICE_EVENT_PAYLOAD_SIZE);
+    write_u32_be(p+8, session); write_u32_be(p+12, (uint32_t)e->event_id);
+    write_u64_be(p+16, e->occurred_us);
+    p[24] = e->kind; p[25] = e->synthetic;
+    write_u32_be(p+28, e->boot_id); write_u64_be(p+32, e->event_id);
+    write_u64_be(p+40, e->occurred_us); write_u32_be(p+48, e->duration_ms);
+    return true;
+}
+bool protocol_decode_device_event(const uint8_t *p, size_t length,
+                                  protocol_device_event_t *e)
+{
+    protocol_header_t h;
+    if (!p || !e || length != PROTOCOL_DEVICE_EVENT_PACKET_SIZE ||
+        !protocol_decode_header(p, length, &h) || h.magic != PROTOCOL_MAGIC ||
+        h.version != PROTOCOL_VERSION || h.message_type != PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT ||
+        h.node_id != 1 || h.flags || !h.session_id ||
+        h.payload_length != PROTOCOL_DEVICE_EVENT_PAYLOAD_SIZE ||
+        read_u16_be(p+26) || read_u32_be(p+52)) return false;
+    e->kind = p[24]; e->synthetic = p[25]; e->boot_id = read_u32_be(p+28);
+    e->event_id = read_u64_be(p+32); e->occurred_us = read_u64_be(p+40);
+    e->duration_ms = read_u32_be(p+48);
+    return e->kind == PROTOCOL_EVENT_FALL_STARTED && e->synthetic <= 1 &&
+        e->boot_id && e->event_id && e->occurred_us && e->duration_ms == 3000 &&
+        h.timestamp_us == e->occurred_us && h.sequence == (uint32_t)e->event_id;
+}
+bool protocol_decode_device_event_ack(const uint8_t *p, size_t length,
+                                      protocol_device_event_ack_t *a)
+{
+    protocol_header_t h;
+    if (!p || !a || length != PROTOCOL_DEVICE_EVENT_ACK_PACKET_SIZE ||
+        !protocol_decode_header(p, length, &h) || h.magic != PROTOCOL_MAGIC ||
+        h.version != PROTOCOL_VERSION || h.message_type != PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT_ACK ||
+        h.node_id || h.flags || !h.session_id ||
+        h.payload_length != PROTOCOL_DEVICE_EVENT_ACK_PAYLOAD_SIZE ||
+        p[37] || p[38] || p[39]) return false;
+    a->boot_id = read_u32_be(p+24); a->event_id = read_u64_be(p+28); a->result = p[36];
+    return a->boot_id && a->event_id && a->result <= PROTOCOL_EVENT_ACK_DUPLICATE &&
+        h.sequence == (uint32_t)a->event_id;
+}

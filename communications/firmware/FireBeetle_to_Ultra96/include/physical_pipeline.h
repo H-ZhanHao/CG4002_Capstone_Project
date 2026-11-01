@@ -36,5 +36,8 @@ uint8_t physical_pipeline_stop_flush(uint32_t session_id,
 bool physical_pipeline_receive_trigger(physical_trigger_event_t *event,
     TickType_t ticks_to_wait);
 uint32_t physical_pipeline_get_overwrite_count(uint8_t node_id);
+uint32_t physical_pipeline_boot_id(void);
+bool physical_pipeline_event_due(uint64_t now_us, protocol_device_event_t *event);
+bool physical_pipeline_event_ack(const protocol_device_event_ack_t *ack);
 
 #endif

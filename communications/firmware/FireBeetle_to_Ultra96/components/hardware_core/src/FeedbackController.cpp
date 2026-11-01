@@ -56,6 +56,6 @@ const char *FeedbackController::ledPattern() const {
   return led_ == Led::Rep ? "rep" : led_ == Led::Ready ? "ready" : "off";
 }
 const char *FeedbackController::buzzerPattern() const {
-  return buzzer_ == Buzzer::Fall ? "fall-alarm-output-only" :
+  return buzzer_ == Buzzer::Fall ? "fall-alarm" :
       buzzer_ == Buzzer::Idle ? "idle" : "off";
 }

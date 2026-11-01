@@ -60,6 +60,19 @@ three seconds. The server then opens its assembler at three seconds before the
 common peak. A timeout sends STOP to both and requires a manual `start` to
 re-arm trigger handling. The terminal also accepts `start` and `stop`.
 
+Stage 5 local fall reporting adds `device_events.py`, required beside either
+updated server (or on its Python import path). Hip detects falls locally and
+requests a three-second alarm even while capture is stopped or the network is
+down. Its DEVICE_EVENT (0x13) is validated/deduplicated by the server and receives
+a dedicated DEVICE_EVENT_ACK (0x14). The ESP retains up to eight pending reports
+for 30 seconds, with 500 ms retries. STOP does not clear them. Receiver receipts
+are bounded and retained only for the server process lifetime; neither side uses
+durable storage. Logs identify synthetic events and report queue loss/expiry.
+No fall JSON, gateway forwarding, Unity or AR reporting is implemented yet.
+Hip USB `fall inject` explicitly tests the alarm/event path; `feedback fall-alarm`
+still tests output only. See firmware `test/protocol_host/STAGE5_CHECKPOINT.md`
+for the wire layout, saved builds, limitations and physical test procedure.
+
 Physical capture has two stop paths. `manual_stop()` (the console `stop`)
 disarms trigger handling until a manual `start`. `idle_pause()` (the console
 `idle`) stops the current ESP feeders and window run, then issues a fresh ARM
