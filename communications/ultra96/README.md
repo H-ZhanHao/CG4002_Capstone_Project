@@ -71,6 +71,26 @@ inference-enabled `server_new.py` does this automatically after three consecutiv
 active-capture classifications whose exercise label is exactly `idle`; any
 non-idle classification resets the counter.
 
+Stage 4's supported AI entrypoint is `server_AI.py`. It retains the intentional
+`window_assembler_updated` import (the local updated `window_assembler.py` is
+deployed under that name). The existing Ultra96 `inference_pipeline.py` confirms
+five consecutive idle classifications at confidence >= 0.80. An accepted current
+generation calls `handle_idle_classification`, which pauses streaming and submits
+one `IDLE_BUZZ` event to Hip/node 1 through `feedback_delivery.py`. Non-idle or
+low-confidence results reset the streak; rejected windows do not add evidence.
+Fresh capture resets evidence and generation; stale inference is ignored. Manual
+`idle`, manual STOP, disconnects and control timeouts do not submit AI feedback.
+Feedback retries reuse the event identity; failure does not block STOP/ACK/ARM.
+Ready LEDs remain an explicit `feedback ready` diagnostic only.
+
+For `server_AI.py`, the default rotating log file is the absolute path
+`/home/xilinx/comms/logs/server.log`, including when launched as root. Override
+it with `--log-file /another/path/server.log`; rotation settings are unchanged.
+The supplied pipeline is retained only as a host-test fixture in
+`stage4_fixtures/inference_pipeline.py`; do not deploy that fixture over the
+existing Ultra96 pipeline. See the firmware `test/protocol_host/STAGE4_CHECKPOINT.md`
+for builds, archives and physical checks.
+
 If manual START or idle needs ARM while a validated same-Session clock mapping
 is older than 120 seconds but no older than ten minutes, the server uses it as
 a bounded holdover and arms immediately while requesting a synchronization

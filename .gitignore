@@ -10,3 +10,5 @@ communications/firmware/FireBeetle_to_Ultra96/test/
 communications/ultra96/test*
 communications/unity/tests/
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/
+
+communications/ultra96/stage4_fixtures/inference_pipeline.py

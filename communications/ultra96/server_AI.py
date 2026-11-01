@@ -185,7 +185,7 @@ SUPPORTED_EXERCISES = (
 )
 HUB_COLORS = {1: "\033[38;5;208m", 2: "\033[34m"}  # orange, blue
 COLOR_RESET = "\033[0m"
-DEFAULT_LOG_FILE = str(Path.home() / "comms" / "logs" / "server.log")
+DEFAULT_LOG_FILE = "/home/xilinx/comms/logs/server.log"
 DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_LOG_BACKUP_COUNT = 5
 LOGGER = logging.getLogger("server")
@@ -1759,7 +1759,7 @@ class CaptureCoordinator:
             )
 
     def request_feedback(self, action):
-        """Explicit Stage 2 bench controls; no AR or AI-triggered feedback yet."""
+        """Submit bounded feedback through the shared per-node delivery path."""
         if action not in (FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ):
             raise ValueError("Unsupported feedback action")
         with self._lock:
@@ -1816,7 +1816,17 @@ class CaptureCoordinator:
             # back into the pipeline through stop_run.
             if not self.window_assembler.accept_idle(result, generation):
                 return False
-            return self.idle_pause()
+            if not self.idle_pause():
+                return False
+            # Only an accepted AI transition creates an event. stop_run has
+            # invalidated this generation and run_active is now false, so
+            # repeated results or STOP/ARM retries cannot submit another one.
+            # STOP is already issued; feedback must never prevent rearming.
+            try:
+                self.request_feedback(FEEDBACK_IDLE_BUZZ)
+            except Exception:
+                LOGGER.exception("IDLE_FEEDBACK_FAILED generation=%s", generation)
+            return True
 
     def idle_pause(self):
         """STOP physical streaming but auto-resume on a fresh activity trigger."""
