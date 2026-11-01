@@ -422,6 +422,31 @@ void protocol_encode_control_ack(
     write_u64_be(&packet[32], ack->effective_local_us);
 }
 
+bool protocol_decode_feedback_payload(const uint8_t *payload, size_t length,
+                                     protocol_feedback_t *feedback)
+{
+    if (payload == NULL || feedback == NULL || length != PROTOCOL_FEEDBACK_PAYLOAD_SIZE)
+        return false;
+    for (size_t i = 9; i < PROTOCOL_FEEDBACK_PAYLOAD_SIZE; ++i)
+        if (payload[i] != 0) return false;
+    feedback->event_id = read_u64_be(payload);
+    feedback->action = payload[8];
+    return feedback->event_id != 0 && feedback->action >= PROTOCOL_FEEDBACK_REP_LED &&
+        feedback->action <= PROTOCOL_FEEDBACK_IDLE_BUZZ;
+}
+
+bool protocol_encode_feedback_payload(uint8_t payload[PROTOCOL_FEEDBACK_PAYLOAD_SIZE],
+                                     const protocol_feedback_t *feedback)
+{
+    if (payload == NULL || feedback == NULL || feedback->event_id == 0 ||
+        feedback->action < PROTOCOL_FEEDBACK_REP_LED ||
+        feedback->action > PROTOCOL_FEEDBACK_IDLE_BUZZ) return false;
+    memset(payload, 0, PROTOCOL_FEEDBACK_PAYLOAD_SIZE);
+    write_u64_be(payload, feedback->event_id);
+    payload[8] = feedback->action;
+    return true;
+}
+
 bool protocol_decode_start_flush_payload(
     const uint8_t *payload, size_t payload_length,
     protocol_start_flush_t *start)

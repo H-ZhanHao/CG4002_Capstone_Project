@@ -38,6 +38,26 @@ except ImportError:
     from .window_assembler_updated import DecodedImuSample, WindowAssembler, WindowConfig
 
 
+try:
+    from feedback_delivery import (
+        FeedbackDelivery, MESSAGE_TYPE_FEEDBACK_COMMAND, FEEDBACK_PAYLOAD_SIZE,
+        FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ,
+        encode_feedback, decode_feedback,
+    )
+except ImportError:
+    from .feedback_delivery import (
+        FeedbackDelivery, MESSAGE_TYPE_FEEDBACK_COMMAND, FEEDBACK_PAYLOAD_SIZE,
+        FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ,
+        encode_feedback, decode_feedback,
+    )
+
+
+try:
+    from rep_control import RepControlServer
+except ImportError:
+    from .rep_control import RepControlServer
+
+
 HOST = "0.0.0.0"
 PORT = 5000
 
@@ -1165,6 +1185,7 @@ class CaptureCoordinator:
         self._connections = {}
         self._lock = threading.RLock()
         self._control_sequence = 0
+        self.feedback_delivery = FeedbackDelivery()
         self.run_active = False
         self.start_pending = False
         self._pending_start_acks = {}
@@ -1205,6 +1226,7 @@ class CaptureCoordinator:
                     self._arm_ready):
                 self._stop_locked("session changed")
             self._connections[connection.node_id] = connection
+            self.feedback_delivery.register(connection)
             self._announced_sync_sessions = None
         if previous is not None and previous is not connection:
             try:
@@ -1219,6 +1241,7 @@ class CaptureCoordinator:
             if (self.run_active or self.start_pending or self.arm_pending or
                     self._arm_ready):
                 self._stop_locked(f"Node {connection.node_id} disconnected")
+            self.feedback_delivery.unregister(connection)
             del self._connections[connection.node_id]
             connection.cancel_arm_sync()
             self._announced_sync_sessions = None
@@ -1569,7 +1592,8 @@ class CaptureCoordinator:
             self.window_assembler.stop_run(reason)
 
     def tick(self, now_us=None):
-        """Fail a group ARM/START that is missing acknowledgements."""
+        """Advance feedback delivery and fail group ARM/START ACK deadlines."""
+        self.feedback_delivery.tick(now_us)
         if now_us is None:
             now_us = time.monotonic_ns() // 1000
         with self._lock:
@@ -1608,6 +1632,14 @@ class CaptureCoordinator:
         """Apply one authenticated ESP result to the pending group command."""
         with self._lock:
             if self._connections.get(connection.node_id) is not connection:
+                return
+            if command_type == MESSAGE_TYPE_FEEDBACK_COMMAND:
+                try:
+                    self.feedback_delivery.acknowledge(
+                        connection, command_sequence, result, effective_local_us)
+                except ValueError as error:
+                    raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
+                                        str(error)) from error
                 return
             if command_type == MESSAGE_TYPE_ARM:
                 expected = self._pending_arm_acks.get(connection.node_id)
@@ -1726,6 +1758,15 @@ class CaptureCoordinator:
                 f"Unsupported acknowledged command 0x{command_type:02X}",
             )
 
+    def request_feedback(self, action):
+        """Explicit Stage 2 bench controls; no AR or AI-triggered feedback yet."""
+        if action not in (FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ):
+            raise ValueError("Unsupported feedback action")
+        with self._lock:
+            sequence = self._next_sequence()
+            nodes = (1,) if action == FEEDBACK_IDLE_BUZZ else (1, 2)
+            return self.feedback_delivery.submit(action, sequence, build_header, nodes)
+
     def stop_all(self, reason="operator shutdown"):
         with self._lock:
             # Shutdown is terminal, unlike an idle pause.  Clear the resume
@@ -1803,7 +1844,8 @@ class CaptureCoordinator:
 
 def run_control_console(coordinator):
     """Accept optional line-based capture controls without extra services."""
-    LOGGER.info("Control commands: start (or s), stop (or x), idle (or i)")
+    LOGGER.info("Control commands: start (s), stop (x), idle (i), "
+                "feedback rep|ready|idle|status|repeat")
     for line in sys.stdin:
         command = line.strip().lower()
         if command in ("start", "s"):
@@ -1812,9 +1854,20 @@ def run_control_console(coordinator):
             coordinator.manual_stop()
         elif command in ("idle", "i"):
             coordinator.idle_pause()
+        elif command in ("feedback rep", "feedback ready", "feedback idle"):
+            action = {"feedback rep": FEEDBACK_REP_LED,
+                      "feedback ready": FEEDBACK_READY_LED,
+                      "feedback idle": FEEDBACK_IDLE_BUZZ}[command]
+            coordinator.request_feedback(action)
+        elif command == "feedback status":
+            LOGGER.info("FEEDBACK_STATUS event,node,status,result=%s",
+                        coordinator.feedback_delivery.status())
+        elif command == "feedback repeat":
+            LOGGER.info("FEEDBACK_REPEAT queued=%d (same event/sequence; expires after 2.5s)",
+                        coordinator.feedback_delivery.repeat_last())
         elif command:
-            LOGGER.warning(
-                "Unknown control command %r; use start, stop, or idle", command)
+            LOGGER.warning("Unknown control command %r; use start, stop, idle, "
+                           "or feedback rep|ready|idle|status|repeat", command)
 
 
 class ManagedClient:
@@ -1891,7 +1944,7 @@ def send_hello_ack(client, session_id):
     )
 
 
-def send_error(client, session_id, code, offending_type):
+def send_error(client, session_id, code, offending_type, send_lock=None):
     """Best-effort delivery of one protocol ERROR before closing the client."""
     payload = struct.pack(
         ERROR_PAYLOAD_FORMAT,
@@ -1907,7 +1960,11 @@ def send_error(client, session_id, code, offending_type):
     ) + payload
 
     try:
-        client.sendall(frame)
+        if send_lock is None:
+            client.sendall(frame)
+        else:
+            with send_lock:
+                client.sendall(frame)
     except OSError:
         pass
 
@@ -2474,9 +2531,13 @@ def process_hub_error(frame, session_id, hub_node_id):
 
 
 def process_control_ack(frame, connection):
-    """Validate an ESP START/STOP result and update group control state."""
+    """Validate capture/feedback ACKs and route them to independent state."""
+    if len(frame) != HEADER_SIZE + CONTROL_ACK_PAYLOAD_SIZE:
+        raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
+                            "Invalid CONTROL_ACK frame length")
     header = unpack_header(frame)
-    if (header[2] != MESSAGE_TYPE_CONTROL_ACK or
+    if (header[0] != MAGIC or header[1] != PROTOCOL_VERSION or
+            header[2] != MESSAGE_TYPE_CONTROL_ACK or
             header[3] != connection.node_id or header[4] != 0 or
             header[5] != CONTROL_ACK_PAYLOAD_SIZE or
             header[6] != connection.session_id):
@@ -2745,6 +2806,8 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
                         session_id if handshake_complete else 0,
                         code,
                         offending_type,
+                        send_lock=control_connection.send_lock
+                        if control_connection is not None else None,
                     )
                     return
             if control_connection is not None:
@@ -2846,7 +2909,11 @@ def parse_args(argv=None):
         "--max-missing-fraction", type=float, default=0.04,
         help="maximum missing samples as a fraction per node/window (default: 0.04)",
     )
+    parser.add_argument("--rep-control-port", type=int, default=9101,
+                        help="loopback AR rep control port (default: 9101)")
     args = parser.parse_args(argv)
+    if not 1 <= args.rep_control_port <= 65535:
+        parser.error("--rep-control-port must be in 1..65535")
     if not math.isfinite(args.max_missing_fraction) or not 0 <= args.max_missing_fraction < 1:
         parser.error("--max-missing-fraction must be finite and in [0, 1)")
     if args.hop_seconds > args.window_seconds:
@@ -2903,6 +2970,11 @@ def main(argv=None):
         physical_mode=True)
     # Wire control before any receiver can start a capture or submit a window.
     inference_pipeline.on_idle = coordinator.handle_idle_classification
+    rep_control = RepControlServer(coordinator, visualizer_publisher.run_id,
+                                   port=args.rep_control_port)
+    rep_control.start()
+    LOGGER.info("REP_CONTROL listening on 127.0.0.1:%d run_id=%d",
+                rep_control.port, visualizer_publisher.run_id)
     control_thread = threading.Thread(
         target=run_control_console,
         args=(coordinator,),
@@ -2925,6 +2997,7 @@ def main(argv=None):
                     client, address, visualizer_publisher, coordinator,
                     inference_pipeline, args.sample_rate_hz)
     finally:
+        rep_control.close()
         coordinator.stop_all()
         inference_pipeline.close()
         visualizer_publisher.close()

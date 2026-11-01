@@ -1,5 +1,29 @@
 # Protocol host tests
 
+Stage 3 adds phone session/rep contracts, loopback IPC, real WSS integration,
+and the checked-in C# transport. Run `run_stage3_tests.ps1`; see
+[the Stage 3 checkpoint](STAGE3_CHECKPOINT.md) for dependencies, source/flash
+archives, Unity APIs, and simulator/physical test instructions.
+
+Stage 2 adds feedback codecs, replay protection, and server-to-two-C-peer tests:
+
+```powershell
+& communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/run_stage2_tests.ps1
+```
+
+See [the Stage 2 checkpoint](STAGE2_CHECKPOINT.md) for the wire layout, saved
+firmware versions, automated results, and physical TLS test commands.
+
+For Stage 1 local LED/buzzer feedback and the existing firmware regressions, run
+all seven host executables from the repository root:
+
+```powershell
+& communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/run_stage1_tests.ps1
+```
+
+See [the Stage 1 checkpoint](STAGE1_CHECKPOINT.md) for the changed files, build
+commands, USB diagnostic commands, physical test procedure, and limitations.
+
 These tests compile the production `protocol.c` directly with a desktop C
 compiler. The expected byte arrays are written independently from the codec so
 they detect byte-order and layout regressions.

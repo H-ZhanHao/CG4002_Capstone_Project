@@ -12,6 +12,28 @@ describe the superseded assessment topology rather than current setup steps.
 
 ## Start the sensor server and retain logs
 
+Stage 3 adds phone-owned rep feedback over the same WSS connection. Deploy the
+updated gateway/protocol plus `rep_control.py` and `feedback_delivery.py` with
+the chosen updated server (`server.py` or `server_AI.py`). The server's
+`--rep-control-port` and gateway's `--control-port` default to 9101, strictly
+on Ultra96 loopback. No additional phone-facing relay port is needed.
+Phone sessions must explicitly start/reset or sync before sending new reps.
+Use `simulate_phone_reps.py` for verified-TLS testing, or the checked-in Unity
+BeginRepSession/SendRepEvent API. See the
+[Stage 3 checkpoint](../firmware/FireBeetle_to_Ultra96/test/protocol_host/STAGE3_CHECKPOINT.md)
+for schemas, delivery receipts, reconnect behavior, and complete test commands.
+
+Stage 2 adds foreground console commands `feedback rep`, `feedback ready`, and
+`feedback idle` for both-node LEDs and Hip-only buzzer output over the existing
+ESP transport. Both `server.py` and `server_AI.py` support these controls; deploy
+`feedback_delivery.py` beside whichever updated server you run. The AI server's
+intended `window_assembler_updated` import and inference hooks are retained.
+`feedback status` reports the latest result; `feedback repeat` resends the same
+unexpired event for a duplicate-suppression test. `idle` retains its existing
+capture-control meaning and does not automatically beep yet. See the firmware
+[Stage 2 checkpoint](../firmware/FireBeetle_to_Ultra96/test/protocol_host/STAGE2_CHECKPOINT.md)
+for the contract and complete physical test.
+
 The server writes each human-readable record to both the coloured terminal and
 a plain-text rotating file. Its Ultra96 defaults are:
 

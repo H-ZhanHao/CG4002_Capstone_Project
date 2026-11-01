@@ -4,3 +4,13 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Keep the requested Stage 1 profiles reviewable.
+!sdkconfig.node1_stage1
+!sdkconfig.node2_stage1
+
+!sdkconfig.node1_stage2
+!sdkconfig.node2_stage2
+
+!sdkconfig.node1_stage3
+!sdkconfig.node2_stage3

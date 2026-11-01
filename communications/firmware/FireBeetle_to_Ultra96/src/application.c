@@ -348,6 +348,31 @@ static void enqueue_control_ack(
     (void)enqueue_response(&application_response_workspace);
 }
 
+static void process_feedback(const application_command_t *command,
+                             const protocol_header_t *header)
+{
+    protocol_feedback_t feedback;
+    protocol_control_ack_t ack = {
+        .command_type = PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND,
+        .command_sequence = header->sequence,
+        .effective_local_us = (uint64_t)esp_timer_get_time(),
+        .result = PROTOCOL_CONTROL_RESULT_INVALID_STATE,
+    };
+    if (header->node_id != 0 || header->flags != 0 ||
+        header->session_id != command->session_id ||
+        !protocol_decode_feedback_payload(command->frame + PROTOCOL_HEADER_SIZE,
+            header->payload_length, &feedback)) {
+        enqueue_control_ack(command->session_id, header->sequence, &ack);
+        return;
+    }
+#if APP_PHYSICAL_INTEGRATION
+    if (physical_pipeline_submit_feedback(command->session_id, header->sequence, &feedback))
+        return; // ACK only after the pipeline applies/rejects/deduplicates it.
+    ack.result = PROTOCOL_CONTROL_RESULT_BUSY;
+#endif
+    enqueue_control_ack(command->session_id, header->sequence, &ack);
+}
+
 static bool replay_control_if_cached(
     const application_command_t *command, const protocol_header_t *header,
     control_cache_entry_t *cache)
@@ -612,6 +637,11 @@ static void process_frame(
         return;
     }
 
+    if (header.message_type == PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND) {
+        process_feedback(command, &header);
+        return;
+    }
+
     if (header.message_type == PROTOCOL_MESSAGE_TYPE_TEST_REQUEST) {
         process_test_request(command, &header, cache, next_cache_index);
         return;
@@ -684,8 +714,17 @@ static void application_task(void *argument)
     control_state_t control_state = {0};
 
     while (true) {
+#if APP_PHYSICAL_INTEGRATION
+        physical_feedback_ack_t feedback_response;
+        for (unsigned i = 0; i < APPLICATION_COMMAND_QUEUE_LENGTH &&
+                physical_pipeline_receive_feedback_ack(&feedback_response); ++i) {
+            if (feedback_response.session_id == active_session_id)
+                enqueue_control_ack(active_session_id,
+                    feedback_response.ack.command_sequence, &feedback_response.ack);
+        }
+#endif
         application_command_t command;
-        if (xQueueReceive(command_queue, &command, pdMS_TO_TICKS(250)) != pdPASS) {
+        if (xQueueReceive(command_queue, &command, pdMS_TO_TICKS(10)) != pdPASS) {
 #if APP_PHYSICAL_INTEGRATION
             physical_trigger_event_t trigger;
             if (active_session_id != 0 &&

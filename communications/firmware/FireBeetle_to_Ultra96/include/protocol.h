@@ -31,6 +31,11 @@
 #define PROTOCOL_MESSAGE_TYPE_STOP      0x08
 #define PROTOCOL_MESSAGE_TYPE_CONTROL_ACK 0x09
 #define PROTOCOL_MESSAGE_TYPE_ARM       0x0A
+#define PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND 0x0B
+#define PROTOCOL_FEEDBACK_PAYLOAD_SIZE 16
+#define PROTOCOL_FEEDBACK_REP_LED 1
+#define PROTOCOL_FEEDBACK_READY_LED 2
+#define PROTOCOL_FEEDBACK_IDLE_BUZZ 3
 #define PROTOCOL_MESSAGE_TYPE_DATA      0x10
 #define PROTOCOL_MESSAGE_TYPE_HEARTBEAT 0x11
 #define PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA 0x12
@@ -237,8 +242,22 @@ typedef struct {
 #define PROTOCOL_CONTROL_RESULT_INSUFFICIENT_HISTORY 4
 #define PROTOCOL_CONTROL_RESULT_STALE_IDENTITY  5
 #define PROTOCOL_CONTROL_RESULT_BUSY            6
+#define PROTOCOL_CONTROL_RESULT_UNSUPPORTED     7
+#define PROTOCOL_CONTROL_RESULT_CONFLICT        8
 
-/** Positive or negative result for one START/STOP command Sequence. */
+/* FEEDBACK_COMMAND (0x0B): unchanged 24-byte header, coordinator node=0,
+ * flags=0, active nonzero Session. Payload offsets: [0..7] nonzero, increasing
+ * uint64 event_id, [8] action (1 REP_LED, 2 READY_LED, 3 IDLE_BUZZ), [9..15]
+ * reserved zero. All integers big endian. Retries preserve sequence and payload.
+ * Event IDs increase within each transport Session; older evicted IDs fail
+ * closed. CONTROL_ACK.command_type=0x0B reports acceptance, not physical proof. */
+typedef struct { uint64_t event_id; uint8_t action; } protocol_feedback_t;
+bool protocol_decode_feedback_payload(const uint8_t *payload, size_t length,
+                                     protocol_feedback_t *feedback);
+bool protocol_encode_feedback_payload(uint8_t payload[PROTOCOL_FEEDBACK_PAYLOAD_SIZE],
+                                     const protocol_feedback_t *feedback);
+
+/** Result for a capture control or FEEDBACK_COMMAND transport Sequence. */
 typedef struct {
     uint8_t command_type;
     uint8_t result;

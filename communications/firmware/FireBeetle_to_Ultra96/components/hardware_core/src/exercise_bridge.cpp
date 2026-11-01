@@ -7,7 +7,6 @@
 #include "ExercisePresets.h"
 #include "NodeSession.h"
 #include "RepCounter.h"
-#include "driver/gpio.h"
 #include "esp_log.h"
 
 #ifndef APP_USE_MOCK_IMU
@@ -53,17 +52,11 @@ void queuePeer(const LinkPacket& packet) {
 
 NodeSession session(queuePeer, logMessage);
 
-void writeLed(bool on) {
-  gpio_set_level(static_cast<gpio_num_t>(GeneralConfig::LED_PIN),
-                 on ? GeneralConfig::LED_ON : GeneralConfig::LED_OFF);
-}
 
 void restartCounters() {
   countingStarted = false;
   filterInitialised = false;
   filteredMagnitude = 0.0f;
-  session.clearLedFeedback(nowMs);
-  writeLed(false);
   if (!pauseCounter.beginPreset(nowMs, ExercisePresets::pause(exercise))) {
     session.standby();
     ESP_LOGE(TAG, "Invalid pause preset for %s", exerciseName(exercise));
@@ -73,7 +66,6 @@ void restartCounters() {
                                 ExercisePresets::continuous(exercise));
   if (session.localActive()) {
     countingStarted = true;
-    session.showLedFeedback(LedFeedback::READY, nowMs);
   }
 }
 
@@ -84,7 +76,6 @@ void serviceSession() {
     mode = session.mode();
     restartCounters();
   }
-  writeLed(session.feedbackLedOn(nowMs));
 }
 
 #if APP_USE_MOCK_IMU
@@ -124,10 +115,6 @@ extern "C" esp_err_t exercise_bridge_begin(uint8_t node_id, uint32_t boot_id) {
   mode = ExercisePresets::defaultMode(exercise);
   nowMs = 0;
   peerHead = peerCount = peerDrops = 0;
-  ESP_ERROR_CHECK(gpio_reset_pin(static_cast<gpio_num_t>(GeneralConfig::LED_PIN)));
-  ESP_ERROR_CHECK(gpio_set_direction(static_cast<gpio_num_t>(GeneralConfig::LED_PIN),
-                                    GPIO_MODE_OUTPUT));
-  writeLed(false);
   session.begin(role, boot_id, mode);
   restartCounters();
   started = true;
@@ -173,8 +160,6 @@ extern "C" void exercise_bridge_update(uint64_t timestamp_us,
   const bool counted = mode == PAUSE_MODE
     ? pauseCounter.consumeRepEvent() : continuousCounter.consumeRepEvent();
   if (counted) {
-    session.showLedFeedback(LedFeedback::REP, nowMs);
-    writeLed(true);
     ESP_LOGI(TAG, "REP exercise=%s count=%d", exerciseName(exercise),
              mode == PAUSE_MODE ? pauseCounter.repetitionCount()
                                 : continuousCounter.repetitionCount());
@@ -191,7 +176,6 @@ extern "C" void exercise_bridge_standby(void) {
   if (!started) return;
   session.standby();
   countingStarted = false;
-  writeLed(false);
 }
 
 extern "C" void exercise_bridge_reset(void) {
@@ -250,5 +234,6 @@ extern "C" void exercise_bridge_get_status(exercise_bridge_status_t *status) {
   status->gyro_axis = static_cast<int8_t>(continuousCounter.axis());
   status->active = session.localActive();
   status->waiting_for_peer = session.waiting();
-  status->led_on = session.feedbackLedOn(nowMs);
+  // Independent feedback owns physical outputs.
+  status->led_on = false;
 }

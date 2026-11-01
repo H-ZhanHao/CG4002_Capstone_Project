@@ -6,10 +6,13 @@ idf_component_register(
         "src/GenericPeakDetector.cpp"
         "src/Mpu6050.cpp"
         "src/SensorHistory.cpp"
+        "src/FeedbackController.cpp"
+        "src/FeedbackDiagnostic.cpp"
+        "src/feedback_bridge.cpp"
         "src/exercise_bridge.cpp"
         "src/hardware_bridge.cpp"
     INCLUDE_DIRS "include" "../../../../../hardware/node"
-    REQUIRES esp_driver_gpio esp_driver_i2c esp_timer freertos
+    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_i2c esp_timer freertos
 )
 
 

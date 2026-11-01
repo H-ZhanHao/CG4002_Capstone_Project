@@ -9,6 +9,8 @@
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "exercise_bridge.h"
+#include "feedback_bridge.h"
+#include "feedback_delivery.h"
 #include "freertos/task.h"
 #include "hardware_bridge.h"
 #include "sensor_history.h"
@@ -19,13 +21,14 @@
 #define PIPELINE_TRIGGER_QUEUE_LENGTH 2
 
 typedef enum {
-    COMMAND_BEGIN, COMMAND_END, COMMAND_ARM, COMMAND_FLUSH, COMMAND_STOP
+    COMMAND_BEGIN, COMMAND_END, COMMAND_ARM, COMMAND_FLUSH, COMMAND_STOP, COMMAND_FEEDBACK
 } command_type_t;
 typedef struct {
     command_type_t type;
     uint32_t session_id;
     uint32_t boot_id;
     uint32_t command_sequence;
+    protocol_feedback_t feedback;
     protocol_arm_t arm;
     protocol_start_flush_t flush;
     QueueHandle_t result_queue;
@@ -35,6 +38,8 @@ typedef struct { uint8_t result; uint64_t effective_local_us; } command_result_t
 static const char *TAG = "physical_pipeline";
 static QueueHandle_t command_queue;
 static QueueHandle_t trigger_queue;
+static QueueHandle_t feedback_ack_queue;
+static feedback_delivery_t feedback_delivery;
 static QueueHandle_t sample_queue;
 static TaskHandle_t task_handle;
 static uint8_t configured_node_id;
@@ -48,6 +53,19 @@ static volatile uint32_t observable_overwrites;
 static physical_history_t pipeline_history;
 static physical_feeder_t pipeline_feeder;
 
+static bool apply_feedback(uint8_t action, uint64_t now_us, void *context)
+{
+    (void)context;
+    feedback_action_t output;
+    switch (action) {
+    case PROTOCOL_FEEDBACK_REP_LED: output = FEEDBACK_REP_LED; break;
+    case PROTOCOL_FEEDBACK_READY_LED: output = FEEDBACK_READY_LED; break;
+    case PROTOCOL_FEEDBACK_IDLE_BUZZ: output = FEEDBACK_IDLE_BUZZ; break;
+    default: return false;
+    }
+    return feedback_bridge_trigger(output, (uint32_t)(now_us / 1000U));
+}
+
 static void handle_command(const pipeline_command_t *command,
                            physical_history_t *history,
                            physical_feeder_t *feeder,
@@ -57,6 +75,7 @@ static void handle_command(const pipeline_command_t *command,
 {
     command_result_t reply = { .effective_local_us = (uint64_t)esp_timer_get_time() };
     if (command->type == COMMAND_BEGIN) {
+        feedback_delivery_begin(&feedback_delivery, command->session_id, configured_node_id);
         *session_id = command->session_id;
         *boot_id = command->boot_id;
         *arm_generation = 0;
@@ -65,6 +84,13 @@ static void handle_command(const pipeline_command_t *command,
         physical_feeder_stop(feeder);
         xQueueReset(sample_queue);
         xQueueReset(trigger_queue);
+    } else if (command->type == COMMAND_FEEDBACK) {
+        physical_feedback_ack_t response = { .session_id = command->session_id };
+        response.ack = feedback_delivery_process(&feedback_delivery,
+            command->session_id, command->command_sequence, &command->feedback,
+            reply.effective_local_us, apply_feedback, NULL);
+        // A lost/full ACK queue is safe: retry reuses the cached result.
+        (void)xQueueSend(feedback_ack_queue, &response, 0);
     } else if (command->session_id != *session_id) {
         reply.result = PROTOCOL_CONTROL_RESULT_STALE_IDENTITY;
     } else if (command->type == COMMAND_END || command->type == COMMAND_STOP) {
@@ -79,6 +105,7 @@ static void handle_command(const pipeline_command_t *command,
         xQueueReset(trigger_queue);
 #endif
         if (command->type == COMMAND_END) {
+            feedback_delivery_begin(&feedback_delivery, 0, configured_node_id);
             *session_id = 0;
             *boot_id = 0;
         }
@@ -133,6 +160,7 @@ static void pipeline_task(void *unused)
     physical_feeder_stop(&pipeline_feeder);
     uint64_t next_capture_us = (uint64_t)esp_timer_get_time();
     for (;;) {
+        feedback_bridge_service((uint32_t)((uint64_t)esp_timer_get_time() / 1000U));
         pipeline_command_t command;
         while (xQueueReceive(command_queue, &command, 0) == pdPASS)
             handle_command(&command, &pipeline_history, &pipeline_feeder,
@@ -204,13 +232,16 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     if (task_handle != NULL) return ESP_ERR_INVALID_STATE;
     ESP_RETURN_ON_ERROR(hardware_bridge_begin(), TAG,
         "hardware core initialization");
+    ESP_RETURN_ON_ERROR(feedback_bridge_begin(node_id), TAG,
+        "feedback initialization");
     uint32_t exercise_boot_id = esp_random();
     if (exercise_boot_id == 0) exercise_boot_id = 1;
     ESP_RETURN_ON_ERROR(exercise_bridge_begin(node_id, exercise_boot_id), TAG,
         "exercise core initialization");
     command_queue = xQueueCreate(PIPELINE_COMMAND_QUEUE_LENGTH, sizeof(pipeline_command_t));
     trigger_queue = xQueueCreate(PIPELINE_TRIGGER_QUEUE_LENGTH, sizeof(physical_trigger_event_t));
-    if (command_queue == NULL || trigger_queue == NULL) return ESP_ERR_NO_MEM;
+    feedback_ack_queue = xQueueCreate(PIPELINE_COMMAND_QUEUE_LENGTH, sizeof(physical_feedback_ack_t));
+    if (command_queue == NULL || trigger_queue == NULL || feedback_ack_queue == NULL) return ESP_ERR_NO_MEM;
     sample_queue = output_queue;
     configured_node_id = node_id;
     if (xTaskCreate(pipeline_task, "physical_pipeline", PIPELINE_TASK_STACK, NULL,
@@ -290,4 +321,21 @@ bool physical_pipeline_receive_trigger(physical_trigger_event_t *event,
 uint32_t physical_pipeline_get_overwrite_count(uint8_t node_id)
 {
     return node_id == configured_node_id ? observable_overwrites : 0;
+}
+
+// Asynchronous, bounded request/result queues. No per-request reply queue can
+// be deleted while a delayed pipeline command still references it.
+bool physical_pipeline_submit_feedback(uint32_t session, uint32_t sequence,
+                                       const protocol_feedback_t *feedback)
+{
+    if (command_queue == NULL || feedback == NULL || session == 0) return false;
+    pipeline_command_t command = { .type = COMMAND_FEEDBACK, .session_id = session,
+        .command_sequence = sequence, .feedback = *feedback };
+    return xQueueSend(command_queue, &command, 0) == pdPASS;
+}
+
+bool physical_pipeline_receive_feedback_ack(physical_feedback_ack_t *response)
+{
+    return feedback_ack_queue != NULL && response != NULL &&
+        xQueueReceive(feedback_ack_queue, response, 0) == pdPASS;
 }
