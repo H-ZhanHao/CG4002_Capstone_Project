@@ -178,6 +178,7 @@ static void activityTests() {
     const auto initial = ExerciseNode::activityStatus();
     assert(initial.boot && initial.state == UserActivity::IDLE);
     assert(!initial.received && initial.sequence == 0);
+    assert(ledLevel == GeneralConfig::LED_OFF);
     output.clear(); command("ACTIVITY");
     assert(output.find("state=IDLE | source=DEFAULT") != std::string::npos);
     const auto radioBefore = radioPackets, readyBefore = readyEvents, repsBefore = repEvents;
@@ -191,8 +192,11 @@ static void activityTests() {
     output.clear(); command("STATUS");
     assert(output.find("state=ACTIVE | source=COMMS") != std::string::npos);
     assert(output.find("[Standby |") != std::string::npos);
-    assert(ledLevel == 0 && buzzerLevel == 0); // Step 1 adds no GPIO behavior.
-    step(80);
+    assert(ledLevel == GeneralConfig::LED_ON && buzzerLevel == 0);
+    for (int i = 0; i < 80; ++i) {
+      step(1);
+      assert(ledLevel == GeneralConfig::LED_ON); // Steady, including standby.
+    }
     assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE); // No inactivity inference.
     sendReps(ticket(), 1);
     assert(data().reps == 0); // Activity ACTIVE does not activate rep reception.
@@ -201,6 +205,7 @@ static void activityTests() {
     assert(output.find("state=ACTIVE | DUPLICATE") != std::string::npos);
     sendActivity(initial.boot, 1, "IDLE");
     assert(output.find("state=IDLE | SEQUENCE_CONFLICT") != std::string::npos);
+    assert(ledLevel == GeneralConfig::LED_ON);
     sendActivity(initial.boot, 3, "IDLE");
     sendActivity(initial.boot, 2, "ACTIVE");
     assert(output.find("state=ACTIVE | STALE_SEQUENCE") != std::string::npos);
@@ -217,6 +222,7 @@ static void activityTests() {
       assert(output.find("ERROR: Use ACTIVITY:") != std::string::npos);
       assert(ExerciseNode::activityStatus().sequence == 3);
       assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+      assert(ledLevel == GeneralConfig::LED_OFF);
     }
     pauseRep();
     assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
@@ -228,6 +234,7 @@ static void activityTests() {
     sendReps(ticket(), 5);
     assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
     assert(data().reps == 5);
+    assert(ledLevel == GeneralConfig::LED_OFF); // No ready/rep flashes while idle.
     sendActivity(initial.boot, 4, "ACTIVE");
     assert(data().reps == 5);
     for (const char* change : {"RESET", role == HIP ? "EXERCISE:LUNGE" : "EXERCISE:SITUP",
@@ -235,6 +242,17 @@ static void activityTests() {
       command(change);
       assert(ExerciseNode::activityStatus().sequence == 4);
       assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE);
+      assert(ledLevel == GeneralConfig::LED_ON);
+    }
+    sendReps(ticket(), 1);
+    assert(ledLevel == GeneralConfig::LED_ON);
+    // A peer running older firmware can still send pulses; ignore them at GPIO.
+    peer.activate(now);
+    step(2);
+    peer.showLedFeedback(LedFeedback::READY, now);
+    for (int i = 0; i < 40; ++i) {
+      step(1);
+      assert(ledLevel == GeneralConfig::LED_ON);
     }
 
     // Bluetooth input uses the same validation, including retries after reconnect.
@@ -243,6 +261,10 @@ static void activityTests() {
     sendActivity(initial.boot, 5, "IDLE", true);
     assert(btOutput.find("state=IDLE | ACCEPTED") != std::string::npos);
     assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+    assert(ledLevel == GeneralConfig::LED_OFF); // Also works with failed sensor reads.
+    peer.showLedFeedback(LedFeedback::REP, now);
+    step(1);
+    assert(ledLevel == GeneralConfig::LED_OFF);
     sensorHealthy = true;
     btConnected = false; step(1); btConnected = true; ++btSession;
     sendActivity(initial.boot, 5, "IDLE", true);
@@ -251,6 +273,7 @@ static void activityTests() {
     btConnected = false;
     step(60);
     assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE);
+    assert(ledLevel == GeneralConfig::LED_ON);
     sendActivity(initial.boot, UINT32_MAX, "IDLE");
     sendActivity(initial.boot, 1, "ACTIVE"); // Sequence numbers do not wrap within a boot.
     assert(ExerciseNode::activityStatus().sequence == UINT32_MAX);
@@ -284,7 +307,7 @@ int main() {
     peerOnline = true;
     command("ACTIVATE");
     assert(data().repState == COMMS_WAITING && data().reps == 0);
-    assert(peer.feedbackLedOn(now + LedTiming::READY_STEP_MS));
+    assert(!peer.feedbackLedOn(now + LedTiming::READY_STEP_MS));
     auto current = ticket();
     const auto ledsBefore = repEvents;
     pauseRep();
@@ -293,14 +316,14 @@ int main() {
     sendReps(current, 0);
     assert(data().repState == COMMS_COUNTING && repEvents == ledsBefore);
     sendReps(current, 5);
-    assert(data().reps == 5 && repEvents == ledsBefore + 1);
-    assert(peer.feedbackLedOn(now));
+    assert(data().reps == 5 && repEvents == ledsBefore);
+    assert(!peer.feedbackLedOn(now) && ledLevel == GeneralConfig::LED_OFF);
     step(11);
     assert(!peer.feedbackLedOn(now));
     assert(output.find("COUNTING | Reps: 5 | Rep source: COMMS") != std::string::npos);
     assert(output.find("FINDING AXIS") == std::string::npos);
     sendReps(current, 5);
-    assert(output.find("| DUPLICATE]") != std::string::npos && repEvents == ledsBefore + 1);
+    assert(output.find("| DUPLICATE]") != std::string::npos && repEvents == ledsBefore);
     sendReps(current, 4);
     assert(output.find("| DECREASING]") != std::string::npos && data().reps == 5);
     sendReps({current.boot + 1, current.session}, 6);

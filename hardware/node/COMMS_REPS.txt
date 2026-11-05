@@ -61,7 +61,7 @@ enable local counting; changing mode still resets the set for compatibility.
 
 Results in REPS ACK:
   ACCEPTED       Valid first result or increasing cumulative total; stored.
-  DUPLICATE      Same total as last accepted result; no extra count or flash.
+  DUPLICATE      Same total as last accepted result; no extra count.
   DECREASING     Lower total in the same session; ignored.
   STALE_SESSION  boot/session does not match the current ticket; ignored.
   INACTIVE       Board is standby, activating, or activation failed; ignored.
@@ -73,12 +73,12 @@ an ACK. Retry the same total/ticket if an ACK is lost; retries are idempotent.
 There is no spontaneous retry from HW. A downward correction requires a new set
 (RESET), not a smaller value within the old session.
 
-COMMS USER ACTIVITY (FEEDBACK STEP 1)
+COMMS USER ACTIVITY (FEEDBACK STEPS 1-2)
 
 User activity is independent of counting-board activation, selected exercise,
-rep counts and STREAM sessions. Step 1 stores/reports this state only; it does
-not yet change LEDs, play rep beeps, gate incoming reps or send peer packets.
-The existing ready/rep LED patterns and fall-only buzzer still apply below.
+rep counts and STREAM sessions. The LED is OFF for IDLE and steadily ON for
+ACTIVE, including on a standby counting board. Activity does not play rep beeps,
+gate incoming reps or send peer packets. The buzzer remains fall-only.
 
 Query on either board over USB/Bluetooth (newline-terminated):
   ACTIVITY
@@ -130,17 +130,20 @@ CommsActivityState.h/.cpp contains the state/ordering logic without GPIO or radi
 
 FEEDBACK
 
-Each accepted increase flashes the active board and sends one mirrored LED event
-to the peer using the existing ESP-NOW session. An increase from 2 to 5 sets 5
-and flashes once; it does not replay three flashes. Duplicate/zero/rejected
-messages do not flash. LED duration is 200 ms; closely spaced updates can extend
-the lit interval. Mirrored events remain best effort; a lost LED packet cannot
-change the stored total. Counts themselves are not forwarded between boards.
+The runtime LED follows only the last accepted ACTIVITY state. It starts OFF
+(default IDLE). ACTIVATE, RESET, exercise/mode changes and rep updates no longer
+flash it. Legacy peer LED packets cannot override it. An ACTIVE state persists
+until comms sends IDLE, including during disconnects and failed sensor reads.
+The existing fatal sensor-startup error blink is retained as a wiring diagnostic.
+
+To control both LEDs, deliver ACTIVITY to both boards with their respective boot
+IDs and sequences. Peer propagation and one beep per rep are later steps.
+Counts themselves are not forwarded between boards.
 
 CODE LOCATIONS
 
   ExerciseNode.cpp: processCommand parses REPS, receiveRepCount applies it and
-    emits ACK/feedback, restartSession changes the ticket, makeTelemetry displays
+    emits ACK, restartSession changes the ticket, makeTelemetry displays
     the comms total. reportCommsReps prints the current ticket/state.
   CommsRepCounter.h/.cpp: ticket, total, and validation state without hardware IO.
   WirelessStreamer.cpp: existing USB/Bluetooth framing and comms telemetry text.
@@ -149,7 +152,7 @@ CODE LOCATIONS
 
 A future in-process comms adapter can call ExerciseNode::receiveRepCount from the
 same main loop as update(), using the current ticket. Never call it from a radio
-callback; queue messages first. Its validation/ACK/feedback matches the command.
+callback; queue messages first. Its validation/ACK matches the command.
 
 VALIDATION
 

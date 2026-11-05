@@ -3,7 +3,8 @@ HIP AND WRIST: COMMS REP COUNTS, LOCAL COUNTING DISABLED
 Rep totals now come from AR via comms over USB/Bluetooth. See COMMS_REPS.txt for
 message formats, reset/session rules, acknowledgements and bench tests.
 ACTIVITY now stores comms-supplied IDLE/ACTIVE independently of counting-board
-activation. This is feedback step 1 only: LED/buzzer behavior is not changed yet.
+activation. Feedback step 2 drives the LED OFF for IDLE and steadily ON for ACTIVE.
+The buzzer remains fall-only; rep beeps are a later step.
 LocalRepCounting.cpp retains the former local detector orchestration for bench
 tests; it and RepCounter.cpp/ContinuousCounter.cpp are excluded from firmware.
 
@@ -54,7 +55,7 @@ HOW THE CONNECTIONS WORK
 
 Laptop <-> ExerciseHip: USB or Bluetooth commands and hip telemetry.
 Laptop <-> ExerciseWrist: USB or Bluetooth commands and wrist telemetry.
-Hip <-> Wrist: ESP-NOW activation handover, mode synchronization and LED events.
+Hip <-> Wrist: ESP-NOW activation handover and mode synchronization.
 Comms -> active node: REPS:<boot>:<session>:<total> (see COMMS_REPS.txt).
 
 No Wi-Fi router or Bluetooth pairing between the boards is needed.
@@ -403,8 +404,8 @@ See COMMS_REPS.txt for the full contract and expected output.
 2. Send ACTIVATE and wait for peer acknowledgement.
 3. Send REPS and copy the printed boot/session ticket.
 4. Send REPS:<boot>:<session>:1 using those actual numbers. Expect ACCEPTED,
-   Reps: 1 on USB/Bluetooth telemetry, and a rep flash on both boards.
-5. Repeat the message: expect DUPLICATE with no additional flash/count.
+   Reps: 1 on USB/Bluetooth telemetry. LEDs keep their ACTIVITY state.
+5. Repeat the message: expect DUPLICATE with no additional count.
 6. Move the sensors: rep totals remain unchanged until comms sends a higher total.
 7. Send RESET: count becomes zero and a new ticket is printed. Old results are
    rejected. Send a result with the new ticket to begin the next set.
@@ -438,7 +439,7 @@ ACTIVITY / ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE
   Query or update user activity on this board, independently of activation and
   exercise. Use the actual boot ID and an increasing sequence; retries must be
   identical. State persists across rep resets and changes only through comms or
-  reboot. See COMMS_REPS.txt. Step 1 stores/reports activity without GPIO changes.
+  reboot. See COMMS_REPS.txt. IDLE turns the LED OFF; ACTIVE turns it steadily ON.
 STATUS / HELP
   Show activation, user activity, exercise/mode, comms ticket/count and stream/radio status,
   or the command list. Radio readiness does not prove the peer is online.
@@ -486,20 +487,18 @@ LocalRepCounting starts from zero after begin(); earlier movement is not replaye
 Continuous mode still discovers its axis/direction from movement each session.
 Wrist sit-ups need consistent arm position relative to the torso.
 
-MIRRORED LED FEEDBACK AND RADIO BEHAVIOR
+ACTIVITY LED AND RADIO BEHAVIOR
 
-Both LEDs blink three times when an active rep session starts or resets: 100 ms OFF,
-then 100 ms ON, repeated three times. Comms reception continues during the
-blinks; a rep flash can replace the ready pattern. Each accepted increase flashes
-both LEDs for 200 ms; duplicate/zero/rejected updates do not flash.
-The standby board mirrors LEDs while keeping its own counter inactive.
+Each board's runtime LED follows its accepted ACTIVITY state: OFF for IDLE,
+steadily ON for ACTIVE, independent of exercise or counting activation. Send
+ACTIVITY separately to both boards with their own boot IDs; peer propagation
+is a later step. There are no ready/rep flashes, and legacy peer LED packets
+cannot override activity. Reset, mode/exercise changes, standby and disconnects
+preserve activity. Only an explicit IDLE or reboot clears ACTIVE.
+The fatal MPU6050 startup-error blink remains as a wiring diagnostic.
 
-Timers are nonblocking. LED packets are best effort with no ACK/retry. Wireless
-delay means approximate synchronization; lost packets can miss flashes. Local
-rep acceptance never depends on LED delivery. Session/sequence checks ignore duplicate
-or stale events. Reset, exercise/mode changes and standby clear feedback.
-
-ESP-NOW uses 24-byte version-4 activation, mode and LED packets. There are no sensor
+ESP-NOW retains the 24-byte version-4 protocol; its legacy LED pattern support
+is unused by the current GPIO path. There are no sensor
 streams, forwarded counts, remote fall messages, discovery broadcasts or heartbeats.
 Activation and mode sync try five times at 500 ms intervals (2.5-second deadline).
 No activation ACK means activation fails. If every ACK is lost, both may remain
@@ -507,8 +506,8 @@ in standby. HIP wins simultaneous pending requests. A delayed deactivation may
 conservatively stop a board but cannot start it.
 
 Once active, a board accepts comms counts even if the peer loses power/radio reception.
-After a standby-board reboot, switch activation away and back to establish a new
-LED session. ACTIVATE on an already-active board does not repeat the handshake.
+After a board reboots, resend ACTIVITY with its new boot ID to restore its LED.
+ACTIVATE on an already-active board does not repeat the handshake.
 After either board reboots, resend the desired MODE from the active board to sync.
 Both Bluetooth and ESP-NOW share the ESP32 radio; test switching on real boards.
 
@@ -520,7 +519,7 @@ BENCH AND WEARABLE CHECKS
 - Verify handover, exercise restrictions and mode synchronization on both boards.
 - Verify BUFFER/WINDOW, generic peaks and coordinated window sessions still work
   while rep reception is active or in standby.
-- Verify HIP fall monitoring and physical LED timing on real boards.
+- Verify HIP fall monitoring and steady activity LEDs on real boards.
 - Host tests validate logic; real AR/comms delivery requires a live integration test.
 
 BUILD / HOST VERIFICATION

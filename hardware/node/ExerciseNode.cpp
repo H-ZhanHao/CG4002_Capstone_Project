@@ -64,6 +64,10 @@ void setLed(bool on) {
   );
 }
 
+void updateActivityLed() {
+  setLed(commsActivity.status().state == UserActivity::ACTIVE);
+}
+
 void reportCommsReps() {
   char line[192];
   snprintf(line, sizeof(line), "[REPS | %s | boot=%lu | session=%lu | total=%ld | %s]",
@@ -87,6 +91,7 @@ void reportActivity() {
 
 ActivityResult receiveActivity(uint32_t boot, uint32_t sequence, UserActivity state) {
   const ActivityResult result = commsActivity.receive(boot, sequence, state);
+  updateActivityLed();
   char line[192];
   snprintf(line, sizeof(line), "[ACTIVITY ACK | %s | boot=%lu | seq=%lu | state=%s | %s]",
     nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)boot, (unsigned long)sequence,
@@ -96,12 +101,7 @@ ActivityResult receiveActivity(uint32_t boot, uint32_t sequence, UserActivity st
 }
 
 CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) {
-  const int32_t before = commsReps.total();
   const CommsRepResult result = commsReps.receive(boot, session, total, nodeSession.localActive());
-  if (result == CommsRepResult::ACCEPTED && commsReps.total() > before) {
-    nodeSession.showLedFeedback(LedFeedback::REP, millis());
-    setLed(nodeSession.feedbackLedOn(millis()));
-  }
   char line[192];
   snprintf(line, sizeof(line), "[REPS ACK | %s | boot=%lu | session=%lu | total=%lu | %s]",
     nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)boot, (unsigned long)session,
@@ -111,9 +111,7 @@ CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) 
 }
 
 void updateOutputTimers(unsigned long now) {
-  if (nodeSession.localActive()) {
-    setLed(nodeSession.feedbackLedOn(now));
-  }
+  updateActivityLed();
 
   if (
     buzzerActive &&
@@ -126,9 +124,7 @@ void updateOutputTimers(unsigned long now) {
 
 void restartSession(unsigned long now) {
   commsReps.reset();
-  nodeSession.clearLedFeedback(now);
-  if (nodeSession.localActive()) nodeSession.showLedFeedback(LedFeedback::READY, now);
-  setLed(nodeSession.feedbackLedOn(now));
+  updateActivityLed();
   reportCommsReps();
   lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
   // Rep resets do not affect sensor history or the independent window stream.
@@ -674,9 +670,7 @@ void update() {
     activeMode = nodeSession.mode();
     restartSession(now);
   }
-  if (!nodeSession.localActive()) {
-    setLed(nodeSession.feedbackLedOn(now));
-  }
+  // Legacy peer LED patterns must not override the comms activity state.
 
   const unsigned long sampleTime = micros();
 
