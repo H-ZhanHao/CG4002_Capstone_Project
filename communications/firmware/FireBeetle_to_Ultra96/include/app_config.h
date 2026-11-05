@@ -48,6 +48,11 @@
 #define APP_IDLE_RESUME_INTEGRATION 0
 #endif
 
+/* Sampling measurements are enabled only by the dedicated diagnostic builds. */
+#ifndef APP_SAMPLING_DIAGNOSTICS
+#define APP_SAMPLING_DIAGNOSTICS 0
+#endif
+
 #if APP_NODE_ROLE != APP_ROLE_HUB && APP_NODE_ROLE != APP_ROLE_LEAF
 #error "APP_NODE_ROLE must be APP_ROLE_HUB or APP_ROLE_LEAF"
 #endif

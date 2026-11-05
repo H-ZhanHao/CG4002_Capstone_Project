@@ -13,4 +13,11 @@ communications/unity/tests/
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/*
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/*
+!communications/unity/Ultra96VisualizerDemo/Assets/Tests/
+!communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/
+!communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs
+!communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs.meta
 
+hardware/tests/sampling_diagnostics_test.cpp
+communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs
+communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs.meta

@@ -17,6 +17,10 @@
 #include "fall_bridge.h"
 #include "device_events.h"
 
+#if APP_SAMPLING_DIAGNOSTICS
+#include "sampling_diagnostics.h"
+#endif
+
 #define PIPELINE_TASK_STACK 4096
 #define PIPELINE_TASK_PRIORITY 4
 #define PIPELINE_COMMAND_QUEUE_LENGTH 8
@@ -58,6 +62,40 @@ static device_events_t device_events;
 static portMUX_TYPE event_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t board_boot_id;
 static uint64_t last_fall_us;
+
+#if APP_SAMPLING_DIAGNOSTICS
+static QueueHandle_t diagnostics_queue;
+static TaskHandle_t diagnostics_task_handle;
+
+static void diagnostics_task(void *unused)
+{
+    (void)unused;
+    sampling_diagnostics_t stats;
+    for (;;) {
+        if (xQueueReceive(diagnostics_queue, &stats, portMAX_DELAY) != pdPASS)
+            continue;
+        ESP_LOGI(TAG, "SAMPLE_DIAG node=%u report=%lu elapsed_us=%llu hz=%.2f "
+            "attempts=%lu captured=%lu stored=%lu read_fail=%lu history_reject=%lu "
+            "skipped_slots=%lu late_over_1ms=%lu late_max_us=%lu wake_late_max_us=%lu "
+            "prework_max_us=%lu read_mean_us=%lu read_max_us=%lu capture_max_us=%lu "
+            "processing_max_us=%lu loop_gap_max_us=%lu capture_gap_max_us=%lu "
+            "queue_high=%lu enqueue_retries=%lu send_age_max_us=%lu history_lost_delta=%lu",
+            configured_node_id, (unsigned long)stats.report_id,
+            (unsigned long long)stats.elapsed_us, sampling_diag_hz(&stats),
+            (unsigned long)stats.attempts, (unsigned long)stats.captured,
+            (unsigned long)stats.stored, (unsigned long)stats.read_fail,
+            (unsigned long)stats.history_reject, (unsigned long)stats.skipped_slots,
+            (unsigned long)stats.late_over_1ms, (unsigned long)stats.late_max_us,
+            (unsigned long)stats.wake_late_max_us, (unsigned long)stats.prework_max_us,
+            (unsigned long)(stats.attempts ? stats.read_total_us / stats.attempts : 0),
+            (unsigned long)stats.read_max_us, (unsigned long)stats.capture_max_us,
+            (unsigned long)stats.processing_max_us, (unsigned long)stats.loop_gap_max_us,
+            (unsigned long)stats.capture_gap_max_us, (unsigned long)stats.queue_high,
+            (unsigned long)stats.enqueue_retries, (unsigned long)stats.send_age_max_us,
+            (unsigned long)stats.history_lost_delta);
+    }
+}
+#endif
 
 static bool record_fall(bool synthetic)
 {
@@ -199,7 +237,21 @@ static void pipeline_task(void *unused)
     physical_feeder_stop(&pipeline_feeder);
     uint64_t next_capture_us = (uint64_t)esp_timer_get_time();
     uint32_t expired_before = 0, overflow_before = 0;
+#if APP_SAMPLING_DIAGNOSTICS
+    sampling_diagnostics_t diagnostics = {0};
+    uint64_t diagnostics_start_us = next_capture_us;
+    uint64_t previous_loop_us = 0, previous_capture_us = 0;
+    uint32_t history_lost_before = 0, diagnostics_report = 0;
+#endif
     for (;;) {
+#if APP_SAMPLING_DIAGNOSTICS
+        uint64_t loop_start_us = (uint64_t)esp_timer_get_time();
+        if (previous_loop_us != 0)
+            sampling_diag_max(&diagnostics.loop_gap_max_us, loop_start_us - previous_loop_us);
+        previous_loop_us = loop_start_us;
+        if (loop_start_us > next_capture_us)
+            sampling_diag_max(&diagnostics.wake_late_max_us, loop_start_us - next_capture_us);
+#endif
         feedback_bridge_service((uint32_t)((uint64_t)esp_timer_get_time() / 1000U));
         pipeline_command_t command;
         while (xQueueReceive(command_queue, &command, 0) == pdPASS)
@@ -215,10 +267,33 @@ static void pipeline_task(void *unused)
             scheduled_arm_us = 0;
         }
         if (now_us >= next_capture_us) {
+#if APP_SAMPLING_DIAGNOSTICS
+            /* Use the same decision timestamp as the existing scheduler. */
+            sampling_diag_attempt(&diagnostics, now_us, next_capture_us,
+                                  PHYSICAL_SAMPLE_PERIOD_US);
+            sampling_diag_max(&diagnostics.prework_max_us, now_us - loop_start_us);
+#endif
             protocol_physical_sample_t captured = {0};
             hardware_bridge_sample_t hardware_sample;
             hardware_bridge_peak_t peak;
+#if APP_SAMPLING_DIAGNOSTICS
+            uint64_t capture_start_us = (uint64_t)esp_timer_get_time();
+            bool capture_ok = hardware_bridge_capture(sequence, &hardware_sample, &peak);
+            uint64_t capture_end_us = (uint64_t)esp_timer_get_time();
+            sampling_diag_read(&diagnostics, hardware_sample.read_duration_us,
+                               hardware_sample.read_ok);
+            sampling_diag_max(&diagnostics.capture_max_us, capture_end_us - capture_start_us);
+            if (capture_ok) {
+                diagnostics.captured++;
+                if (previous_capture_us != 0)
+                    sampling_diag_max(&diagnostics.capture_gap_max_us,
+                                     hardware_sample.timestamp_us - previous_capture_us);
+                previous_capture_us = hardware_sample.timestamp_us;
+            }
+            if (capture_ok) {
+#else
             if (hardware_bridge_capture(sequence, &hardware_sample, &peak)) {
+#endif
                 if (fall_bridge_update(hardware_sample.acceleration,
                         hardware_sample.timestamp_us, true)) (void)record_fall(false);
                 exercise_bridge_update(hardware_sample.timestamp_us,
@@ -235,7 +310,15 @@ static void pipeline_task(void *unused)
 #if APP_USE_MOCK_IMU
                 captured.status = PROTOCOL_STATUS_MOCK_DATA;
 #endif
-                if (physical_history_push(&pipeline_history, &captured)) sequence++;
+                if (physical_history_push(&pipeline_history, &captured)) {
+                    sequence++;
+#if APP_SAMPLING_DIAGNOSTICS
+                    diagnostics.stored++;
+#endif
+                }
+#if APP_SAMPLING_DIAGNOSTICS
+                else diagnostics.history_reject++;
+#endif
                 if (session_id != 0 && trigger_armed &&
                     peak.peak_timestamp_us != 0) {
                     physical_trigger_event_t event = {
@@ -251,17 +334,31 @@ static void pipeline_task(void *unused)
             } else {
                 (void)fall_bridge_update(NULL, now_us, false);
             }
+#if APP_SAMPLING_DIAGNOSTICS
+            sampling_diag_max(&diagnostics.processing_max_us,
+                (uint64_t)esp_timer_get_time() - capture_end_us);
+#endif
             next_capture_us += PHYSICAL_SAMPLE_PERIOD_US;
             if (next_capture_us <= now_us) next_capture_us = now_us + PHYSICAL_SAMPLE_PERIOD_US;
         }
         protocol_physical_sample_t outgoing;
         if (physical_feeder_next(&pipeline_feeder, &pipeline_history, &outgoing)) {
+#if APP_SAMPLING_DIAGNOSTICS
+            uint64_t offered_us = (uint64_t)esp_timer_get_time();
+            if (offered_us >= outgoing.timestamp_us)
+                sampling_diag_max(&diagnostics.send_age_max_us,
+                                 offered_us - outgoing.timestamp_us);
+#endif
             if (xQueueSend(sample_queue, &outgoing, 0) == pdPASS)
                 (void)physical_feeder_mark_sent(&pipeline_feeder,
                                                 outgoing.sequence);
-            else
+            else {
+#if APP_SAMPLING_DIAGNOSTICS
+                diagnostics.enqueue_retries++;
+#endif
                 (void)physical_feeder_retry(&pipeline_feeder,
                                             outgoing.sequence);
+            }
         }
         /* Expose only an actual history-to-live delivery gap. Routine eviction
          * from the bounded rolling history is expected before a trigger. */
@@ -275,6 +372,24 @@ static void pipeline_task(void *unused)
                 (unsigned long)expired, (unsigned long)overflow);
             expired_before = expired; overflow_before = overflow;
         }
+#if APP_SAMPLING_DIAGNOSTICS
+        sampling_diag_max(&diagnostics.queue_high, uxQueueMessagesWaiting(sample_queue));
+        /* The feeder counter resets on STOP/session changes. Do not underflow. */
+        uint32_t lost_now = pipeline_feeder.lost_before_send;
+        diagnostics.history_lost_delta += lost_now >= history_lost_before ?
+            lost_now - history_lost_before : lost_now;
+        history_lost_before = lost_now;
+        uint64_t report_us = (uint64_t)esp_timer_get_time();
+        if (report_us - diagnostics_start_us >= 1000000ULL) {
+            diagnostics.elapsed_us = report_us - diagnostics_start_us;
+            diagnostics.report_id = ++diagnostics_report;
+            /* Never wait for serial output. A stalled logger retains the latest
+             * snapshot; skipped report IDs expose overwritten summaries. */
+            (void)xQueueOverwrite(diagnostics_queue, &diagnostics);
+            memset(&diagnostics, 0, sizeof(diagnostics));
+            diagnostics_start_us = report_us;
+        }
+#endif
         vTaskDelay(1);
     }
 }
@@ -301,8 +416,29 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     device_events_init(&device_events, board_boot_id);
     fall_bridge_begin(node_id);
     feedback_bridge_set_fall_injector(inject_fall);
+#if APP_SAMPLING_DIAGNOSTICS
+    diagnostics_queue = xQueueCreate(1, sizeof(sampling_diagnostics_t));
+    if (diagnostics_queue == NULL) return ESP_ERR_NO_MEM;
+    if (xTaskCreate(diagnostics_task, "sampling_diag", 4096, NULL,
+                   tskIDLE_PRIORITY + 1, &diagnostics_task_handle) != pdPASS) {
+        vQueueDelete(diagnostics_queue);
+        diagnostics_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_LOGI(TAG, "Sampling diagnostics enabled: tick_hz=%d period_us=%u source=%s",
+        configTICK_RATE_HZ, PHYSICAL_SAMPLE_PERIOD_US,
+        APP_USE_MOCK_IMU ? "mock" : "MPU6050");
+#endif
     if (xTaskCreate(pipeline_task, "physical_pipeline", PIPELINE_TASK_STACK, NULL,
-        PIPELINE_TASK_PRIORITY, &task_handle) != pdPASS) return ESP_ERR_NO_MEM;
+        PIPELINE_TASK_PRIORITY, &task_handle) != pdPASS) {
+#if APP_SAMPLING_DIAGNOSTICS
+        vTaskDelete(diagnostics_task_handle);
+        diagnostics_task_handle = NULL;
+        vQueueDelete(diagnostics_queue);
+        diagnostics_queue = NULL;
+#endif
+        return ESP_ERR_NO_MEM;
+    }
     ESP_LOGI(TAG, "Node %u continuous 100 Hz %s pipeline started", node_id,
         APP_USE_MOCK_IMU ? "mock" : "MPU6050");
     return ESP_OK;
