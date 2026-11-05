@@ -14,6 +14,11 @@ namespace {
       snprintf(status, sizeof(status), "ACTIVATION FAILED | Reps: -- | Check other node; send ACTIVATE to retry");
     } else if (data.repState == NODE_STANDBY) {
       snprintf(status, sizeof(status), "STANDBY | Reps: -- | Send ACTIVATE to start");
+    } else if (data.repState == COMMS_WAITING) {
+      snprintf(status, sizeof(status), "WAIT COMMS | Reps: 0 | Rep source: COMMS");
+    } else if (data.repState == COMMS_COUNTING) {
+      snprintf(status, sizeof(status), "COUNTING | Reps: %ld | Rep source: COMMS",
+        static_cast<long>(data.reps));
     } else if (data.repState == 1) {
       snprintf(status, sizeof(status), "FINDING AXIS | Reps: 0 | Start moving; initial movement may not count");
     } else {

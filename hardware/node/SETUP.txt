@@ -1,4 +1,9 @@
-HIP AND WRIST: FIXED PRESETS, NO STANDSTILL OR CALIBRATION REPS
+HIP AND WRIST: COMMS REP COUNTS, LOCAL COUNTING DISABLED
+
+Rep totals now come from AR via comms over USB/Bluetooth. See COMMS_REPS.txt for
+message format, reset/session rules, acknowledgements and a step-by-step test.
+LocalRepCounting.cpp retains the former local detector orchestration for bench
+tests; it and RepCounter.cpp/ContinuousCounter.cpp are excluded from firmware.
 
 Hardware: FireBeetle ESP32 (ESP32-WROOM-32D), each with its MPU6050.
 PlatformIO environments (native ESP-IDF):
@@ -7,8 +12,8 @@ PlatformIO environments (native ESP-IDF):
 The environment names do not configure TLS; communication is Bluetooth + ESP-NOW.
 
 Both use hardware/main.cpp and the shared code in hardware/node. MAC addresses and
-shared settings are in ExerciseConfig.h. Fixed limits and board assignments
-are in ExercisePresets.h. Upload BOTH boards when updating the shared firmware.
+shared settings are in ExerciseConfig.h. Board assignments and mode defaults
+are in ExercisePresets.h; its local detector limits are bench-only. Upload BOTH boards when updating the shared firmware.
 
 PLATFORMIO SETUP AND UPLOAD
 
@@ -48,11 +53,12 @@ HOW THE CONNECTIONS WORK
 Laptop <-> ExerciseHip: USB or Bluetooth commands and hip telemetry.
 Laptop <-> ExerciseWrist: USB or Bluetooth commands and wrist telemetry.
 Hip <-> Wrist: ESP-NOW activation handover, mode synchronization and LED events.
+Comms -> active node: REPS:<boot>:<session>:<total> (see COMMS_REPS.txt).
 
 No Wi-Fi router or Bluetooth pairing between the boards is needed.
 Each monitor shows only its own board. Counts and exercise selection are not
 forwarded. Both boards must be powered for a new activation: the other board
-must acknowledge standby. Bluetooth pairing alone does not activate counting.
+must acknowledge standby. Bluetooth pairing alone does not enable rep reception.
 
 LOCAL SENSOR HISTORY (STEP 2, BEFORE COMMS INTEGRATION)
 
@@ -385,114 +391,63 @@ EXERCISE ASSIGNMENTS AND AUTOMATIC MODES
 
 Selecting a different exercise automatically selects its default mode. Wrong-board
 selections are rejected without disturbing the session. MODE commands are optional
-overrides for testing, accepted only while active. These defaults and presets need
-testing with the actual wearer; they do not recognize exercise form.
+overrides accepted only while active. Modes are metadata in this firmware;
+AR performs rep recognition and comms supplies the cumulative count.
 
-STEP-BY-STEP EXERCISE SESSION
+STEP-BY-STEP COMMS REP SESSION
 
-Send each command on its own line. No MODE command is needed for normal use.
-Selecting while inactive queues the exercise's mode; ACTIVATE applies and
-synchronizes it after the other board acknowledges standby.
-
-1. Squats on HIP, using the ExerciseHip monitor:
-     EXERCISE:SQUAT
-     ACTIVATE
-   Wait for "Hip active; wrist acknowledged standby" and "Mode synced: PAUSE".
-   The squat preset loads immediately after the standby ACK; no positioning
-   movement, three-second standstill or calibration reps are required.
-   Both LEDs blink three times without delaying sampling or counting.
-   Begin squats; return to the starting
-   position and pause briefly (at least about 0.35 seconds) between reps.
-   Watch "COUNTING | Reps: ...". Each accepted rep flashes both LEDs once.
-
-2. Switch to lunges on HIP:
-     EXERCISE:LUNGE
-   The hip stays active, zeros reps and immediately loads the lunge preset.
-   Begin lunges without another standstill; ready blinks are nonblocking.
-   PUSHUP and LEG_RAISE use this same procedure on HIP; PAUSE is automatic.
-
-3. Switch to jumping jacks on WRIST, using the ExerciseWrist monitor:
-     EXERCISE:JUMPING_JACK
-     ACTIVATE
-   Wait for "Wrist active; hip acknowledged standby" and "Mode synced: CONTINUOUS".
-   Start jumping jacks immediately. "FINDING AXIS" is normal initially;
-   move steadily until output becomes "COUNTING". Initial axis-discovery movement
-   may not count; there is no additional two-rep calibration phase.
-
-4. Switch to sit-ups on WRIST:
-     EXERCISE:SITUP
-   PAUSE is selected automatically. The preset loads immediately and mode sync
-   runs in parallel. Exercise and mode change cause one counter restart.
-   Keep the wrist in a consistent position relative to your torso during sit-ups.
-   Perform reps with a brief pause between each; no startup standstill is needed.
-
-5. New set of the same exercise: send RESET on the active board, then begin
-   moving immediately. Stop counting with STANDBY on the active board.
-   Closing a monitor does NOT stop counting.
-
-After switching back to HIP, select its exercise and activate it. Each board
-remembers its own selected mode, separately from the active peer's synchronized
-mode, so a handover restores the correct local choice. Exercise is not forwarded.
-After reboot HIP defaults to SQUAT/PAUSE and WRIST to JUMPING_JACK/CONTINUOUS,
-both in standby. Standby telemetry and STATUS show the mode for next activation.
-
-Optional override: while active, send MODE:CONTINUOUS or MODE:PAUSE. The override
-persists through RESET, standby and handovers until a DIFFERENT exercise is
-selected or the board reboots. Repeating the current EXERCISE command only shows
-status; it preserves the count and override. To restore its default immediately,
-send the corresponding MODE command while active.
+See COMMS_REPS.txt for the full contract and expected output.
+1. Select EXERCISE:SQUAT on HIP (or JUMPING_JACK on WRIST).
+2. Send ACTIVATE and wait for peer acknowledgement.
+3. Send REPS and copy the printed boot/session ticket.
+4. Send REPS:<boot>:<session>:1 using those actual numbers. Expect ACCEPTED,
+   Reps: 1 on USB/Bluetooth telemetry, and a rep flash on both boards.
+5. Repeat the message: expect DUPLICATE with no additional flash/count.
+6. Move the sensors: rep totals remain unchanged until comms sends a higher total.
+7. Send RESET: count becomes zero and a new ticket is printed. Old results are
+   rejected. Send a result with the new ticket to begin the next set.
 
 COMMAND REFERENCE (USB OR BLUETOOTH)
 
 ACTIVATE
-  Request that the other board stop counting. After its standby ACK, this board
-  becomes active, applies/synchronizes its selected mode and loads its preset
-  with zero reps and no standstill. An already-active board keeps its session;
-  use RESET for a new set. The peer acknowledgement is still required.
+  Ask the peer to enter standby. After its ACK, accept comms counts with a fresh
+  ticket and zero total. Repeating ACTIVATE while active preserves the set.
 STANDBY (DEACTIVATE is an alias)
-  Stop this board's counting and cancel pending activation. Bluetooth, ESP-NOW
-  commands, sensor history and hip fall monitoring remain available.
+  Stop accepting rep results and cancel pending activation. Sampling, history,
+  generic peaks, window preparation and HIP fall monitoring continue.
 RESET
-  Clear reps. If active, immediately reload the fixed preset. If inactive,
-  stay inactive. Cancel pending activation. No preset values are erased.
+  Clear reps and issue a new ticket, preserving active/standby state. Cancel
+  pending activation. Does not reset sensor history or the window stream.
+REPS / REPS:<boot>:<session>:<total>
+  Inspect the current ticket/count or submit a cumulative AR total from comms.
+  See COMMS_REPS.txt for result codes, retry rules and lifecycle details.
 EXERCISE:<name>
-  Select a permitted exercise on this board. Plurals/spaces/hyphens are accepted,
-  e.g. EXERCISE:leg raises. A different selection loads its default mode, zeros reps
-  and restarts counting once if active; standby stays standby and remembers the
-  mode until activation. Pending activation is cancelled. Selecting the same
-  exercise only shows status; it does not reset the count or manual override.
+  Select a permitted exercise on this board; plural/spaces/hyphens are accepted.
+  A changed exercise applies its default mode, clears reps and changes the ticket.
+  Standby stays standby. Selecting the same exercise preserves the set/override.
 EXERCISES
-  List this board's exercises and indicate which belong to the other board.
+  List this board's exercises and indicate those assigned to the other board.
 MODE:PAUSE / MODE:CONTINUOUS (PAUSE / CONTINUOUS also accepted)
-  Optional override, accepted locally only on the active board; synchronized to
-  the peer via ESP-NOW. It changes this exercise's selected mode until another
-  exercise is selected or the board reboots.
-  An actual mode change restarts each session, preserving active/standby state,
-  and cancels pending activation. Repeating the same mode retries synchronization
-  without resetting counts. Wait for "Mode synced". On timeout the local change
-  remains; check peer power and resend the mode. PAUSE is a counting algorithm,
-  not a standby command. A standby board accepts synchronized mode changes, but
-  they never overwrite its own selected mode for next activation.
+  Metadata/synchronization retained for compatibility; neither enables local
+  counting. Local overrides require activation. An actual change clears reps,
+  changes the ticket and syncs to the peer. Repeating the same mode only retries
+  sync. Exercise preferences survive handovers until a different exercise or boot.
 STATUS / HELP
-  Show activation/radio status and exercise/mode/preset, or the command list.
-  "ESP-NOW configured and ready" does not prove that the peer is currently online.
-BUFFER
-  Show local sensor history size, timestamps, span and age; counting is unchanged.
-WINDOW / WINDOW:<t0_ms>
-  Copy and summarize the inclusive three-second window ending at the latest sample
-  or the supplied local unsigned 32-bit timestamp. See LOCAL SENSOR HISTORY above.
+  Show activation, exercise/mode, comms ticket/count and stream/radio status,
+  or the command list. Radio readiness does not prove the peer is online.
+BUFFER / WINDOW / WINDOW:<t0_ms>
+  Inspect sensor history. See LOCAL SENSOR HISTORY above.
 STREAM / STREAM:START[:t0_ms] / STREAM:STOP / STREAM:ARM / STREAM:NEXT
-  Control or inspect local window preparation independently of counting. See
-  LOCAL SLIDING WINDOWS for queue behaviour, diagnostic consumption and limitations.
+  Control local window preparation independently of rep reception.
 STREAM:REQUEST / STREAM:CLOCK:<probe> / STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0>
 STREAM:END:<coordinator>:<session>
-  See COORDINATED WINDOW SESSIONS for the shared-start handshake and clock mapping.
+  See COORDINATED WINDOW SESSIONS. These session IDs are separate from REPS tickets.
 
-FIXED PRESETS
+RETAINED LOCAL DETECTOR PRESETS (BENCH ONLY)
 
-Edit ExercisePresets.h to tune values, then upload both environments. Presets are
-compiled into firmware and survive power loss. RESET reloads them. The node does
-not learn RAM profiles or write profiles to flash in this preset workflow.
+The following describes LocalRepCounting and its two detector algorithms, which
+are no longer run or linked into firmware. Editing these limits does not change
+AR/comms counts. ExercisePresets.h still supplies board/mode selection metadata.
 
 Pause mode: acceleration-magnitude deviation from nominal gravity (9.81 m/s2).
   Exercise       Board   Start (m/s2)  End (m/s2)  Peak (m/s2)  Time (ms)
@@ -515,26 +470,26 @@ in EACH direction, full-cycle duration 600-6000 ms. Axis and initial direction
 are discovered each session. One-second axis windows may take longer with weak
 or mixed motion. Acceleration thresholds cannot substitute for gyro limits.
 
-Activation, RESET, exercise changes and mode changes use fixed sensor references:
+LocalRepCounting::begin uses fixed sensor references:
 GeneralConfig::GRAVITY_MPS2 = 9.81 m/s2 and GYRO_BIAS_RAD_S = {0, 0, 0} rad/s.
 No new sensor baseline or gyro offset is measured. These are nominal assumptions,
 separate from exercise thresholds. Actual sensor offsets can cause missed/extra
 counts; test with the wearer/mounting before relying on these defaults.
-Counting starts from zero after activation; earlier movement is not replayed.
+LocalRepCounting starts from zero after begin(); earlier movement is not replayed.
 Continuous mode still discovers its axis/direction from movement each session.
 Wrist sit-ups need consistent arm position relative to the torso.
 
 MIRRORED LED FEEDBACK AND RADIO BEHAVIOR
 
-Both LEDs blink three times when an active session loads its preset: 100 ms OFF,
-then 100 ms ON, repeated three times. Counting and axis discovery run during the
-blinks; a rep flash can replace the ready pattern. Each counted rep flashes both
-LEDs for 200 ms.
+Both LEDs blink three times when an active rep session starts or resets: 100 ms OFF,
+then 100 ms ON, repeated three times. Comms reception continues during the
+blinks; a rep flash can replace the ready pattern. Each accepted increase flashes
+both LEDs for 200 ms; duplicate/zero/rejected updates do not flash.
 The standby board mirrors LEDs while keeping its own counter inactive.
 
 Timers are nonblocking. LED packets are best effort with no ACK/retry. Wireless
 delay means approximate synchronization; lost packets can miss flashes. Local
-counting never depends on LED delivery. Session/sequence checks ignore duplicate
+rep acceptance never depends on LED delivery. Session/sequence checks ignore duplicate
 or stale events. Reset, exercise/mode changes and standby clear feedback.
 
 ESP-NOW uses 24-byte version-4 activation, mode and LED packets. There are no sensor
@@ -544,7 +499,7 @@ No activation ACK means activation fails. If every ACK is lost, both may remain
 in standby. HIP wins simultaneous pending requests. A delayed deactivation may
 conservatively stop a board but cannot start it.
 
-Once active, a board counts locally even if the other loses power/radio reception.
+Once active, a board accepts comms counts even if the peer loses power/radio reception.
 After a standby-board reboot, switch activation away and back to establish a new
 LED session. ACTIVATE on an already-active board does not repeat the handshake.
 After either board reboots, resend the desired MODE from the active board to sync.
@@ -552,32 +507,14 @@ Both Bluetooth and ESP-NOW share the ESP32 radio; test switching on real boards.
 
 BENCH AND WEARABLE CHECKS
 
-- Verify both USB and Bluetooth monitors accept STATUS and show STANDBY on boot.
-- Alternate ACTIVATE; only the acknowledged requester counts.
-- Reject SITUP on HIP and SQUAT on WRIST without changing the current session.
-- With peer power off, a new activation must fail explicitly.
-- Reject a local mode command on standby; synchronize mode from the active board.
-- Select JUMPING_JACK while WRIST is inactive and HIP is in PAUSE. Activate WRIST:
-  CONTINUOUS should load/sync automatically, with no manual MODE command.
-- Change active WRIST to SITUP: PAUSE should load and counting restart once.
-- Override its mode, hand activation away/back: the override should survive.
-- Change to a different exercise: its default replaces the previous override.
-- HIP/SQUAT/PAUSE: move immediately after activation; first valid rep counts as 1.
-- Verify LUNGE, PUSHUP and LEG_RAISE on HIP; SITUP on WRIST.
-- WRIST/JUMPING_JACK/CONTINUOUS: find axis, then count without calibration reps.
-- RESET/exercise/mode changes clear counts and reload presets without standstill.
-- No "Hold still" or "Move into your starting position" prompt should appear.
-- Reboot returns defaults/standby; fixed presets remain available after activation.
-- STANDBY stops counting; hip fall monitoring remains running.
-- BUFFER/WINDOW work in standby on both boards, even when the peer is offline.
-- Counter RESET/exercise changes preserve history; only reboot clears it.
-- PEAK diagnostics appear on either board in standby without activating counting.
-- The first peak reports WAIT_COMMS; only JOIN (or manual START) creates windows.
-- Repeated JOIN preserves t0 and sequence; an old boot/arm is rejected after STOP.
-- STREAM:STOP clears the queue/request; STREAM:ARM permits a new request or JOIN.
-- After JOIN, no consumer means queue=3/QUEUE_FULL while sampling continues.
-- Verify generic trigger sensitivity on the worn sensors, including walking/noise.
-- Compare counts/LEDs against full physical reps; mocks require tuning.
+- Follow COMMS_REPS.txt on both roles using USB first, then actual Bluetooth comms.
+- Verify that motion alone never changes reps or generates rep LED events.
+- Check duplicates, old tickets after RESET, standby rejection, and reconnect.
+- Verify handover, exercise restrictions and mode synchronization on both boards.
+- Verify BUFFER/WINDOW, generic peaks and coordinated window sessions still work
+  while rep reception is active or in standby.
+- Verify HIP fall monitoring and physical LED timing on real boards.
+- Host tests validate logic; real AR/comms delivery requires a live integration test.
 
 BUILD / HOST VERIFICATION
 
@@ -589,11 +526,15 @@ Replace COM7/COM8 with each board's USB port. Close monitors before uploading.
 
 Create .build first if absent. Run each executable after a successful compilation.
 
-Fixed preset tests (immediate first rep/cycle, nominal gravity/bias, reset, axis):
+Extracted local integration (bench-only, not linked into firmware):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/local_rep_counting_test.cpp hardware/node/LocalRepCounting.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp -o .build/local_rep_counting_test.exe
+  .build/local_rep_counting_test.exe
+
+Local detector fixed preset tests (bench-only):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_presets_test.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp -o .build/exercise_presets_test.exe
   .build/exercise_presets_test.exe
 
-Legacy calibration/profile detector regression tests (not used by preset startup):
+Legacy calibration/profile detector regression tests (bench-only):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_profiles_test.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp -o .build/exercise_profiles_test.exe
   .build/exercise_profiles_test.exe
 
@@ -601,8 +542,8 @@ Transport-independent node switching/LED tests:
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/node_session_test.cpp hardware/node/NodeSession.cpp -o .build/node_session_test.exe
   .build/node_session_test.exe
 
-Firmware startup tests with fake sensor/radio/console hardware:
-  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp hardware/node/StreamCoordination.cpp -o .build/exercise_node_startup_test.exe
+Firmware comms-rep, startup and sensor/stream tests with fake hardware:
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/CommsRepCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp hardware/node/StreamCoordination.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
 
 Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):

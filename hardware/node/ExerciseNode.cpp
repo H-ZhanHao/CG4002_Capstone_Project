@@ -8,8 +8,7 @@
 
 #include "ExerciseNode.h"
 #include "ExerciseConfig.h"
-#include "RepCounter.h"
-#include "ContinuousCounter.h"
+#include "CommsRepCounter.h"
 #include "ExercisePresets.h"
 #include "FallDetector.h"
 #include "WirelessStreamer.h"
@@ -32,10 +31,7 @@ bool genericPeakPending = false;
 WindowScheduler windowScheduler;
 NodeStreamControl streamControl(windowScheduler, sensorHistory);
 
-ExerciseSettings genericSettings = getGenericSettings();
-
-RepCounter repCounter(genericSettings);
-ContinuousCounter continuousCounter;
+CommsRepCounter commsReps;
 ExerciseType activeExercise = SQUAT;
 
 FallDetector fallDetector;
@@ -44,19 +40,16 @@ WirelessStreamer wirelessStreamer;
 void linkMessage(const char* text) { wirelessStreamer.message(text); }
 NodeSession nodeSession(NodeRadio::send, linkMessage);
 const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STREAM | STATUS | HELP. Select Newline, then Send.";
+const char* repCommandHelp = "Comms reps: REPS (show ticket/count) | REPS:<boot>:<session>:<total>. ACTIVATE first; use the current HW ticket. Total is cumulative.";
 const char* streamCommandHelp = "Windows: STREAM | STREAM:START[:t0_ms] | STREAM:STOP | STREAM:ARM | STREAM:NEXT. Local preparation only; no comms transmission.";
 const char* coordinationHelp = "Comms bench: STREAM:CLOCK:<probe> | STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0> | STREAM:END:<coordinator>:<session> | STREAM:REQUEST";
 
 bool wirelessStarted = false;
 
 CountingMode activeMode = PAUSE_MODE;
-bool countingStarted = false;
 
 unsigned long lastSampleTime = 0;
 unsigned long lastUsbOutputTime = 0;
-
-float filteredMagnitude = 0.0f;
-bool filterInitialised = false;
 
 // Buzzer output.
 bool buzzerActive = false;
@@ -69,29 +62,32 @@ void setLed(bool on) {
   );
 }
 
-int sessionState() {
-  return countingStarted &&
-    (activeMode == PAUSE_MODE || continuousCounter.axis() >= 0) ? 2 : 1;
+void reportCommsReps() {
+  char line[192];
+  snprintf(line, sizeof(line), "[REPS | %s | boot=%lu | session=%lu | total=%ld | %s]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)commsReps.boot(),
+    (unsigned long)commsReps.session(), (long)commsReps.total(),
+    !nodeSession.localActive() ? "INACTIVE" : commsReps.received() ? "COMMS" : "WAIT_COMMS");
+  wirelessStreamer.message(line);
 }
 
-int reportedRepetitions() {
-  if (!countingStarted) {
-    return 0;
+CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) {
+  const int32_t before = commsReps.total();
+  const CommsRepResult result = commsReps.receive(boot, session, total, nodeSession.localActive());
+  if (result == CommsRepResult::ACCEPTED && commsReps.total() > before) {
+    nodeSession.showLedFeedback(LedFeedback::REP, millis());
+    setLed(nodeSession.feedbackLedOn(millis()));
   }
-
-  if (activeMode == PAUSE_MODE) {
-    return repCounter.repetitionCount();
-  }
-
-  if (activeMode == CONTINUOUS_MODE) {
-    return continuousCounter.repetitionCount();
-  }
-
-  return 0;
+  char line[192];
+  snprintf(line, sizeof(line), "[REPS ACK | %s | boot=%lu | session=%lu | total=%lu | %s]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)boot, (unsigned long)session,
+    (unsigned long)total, commsRepResultName(result));
+  wirelessStreamer.message(line);
+  return result;
 }
 
 void updateOutputTimers(unsigned long now) {
-  if (nodeSession.localActive() && countingStarted) {
+  if (nodeSession.localActive()) {
     setLed(nodeSession.feedbackLedOn(now));
   }
 
@@ -104,33 +100,14 @@ void updateOutputTimers(unsigned long now) {
   }
 }
 
-void startCounting(unsigned long now);
-
 void restartSession(unsigned long now) {
-  countingStarted = false;
-  filteredMagnitude = 0.0f;
-  filterInitialised = false;
+  commsReps.reset();
   nodeSession.clearLedFeedback(now);
-  setLed(false);
-
-  if (!repCounter.beginPreset(now, ExercisePresets::pause(activeExercise))) {
-    nodeSession.standby();
-    wirelessStreamer.message("ERROR: Invalid exercise preset; counting remains inactive.");
-    return;
-  }
-  continuousCounter.beginPreset(GeneralConfig::GYRO_BIAS_RAD_S, now,
-                                ExercisePresets::continuous(activeExercise));
-
-  // Standby may prepare presets, but only acknowledged activation starts counting.
-  if (nodeSession.localActive()) {
-    wirelessStreamer.message(activeMode == PAUSE_MODE
-      ? "[Preset loaded; counting starts at zero without standstill. Pause briefly between reps.]"
-      : "[Gyro preset loaded; no standstill. Keep moving to find the axis; initial movement may not count.]");
-    startCounting(now);
-  }
-
+  if (nodeSession.localActive()) nodeSession.showLedFeedback(LedFeedback::READY, now);
+  setLed(nodeSession.feedbackLedOn(now));
+  reportCommsReps();
   lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
-  // Reset only counting. Sensor history and sampling cadence keep running.
+  // Rep resets do not affect sensor history or the independent window stream.
 }
 
 SensorWindowResult copySensorWindow(uint32_t endMs, SensorSample* destination, size_t capacity) {
@@ -307,9 +284,8 @@ bool parseFields(const char* text, uint32_t* values, size_t count) {
 void reportExercise() {
   char message[160];
   const CountingMode selectedMode = nodeSession.selectedMode();
-  snprintf(message, sizeof(message), "[Exercise: %s | %s | Preset: %s | No standstill or calibration reps]",
-    exerciseName(activeExercise), selectedMode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
-    selectedMode == PAUSE_MODE ? ExercisePresets::get(activeExercise).description : "mock gyro limits");
+  snprintf(message, sizeof(message), "[Exercise: %s | %s | Rep source: COMMS | Local counting disabled]",
+    exerciseName(activeExercise), selectedMode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS");
   wirelessStreamer.message(message);
 }
 
@@ -332,6 +308,7 @@ void processCommand(char* command, unsigned long now) {
 
   if (!strcmp(text, "HELP")) {
     wirelessStreamer.message(commandHelp);
+    wirelessStreamer.message(repCommandHelp);
     wirelessStreamer.message(streamCommandHelp);
     wirelessStreamer.message(coordinationHelp);
     return;
@@ -339,9 +316,23 @@ void processCommand(char* command, unsigned long now) {
   if (!strcmp(text, "STATUS")) {
     nodeSession.status();
     reportExercise();
+    reportCommsReps();
     reportStreamStatus();
     wirelessStreamer.message(NodeRadio::ready() ? "[ESP-NOW configured and ready]"
       : "[ESP-NOW unavailable; check peer MAC configuration and USB boot messages]");
+    return;
+  }
+  if (!strcmp(text, "REPS")) {
+    reportCommsReps();
+    return;
+  }
+  if (!strncmp(text, "REPS:", 5)) {
+    uint32_t fields[3];
+    if (!parseFields(text + 5, fields, 3)) {
+      wirelessStreamer.message("ERROR: Use REPS:<boot>:<session>:<total>, unsigned integers; total <= 2147483647.");
+      return;
+    }
+    receiveRepCount(fields[0], fields[1], fields[2]);
     return;
   }
   if (!strcmp(text, "STREAM")) {
@@ -475,7 +466,7 @@ void processCommand(char* command, unsigned long now) {
       activeExercise = requestedExercise;
       nodeSession.selectExerciseMode(ExercisePresets::defaultMode(activeExercise), now);
       wirelessStreamer.message(nodeSession.localActive()
-        ? "[Exercise changed; restarting with its preset, no standstill required]"
+        ? "[Exercise changed; waiting for comms rep count with a new ticket]"
         : "[Exercise selected; still inactive. Send ACTIVATE to start]");
     }
     reportExercise();
@@ -503,7 +494,7 @@ void processCommand(char* command, unsigned long now) {
     if (nodeSession.waiting()) nodeSession.standby();
     restartSession(now);
     wirelessStreamer.message(nodeSession.localActive()
-      ? "[Session reset; preset reloaded, no standstill required]"
+      ? "[Session reset; waiting for comms rep count with a new ticket]"
       : "[Session reset; still inactive. Send ACTIVATE to start]");
     return;
   }
@@ -529,102 +520,19 @@ void processCommand(char* command, unsigned long now) {
   nodeSession.setMode(requested, now);
 }
 
-void startCounting(unsigned long now) {
-  countingStarted = true;
-
-  nodeSession.showLedFeedback(LedFeedback::READY, now);
-  setLed(nodeSession.feedbackLedOn(now));
-}
-
-void reportRepResult(RepResult result) {
-  if (result == REP_NO_RESULT) {
-    return;
-  }
-
-  const char* reason = "";
-  switch (result) {
-    case REP_TOO_SHORT: reason = "movement too short"; break;
-    case REP_TOO_LONG: reason = "timeout before a completed rep with a pause"; break;
-    case REP_TOO_WEAK:
-      reason = repCounter.lastCompletedDuration() < repCounter.minimumRepDuration()
-        ? "peak too weak AND movement too short"
-        : "movement peak too weak";
-      break;
-    default: return;
-  }
-
-  char message[192];
-  snprintf(message, sizeof(message),
-    "REP skipped: %s | Peak: %.2f m/s2 / allowed >= %.2f m/s2 | Time: %.2f s / allowed %.2f-%.2f s",
-    reason, repCounter.lastCompletedPeak(), repCounter.requiredRepPeak(),
-    repCounter.lastCompletedDuration() / 1000.0f,
-    repCounter.minimumRepDuration() / 1000.0f,
-    repCounter.maximumRepDuration() / 1000.0f);
-  wirelessStreamer.message(message);
-}
-
-void processMovement(
-  const float gyro[3],
-  unsigned long now
-) {
-  float correctedGyroSquared = 0.0f;
-
-  for (int i = 0; i < 3; ++i) {
-    const float corrected = gyro[i] - GeneralConfig::GYRO_BIAS_RAD_S[i];
-    correctedGyroSquared += corrected * corrected;
-  }
-
-  const float correctedGyroMagnitude =
-    sqrtf(correctedGyroSquared);
-
-  const float accelerationMotion = fabsf(
-    filteredMagnitude - repCounter.baselineMagnitude()
-  );
-
-  const bool stationary =
-    accelerationMotion < genericSettings.calibrationEndGate &&
-    correctedGyroMagnitude < ModeConfig::QUIET_GYRO_LIMIT;
-
-  if (activeMode == PAUSE_MODE) {
-    repCounter.update(filteredMagnitude, now);
-    reportRepResult(repCounter.consumeRepResult());
-  }
-
-  if (activeMode == CONTINUOUS_MODE) {
-    continuousCounter.update(gyro, stationary, now);
-  }
-
-  const bool pauseRepEvent =
-    repCounter.consumeRepEvent();
-
-  const bool continuousRepEvent =
-    continuousCounter.consumeRepEvent();
-
-  const bool countedRep =
-    (activeMode == PAUSE_MODE && pauseRepEvent) ||
-    (activeMode == CONTINUOUS_MODE && continuousRepEvent);
-
-  if (countedRep) {
-    nodeSession.showLedFeedback(LedFeedback::REP, now);
-    setLed(true);
-  }
-}
-
 TelemetryData makeTelemetry() {
   TelemetryData data = {};
 
   data.uptimeMs = millis();
-  data.reps = reportedRepetitions();
+  data.reps = commsReps.total();
   data.calibrationReps = 0;
   data.calibrationTarget = 0;
 
-  data.repState = sessionState();
+  data.repState = commsReps.received() ? COMMS_COUNTING : COMMS_WAITING;
   data.mode = (int)activeMode;
   if (!nodeSession.localActive()) data.mode = (int)nodeSession.selectedMode();
   data.exercise = (uint8_t)activeExercise;
-  data.gyroAxis = continuousCounter.axis();
-  data.pauseMotion = repCounter.motionSignal();
-  data.pausePeak = repCounter.currentMovementPeak();
+  data.gyroAxis = -1;
 
   data.buzzer = buzzerActive;
   data.source = nodeRole;
@@ -680,11 +588,13 @@ void begin(NodeRole role) {
 
   const uint32_t boot = esp_random(); // Generate after radio initialization, as for NodeSession.
   streamControl.begin(nodeRole, boot);
+  commsReps.begin(boot);
   nodeSession.begin(nodeRole, boot, activeMode);
   restartSession(now);
   fallDetector.begin(now);
 
   wirelessStreamer.message(commandHelp);
+  wirelessStreamer.message(repCommandHelp);
   wirelessStreamer.message(streamCommandHelp);
   wirelessStreamer.message(coordinationHelp);
   reportStreamStatus();
@@ -774,20 +684,6 @@ void update() {
     buzzerStartTime = now;
   }
 
-  if (nodeSession.localActive() && countingStarted) {
-    if (!filterInitialised) {
-      filteredMagnitude = rawMagnitude;
-      filterInitialised = true;
-    } else {
-      filteredMagnitude =
-        GeneralConfig::FILTER_ALPHA * rawMagnitude +
-        (1.0f - GeneralConfig::FILTER_ALPHA) *
-          filteredMagnitude;
-    }
-
-    processMovement(gyro, now);
-  }
-
   const TelemetryData local = makeTelemetry();
   const TelemetryData data = nodeSession.output(local);
 
@@ -802,6 +698,7 @@ void update() {
     if (wirelessStreamer.consumeConnectionEvent()) {
       nodeSession.status();
       reportExercise();
+      reportCommsReps();
       if (!NodeRadio::ready()) wirelessStreamer.message("[ESP-NOW unavailable; configure peer MACs. Send STATUS for details.]");
     }
   }

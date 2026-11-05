@@ -125,7 +125,7 @@ LinkPacket NodeSession::packet(PacketKind kind, uint32_t request, uint32_t targe
 void NodeSession::activate(uint32_t now) {
   expire(now);
   if (localActive()) {
-    log_("[Already active; send RESET to clear reps and reload the preset]");
+    log_("[Already active; send RESET to clear reps and obtain a new comms ticket]");
     return;
   }
   if (waiting()) {
