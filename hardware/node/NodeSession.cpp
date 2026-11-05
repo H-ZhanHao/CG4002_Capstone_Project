@@ -6,7 +6,8 @@ namespace {
   constexpr uint8_t VERSION = 4;
 }
 
-NodeSession::NodeSession(Send send, Log log) : send_(send), log_(log) {}
+NodeSession::NodeSession(Send send, Log log, Feedback feedback)
+  : send_(send), log_(log), feedback_(feedback) {}
 
 void NodeSession::begin(NodeRole role, uint32_t boot, CountingMode mode) {
   role_ = role;
@@ -25,6 +26,85 @@ void NodeSession::begin(NodeRole role, uint32_t boot, CountingMode mode) {
   ledPeerBoot_ = ledPeerRequest_ = ledReceiveSequence_ = 0;
   ledStartedAt_ = ledDuration_ = 0;
   ledReadyPattern_ = false;
+  repHead_ = repCount_ = repAttempts_ = 0;
+  repLastAttempt_ = repSendSequence_ = repReceiveSequence_ = 0;
+  repReceivedKind_ = RepFeedback::CLEAR;
+}
+
+void NodeSession::enqueueRepFeedback(RepFeedback kind, uint32_t now) {
+  if (repCount_ == RepFeedbackTiming::QUEUE_CAPACITY || repSendSequence_ == UINT32_MAX) {
+    log_("[REP FEEDBACK | Dropped: queue full or sequence exhausted | Count retained]");
+    return;
+  }
+  const uint8_t slot = (repHead_ + repCount_) % RepFeedbackTiming::QUEUE_CAPACITY;
+  repQueue_[slot] = {++repSendSequence_, now, kind};
+  ++repCount_;
+  serviceRepFeedback(now);
+}
+
+void NodeSession::showRepFeedback(uint32_t now) {
+  if (role_ == WRIST && localActive() && activePeerBoot_)
+    enqueueRepFeedback(RepFeedback::REP, now);
+}
+
+void NodeSession::clearRepFeedback(uint32_t now) {
+  repHead_ = repCount_ = repAttempts_ = 0;
+  // Preserve the event sequence across rep-session resets to reject old retries.
+  if (role_ == WRIST && activePeerBoot_ && repSendSequence_)
+    enqueueRepFeedback(RepFeedback::CLEAR, now);
+}
+
+void NodeSession::popRepFeedback() {
+  repHead_ = (repHead_ + 1) % RepFeedbackTiming::QUEUE_CAPACITY;
+  --repCount_;
+  repAttempts_ = 0;
+}
+
+void NodeSession::serviceRepFeedback(uint32_t now) {
+  while (repCount_ && now - repQueue_[repHead_].queuedAt >= RepFeedbackTiming::MAX_AGE_MS) {
+    log_("[REP FEEDBACK | Unconfirmed/expired | Count retained]");
+    popRepFeedback();
+  }
+  if (!repCount_ || repAttempts_ >= RepFeedbackTiming::MAX_ATTEMPTS ||
+      (repAttempts_ && now - repLastAttempt_ < RepFeedbackTiming::RETRY_MS)) return;
+  const PendingFeedback& event = repQueue_[repHead_];
+  LinkPacket p = packet(PacketKind::REP_FEEDBACK, request_, activePeerBoot_);
+  p.sequence = event.sequence;
+  p.mode = static_cast<uint8_t>(event.kind);
+  repLastAttempt_ = now;
+  ++repAttempts_;
+  send_(p);
+}
+
+void NodeSession::receiveRepFeedback(const LinkPacket& p, uint32_t now) {
+  if (!p.sequence || p.targetBoot != boot_ ||
+      (p.mode != static_cast<uint8_t>(RepFeedback::REP) &&
+       p.mode != static_cast<uint8_t>(RepFeedback::CLEAR))) return;
+  if (p.kind == PacketKind::REP_FEEDBACK_ACK) {
+    if (role_ != WRIST || !repCount_ || p.boot != activePeerBoot_ || p.request != request_) return;
+    const PendingFeedback& event = repQueue_[repHead_];
+    if (p.sequence != event.sequence || p.mode != static_cast<uint8_t>(event.kind)) return;
+    log_("[REP FEEDBACK | HIP acknowledged]");
+    popRepFeedback();
+    serviceRepFeedback(now);
+    return;
+  }
+  if (role_ != HIP || state_ != State::STANDBY ||
+      p.boot != ledPeerBoot_ || p.request != ledPeerRequest_) return;
+  const RepFeedback kind = static_cast<RepFeedback>(p.mode);
+  if (p.sequence == repReceiveSequence_ && kind != repReceivedKind_) return;
+  if (p.sequence > repReceiveSequence_) {
+    repReceiveSequence_ = p.sequence;
+    repReceivedKind_ = kind;
+    if (feedback_) feedback_(kind);
+    log_(kind == RepFeedback::REP ? "[REP FEEDBACK | WRIST event received]"
+                                  : "[REP FEEDBACK | WRIST feedback cleared]");
+  }
+  // Re-acknowledge duplicates/older events without replaying the sound.
+  LinkPacket ack = packet(PacketKind::REP_FEEDBACK_ACK, p.request, p.boot);
+  ack.sequence = p.sequence;
+  ack.mode = p.mode;
+  send_(ack);
 }
 
 void NodeSession::applyLedFeedback(LedFeedback feedback, uint32_t now) {
@@ -88,7 +168,7 @@ void NodeSession::setMode(CountingMode mode, uint32_t now) {
 
 void NodeSession::selectExerciseMode(CountingMode mode, uint32_t now) {
   if (mode != PAUSE_MODE && mode != CONTINUOUS_MODE) return;
-  if (waiting()) standby();
+  if (waiting()) standby(now);
   selectedMode_ = mode;
   if (localActive()) setMode(mode, now);
   // An exercise change resets the counter even when its mode is unchanged.
@@ -132,6 +212,9 @@ void NodeSession::activate(uint32_t now) {
     log_("[Activation already pending; waiting for peer standby]");
     return;
   }
+  if (feedback_) feedback_(RepFeedback::CLEAR);
+  repHead_ = repCount_ = repAttempts_ = 0;
+  repSendSequence_ = repReceiveSequence_ = 0;
   ledDuration_ = 0;
   activePeerBoot_ = ledSendSequence_ = 0;
   ledPeerBoot_ = ledPeerRequest_ = ledReceiveSequence_ = 0;
@@ -145,7 +228,9 @@ void NodeSession::activate(uint32_t now) {
   requestStandby(now);
 }
 
-void NodeSession::standby() {
+void NodeSession::standby(uint32_t now) {
+  clearRepFeedback(now);
+  if (feedback_) feedback_(RepFeedback::CLEAR);
   // CLEAR has no pulse duration, so its timestamp does not affect output.
   clearLedFeedback(0);
   state_ = State::STANDBY;
@@ -177,6 +262,10 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
   // not activate a request whose timeout has already elapsed.
   expire(now);
   expireMode(now);
+  if (p.kind == PacketKind::REP_FEEDBACK || p.kind == PacketKind::REP_FEEDBACK_ACK) {
+    receiveRepFeedback(p, now);
+    return;
+  }
   if (p.kind == PacketKind::LED_FEEDBACK) {
     if (state_ != State::STANDBY || p.targetBoot != boot_ ||
         p.boot != ledPeerBoot_ || p.request != ledPeerRequest_ || !p.sequence) return;
@@ -235,7 +324,10 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
       ledPeerBoot_ = p.boot;
       ledPeerRequest_ = p.request;
       ledReceiveSequence_ = 0;
+      repReceiveSequence_ = 0;
+      if (feedback_) feedback_(RepFeedback::CLEAR);
     }
+    repHead_ = repCount_ = repAttempts_ = 0;
     ledDuration_ = 0;
     activePeerBoot_ = ledSendSequence_ = 0;
     state_ = State::STANDBY;
@@ -261,6 +353,7 @@ void NodeSession::receive(const LinkPacket& p, uint32_t now) {
 }
 
 void NodeSession::update(uint32_t now) {
+  serviceRepFeedback(now);
   expireMode(now);
   if (modePending_ && modeAttempts_ < LinkTiming::MAX_ATTEMPTS &&
       now - modeLastAttempt_ >= LinkTiming::RETRY_MS) requestMode(now);

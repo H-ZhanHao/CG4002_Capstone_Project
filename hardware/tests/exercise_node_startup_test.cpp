@@ -31,7 +31,12 @@ static int ledLevel = 0, buzzerLevel = 0;
 static unsigned int buzzerWrites = 0;
 static void peerSend(const LinkPacket& packet) { incoming.push_back(packet); }
 static void ignoreLog(const char*) {}
-static NodeSession peer(peerSend, ignoreLog);
+static unsigned int peerRepBeeps = 0, peerRepClears = 0;
+static void peerFeedback(RepFeedback kind) {
+  if (kind == RepFeedback::REP) ++peerRepBeeps;
+  else ++peerRepClears;
+}
+static NodeSession peer(peerSend, ignoreLog, peerFeedback);
 UsbConsole usbConsole;
 
 namespace NodePlatform {
@@ -408,7 +413,64 @@ static void buzzerTests() {
   puts("Single rep beeps, queue/gap, duplicate rejection, fall priority and HIP-only GPIO tests passed");
 }
 
+static void remoteBuzzerTests() {
+  peerOnline = true; sensorHealthy = true; btConnected = false;
+  ExerciseNode::begin(HIP);
+  const auto boot = ExerciseNode::activityStatus().boot;
+  sendActivity(boot, 1, "ACTIVE");
+  peer.activate(now); step(2);
+  assert(peer.localActive() && data().reps == 0);
+  peer.showRepFeedback(now);
+  assert(!incoming.empty());
+  const auto remoteEvent = incoming.front();
+  sensorHealthy = false;
+  step(1);
+  assert(buzzerLevel && data().buzzer && !data().fallAlert);
+  assert(data().reps == 0 && ledLevel == GeneralConfig::LED_ON);
+  incoming.push_back(remoteEvent); // Lost ACK/retry cannot extend the beep.
+  step(5);
+  assert(!buzzerLevel);
+  sensorHealthy = true;
+  peer.showRepFeedback(now); peer.showRepFeedback(now);
+  step(6); assert(buzzerLevel); // Respect the silent gap after the previous beep.
+  peer.clearRepFeedback(now); step(1);
+  assert(!buzzerLevel);
+  step(20); assert(!buzzerLevel); // Remote reset cancels queued beeps too.
+
+  step(6, 0.0f); step(1, 30.0f);
+  const auto fallAt = now;
+  assert(buzzerLevel && data().fallAlert);
+  peer.showRepFeedback(now); step(1);
+  peer.clearRepFeedback(now); step(1);
+  assert(buzzerLevel && data().fallAlert);
+  while (now - fallAt < FallConfig::BUZZER_DURATION_MS) step(1);
+  assert(!buzzerLevel);
+  step(20); assert(!buzzerLevel); // Suppressed remote rep is never replayed.
+
+  peer.showRepFeedback(now); step(1); assert(buzzerLevel);
+  command("ACTIVATE");
+  assert(!buzzerLevel && data().repState == COMMS_WAITING);
+  incoming.push_back(remoteEvent); step(1);
+  assert(!buzzerLevel && data().reps == 0);
+
+  ExerciseNode::begin(WRIST);
+  command("ACTIVATE");
+  const auto current = ticket();
+  const auto beepsBefore = peerRepBeeps, clearsBefore = peerRepClears;
+  sendReps(current, 0);
+  assert(peerRepBeeps == beepsBefore);
+  sendReps(current, 5);
+  assert(peerRepBeeps == beepsBefore + 1 && data().reps == 5);
+  sendReps(current, 5); sendReps(current, 4);
+  sendReps({current.boot + 1, current.session}, 6);
+  assert(peerRepBeeps == beepsBefore + 1 && data().reps == 5);
+  command("RESET");
+  assert(peerRepClears == clearsBefore + 1 && data().reps == 0);
+  puts("WRIST comms-to-radio and HIP standby buzzer/LED/count independence, reset and fall priority passed");
+}
+
 int main() {
+  remoteBuzzerTests();
   buzzerTests();
   activityTests();
   readyEvents = repEvents = 0;

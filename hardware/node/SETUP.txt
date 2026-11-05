@@ -5,7 +5,8 @@ message formats, reset/session rules, acknowledgements and bench tests.
 ACTIVITY now stores comms-supplied IDLE/ACTIVE independently of counting-board
 activation. Feedback step 2 drives the LED OFF for IDLE and steadily ON for ACTIVE.
 Feedback step 3 adds a 100 ms HIP beep for each accepted rep-total increase, with
-fall-alarm priority. WRIST-to-HIP feedback forwarding is a later step.
+fall-alarm priority. Step 4 forwards WRIST rep feedback to standby HIP over ESP-NOW
+with ACKs and bounded retries. Activity still comes directly to each board.
 LocalRepCounting.cpp retains the former local detector orchestration for bench
 tests; it and RepCounter.cpp/ContinuousCounter.cpp are excluded from firmware.
 
@@ -56,7 +57,7 @@ HOW THE CONNECTIONS WORK
 
 Laptop <-> ExerciseHip: USB or Bluetooth commands and hip telemetry.
 Laptop <-> ExerciseWrist: USB or Bluetooth commands and wrist telemetry.
-Hip <-> Wrist: ESP-NOW activation handover and mode synchronization.
+Hip <-> Wrist: ESP-NOW activation handover, mode synchronization and WRIST rep feedback.
 Comms -> active node: REPS:<boot>:<session>:<total> (see COMMS_REPS.txt).
 
 No Wi-Fi router or Bluetooth pairing between the boards is needed.
@@ -492,14 +493,18 @@ ACTIVITY LED AND RADIO BEHAVIOR
 
 Each board's runtime LED follows its accepted ACTIVITY state: OFF for IDLE,
 steadily ON for ACTIVE, independent of exercise or counting activation. Send
-ACTIVITY separately to both boards with their own boot IDs; peer propagation
-is a later step. There are no ready/rep flashes, and legacy peer LED packets
+ACTIVITY separately to both boards with their own boot IDs; it is not forwarded
+over ESP-NOW. There are no ready/rep flashes, and legacy peer LED packets
 cannot override activity. Reset, mode/exercise changes, standby and disconnects
 preserve activity. Only an explicit IDLE or reboot clears ACTIVE.
 The fatal MPU6050 startup-error blink remains as a wiring diagnostic.
 
 ESP-NOW retains the 24-byte version-4 protocol; its legacy LED pattern support
-is unused by the current GPIO path. There are no sensor
+is unused by the current GPIO path. New REP_FEEDBACK/ACK event kinds provide
+WRIST-to-HIP buzzer feedback with deduplication and bounded retries (250 ms,
+5 attempts, 1.25-second queue age, at most 8 pending events). See COMMS_REPS.txt
+for diagnostics, cancellation, protocol fields and a two-board bench test.
+There are no sensor
 streams, forwarded counts, remote fall messages, discovery broadcasts or heartbeats.
 Activation and mode sync try five times at 500 ms intervals (2.5-second deadline).
 No activation ACK means activation fails. If every ACK is lost, both may remain
@@ -510,6 +515,8 @@ Once active, a board accepts comms counts even if the peer loses power/radio rec
 After a board reboots, resend ACTIVITY with its new boot ID to restore its LED.
 ACTIVATE on an already-active board does not repeat the handshake.
 After either board reboots, resend the desired MODE from the active board to sync.
+After HIP reboots, use STANDBY then ACTIVATE on WRIST to refresh the feedback
+handshake and obtain the new WRIST REPS ticket. Upload both boards for feedback.
 Both Bluetooth and ESP-NOW share the ESP32 radio; test switching on real boards.
 
 BENCH AND WEARABLE CHECKS
@@ -521,6 +528,8 @@ BENCH AND WEARABLE CHECKS
 - Verify BUFFER/WINDOW, generic peaks and coordinated window sessions still work
   while rep reception is active or in standby.
 - Verify HIP rep beeps, fall-alarm priority and steady activity LEDs on real boards.
+- Verify WRIST rep increases beep on standby HIP, retries don't replay sounds,
+  and WRIST RESET cancels pending feedback without changing HIP's own count.
 - Host tests validate logic; real AR/comms delivery requires a live integration test.
 
 BUILD / HOST VERIFICATION
@@ -552,6 +561,10 @@ Transport-independent node switching/LED tests:
 Firmware comms-rep, startup and sensor/stream tests with fake hardware:
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/BuzzerFeedback.cpp hardware/node/CommsActivityState.cpp hardware/node/CommsRepCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp hardware/node/StreamCoordination.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
+
+WRIST-to-HIP rep-feedback protocol (quick host check, no firmware SDK rebuild):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/rep_feedback_test.cpp hardware/node/NodeSession.cpp -o .build/rep_feedback_test.exe
+  .build/rep_feedback_test.exe
 
 Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/sensor_history_test.cpp hardware/node/SensorHistory.cpp -o .build/sensor_history_test.exe

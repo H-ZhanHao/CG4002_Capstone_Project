@@ -40,7 +40,8 @@ FallDetector fallDetector;
 WirelessStreamer wirelessStreamer;
 
 void linkMessage(const char* text) { wirelessStreamer.message(text); }
-NodeSession nodeSession(NodeRadio::send, linkMessage);
+void peerRepFeedback(RepFeedback kind);
+NodeSession nodeSession(NodeRadio::send, linkMessage, peerRepFeedback);
 const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STREAM | STATUS | HELP. Select Newline, then Send.";
 const char* repCommandHelp = "Comms reps: REPS (show ticket/count) | REPS:<boot>:<session>:<total>. ACTIVATE first; use the current HW ticket. Total is cumulative.";
 const char* activityCommandHelp = "Activity: ACTIVITY (status) | ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE. Independent of board activation; sequence increases until reboot.";
@@ -58,6 +59,13 @@ BuzzerFeedback buzzerFeedback;
 
 void writeBuzzer() {
   if (nodeRole == HIP) writePin(FallConfig::BUZZER_PIN, buzzerFeedback.on() ? 1 : 0);
+}
+
+void peerRepFeedback(RepFeedback kind) {
+  if (nodeRole != HIP) return;
+  if (kind == RepFeedback::REP) buzzerFeedback.rep((uint32_t)millis());
+  else buzzerFeedback.cancelReps();
+  writeBuzzer();
 }
 
 void setLed(bool on) {
@@ -106,9 +114,13 @@ ActivityResult receiveActivity(uint32_t boot, uint32_t sequence, UserActivity st
 CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) {
   const int32_t before = commsReps.total();
   const CommsRepResult result = commsReps.receive(boot, session, total, nodeSession.localActive());
-  if (nodeRole == HIP && result == CommsRepResult::ACCEPTED && commsReps.total() > before) {
-    buzzerFeedback.rep((uint32_t)millis());
-    writeBuzzer();
+  if (result == CommsRepResult::ACCEPTED && commsReps.total() > before) {
+    if (nodeRole == HIP) {
+      buzzerFeedback.rep((uint32_t)millis());
+      writeBuzzer();
+    } else {
+      nodeSession.showRepFeedback((uint32_t)millis());
+    }
   }
   char line[192];
   snprintf(line, sizeof(line), "[REPS ACK | %s | boot=%lu | session=%lu | total=%lu | %s]",
@@ -127,6 +139,7 @@ void updateOutputTimers(unsigned long now) {
 
 void restartSession(unsigned long now) {
   commsReps.reset();
+  nodeSession.clearRepFeedback((uint32_t)now);
   buzzerFeedback.cancelReps();
   writeBuzzer();
   updateActivityLed();
@@ -517,7 +530,7 @@ void processCommand(char* command, unsigned long now) {
     return;
   }
   if (!strcmp(text, "STANDBY") || !strcmp(text, "DEACTIVATE")) {
-    nodeSession.standby();
+    nodeSession.standby((uint32_t)now);
     return;
   }
 
@@ -535,7 +548,7 @@ void processCommand(char* command, unsigned long now) {
   }
 
   if (!strcmp(text, "RESET")) {
-    if (nodeSession.waiting()) nodeSession.standby();
+    if (nodeSession.waiting()) nodeSession.standby((uint32_t)now);
     restartSession(now);
     wirelessStreamer.message(nodeSession.localActive()
       ? "[Session reset; waiting for comms rep count with a new ticket]"
@@ -678,10 +691,7 @@ void update() {
     restartSession(now);
   }
   // Legacy peer LED patterns must not override the comms activity state.
-  if (!nodeSession.localActive()) {
-    buzzerFeedback.cancelReps();
-    writeBuzzer();
-  }
+  // HIP must keep servicing WRIST rep beeps while its own counter is in standby.
 
   const unsigned long sampleTime = micros();
 

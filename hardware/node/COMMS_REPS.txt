@@ -122,8 +122,8 @@ There is no silence timeout or sensor-based idle detection: comms must explicitl
 send IDLE when the user becomes idle. A later ACTIVE means moving again, not
 necessarily performing a recognized exercise. Rep messages cannot change this.
 
-At this step, send updates separately to each board using that board's own boot
-ID. Automatic peer propagation is a later feedback step. Typed main-loop APIs:
+Send activity separately to each board using that board's own boot ID.
+Activity is not forwarded over ESP-NOW. Typed main-loop APIs:
   ExerciseNode::activityStatus()
   ExerciseNode::receiveActivity(boot, sequence, UserActivity::IDLE/ACTIVE)
 Never call the receive API from a transport callback; queue to the main loop.
@@ -138,8 +138,8 @@ until comms sends IDLE, including during disconnects and failed sensor reads.
 The existing fatal sensor-startup error blink is retained as a wiring diagnostic.
 
 To control both LEDs, deliver ACTIVITY to both boards with their respective boot
-IDs and sequences. Peer propagation is a later step.
-Counts themselves are not forwarded between boards.
+IDs and sequences. Counts themselves are not forwarded between boards; only
+WRIST rep-feedback events are forwarded to HIP for its buzzer.
 
 HIP REP BUZZER (FEEDBACK STEP 3)
 
@@ -154,7 +154,7 @@ The existing HIP fall alarm has priority: it immediately replaces rep feedback
 with a 3-second alarm and discards queued beeps. Reps received during that alarm
 still update the total but do not queue sounds. Rep resets/deactivation cannot
 silence the alarm. Timers run without delays, including when sensor reads fail.
-WRIST does not drive a buzzer; routing WRIST rep feedback to HIP is the next step.
+WRIST does not drive a buzzer; its validated increases notify HIP over ESP-NOW.
 
 Tune REP_BEEP_MS and REP_GAP_MS in ExerciseConfig.h (FeedbackConfig).
 These configure timing, not electrical volume: output remains digital HIGH/LOW
@@ -170,6 +170,54 @@ Use the actual ticket, send newline-terminated commands, and start from a fresh
 session. Telemetry distinguishes REP BEEP from FALL ALERT; a 100 ms beep
 may fall between telemetry messages, so listen on the real board as well.
 
+WRIST-TO-HIP REP FEEDBACK (FEEDBACK STEP 4)
+
+Comms -> active WRIST REPS receiver -> ESP-NOW feedback -> standby HIP buzzer.
+Only an accepted count increase creates a REP event (one per increase, including
+catch-up totals). HIP's counter remains inactive and unchanged. HIP activity/LED
+state is unchanged. A HIP-owned exercise still beeps locally without forwarding.
+
+The existing 24-byte version-4 packet has two new kinds: REP_FEEDBACK (6) and
+REP_FEEDBACK_ACK (7). boot/targetBoot identify the sender/receiver boots, request
+identifies the WRIST activation handshake, sequence orders feedback within it,
+and mode is CLEAR (1) or REP (2). No total or sensor data is transmitted.
+The HIP accepts events only in standby from the WRIST handshake it acknowledged.
+Sequence is independent of legacy LED events and persists across rep resets.
+Duplicate/older events are acknowledged without replaying a beep; ACKs must match
+the pending event, peer boot, activation request, sequence and kind.
+
+WRIST holds at most 8 events, sends in order, and retries every 250 ms, up to
+5 attempts. Events expire 1.25 seconds after enqueue, including time spent waiting
+behind another event. Expired/full-queue events are dropped with a diagnostic;
+the accepted rep count is retained. This bounds outage traffic/backlog, not a
+guarantee that a beep is delivered. An ACK means feedback was handled, not that
+sound was measured; fall alarms intentionally suppress rep beeps.
+
+RESET, exercise/mode resets and STANDBY cancel pending WRIST feedback and send
+an ordered CLEAR to cancel HIP's current/queued rep beeps without silencing a
+fall alarm. Once CLEAR arrives, older events cannot play. An in-flight event can
+arrive before CLEAR; loss of CLEAR can leave already received beeps to finish.
+Handover cancels local feedback and invalidates the previous feedback context.
+After HIP reboots, WRIST can still count but cannot notify its new boot until a
+fresh handshake: send STANDBY then ACTIVATE on WRIST and obtain its new REPS ticket.
+Activity remains a direct comms message to each node.
+
+Upload the updated firmware to BOTH boards, then test on WRIST:
+  ACTIVATE                  (HIP acknowledges standby)
+  REPS                      (read WRIST boot/session)
+  REPS:<boot>:<session>:1    (HIP beeps once; WRIST displays 1)
+  REPS:<boot>:<session>:1    (duplicate; HIP stays silent)
+  REPS:<boot>:<session>:2    (HIP beeps once; WRIST displays 2)
+Check HIP still reports STANDBY and its own total is unchanged. Verify both LEDs
+continue following their separately supplied ACTIVITY states. Then verify reset,
+handover and fall-alarm priority on the physical boards.
+
+USB/Bluetooth diagnostics:
+  WRIST: [REP FEEDBACK | HIP acknowledged]
+  HIP:   [REP FEEDBACK | WRIST event received]
+  WRIST: [REP FEEDBACK | Unconfirmed/expired | Count retained] on an outage
+Older HIP firmware ignores the new event kinds; upgrade both boards before testing.
+
 CODE LOCATIONS
 
   ExerciseNode.cpp: processCommand parses REPS, receiveRepCount applies it and
@@ -177,6 +225,8 @@ CODE LOCATIONS
     the comms total. reportCommsReps prints the current ticket/state.
   CommsRepCounter.h/.cpp: ticket, total, and validation state without hardware IO.
   BuzzerFeedback.h/.cpp: nonblocking rep beep queue, silent gaps and fall priority.
+  NodeSession.h/.cpp: rep-feedback ordering, bounded queue, retries, ACKs and
+    activation/boot checks. ExerciseNode.cpp connects accepted events to the buzzer.
   WirelessStreamer.cpp: existing USB/Bluetooth framing and comms telemetry text.
   LocalRepCounting.h/.cpp: retained local counting orchestration, bench-only.
   RepCounter.cpp / ContinuousCounter.cpp: retained local algorithms, bench-only.
@@ -195,5 +245,9 @@ activation failure, reset/exercise/mode/reboot changes, count/LED feedback, and
 movement not counting. Existing sensor/stream regression checks remain there.
 It also checks buzzer timing/rollover, queued pulses, session cancellation,
 duplicate/stale rejection, fall preemption and absence of WRIST buzzer writes.
+rep_feedback_test.cpp covers packet/ACK loss, duplicate delivery, ordering,
+remote cancellation, handover, reboot, queue/age bounds and timer rollover.
+The startup test covers actual WRIST command-to-radio forwarding and HIP standby
+buzzer behavior with sensor failures, fall priority and unchanged counts/LEDs.
 local_rep_counting_test.cpp checks the extracted local algorithms in isolation.
 Host tests cannot establish real Bluetooth/ESP-NOW delivery or AR accuracy.
