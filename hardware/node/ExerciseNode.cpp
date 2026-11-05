@@ -32,6 +32,7 @@ WindowScheduler windowScheduler;
 NodeStreamControl streamControl(windowScheduler, sensorHistory);
 
 CommsRepCounter commsReps;
+CommsActivityState commsActivity;
 ExerciseType activeExercise = SQUAT;
 
 FallDetector fallDetector;
@@ -41,6 +42,7 @@ void linkMessage(const char* text) { wirelessStreamer.message(text); }
 NodeSession nodeSession(NodeRadio::send, linkMessage);
 const char* commandHelp = "Commands: ACTIVATE | STANDBY | RESET | EXERCISE:<name> | EXERCISES | MODE:PAUSE | MODE:CONTINUOUS | BUFFER | WINDOW[:t0_ms] | STREAM | STATUS | HELP. Select Newline, then Send.";
 const char* repCommandHelp = "Comms reps: REPS (show ticket/count) | REPS:<boot>:<session>:<total>. ACTIVATE first; use the current HW ticket. Total is cumulative.";
+const char* activityCommandHelp = "Activity: ACTIVITY (status) | ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE. Independent of board activation; sequence increases until reboot.";
 const char* streamCommandHelp = "Windows: STREAM | STREAM:START[:t0_ms] | STREAM:STOP | STREAM:ARM | STREAM:NEXT. Local preparation only; no comms transmission.";
 const char* coordinationHelp = "Comms bench: STREAM:CLOCK:<probe> | STREAM:JOIN:<boot>:<arm>:<coordinator>:<session>:<local_t0> | STREAM:END:<coordinator>:<session> | STREAM:REQUEST";
 
@@ -69,6 +71,28 @@ void reportCommsReps() {
     (unsigned long)commsReps.session(), (long)commsReps.total(),
     !nodeSession.localActive() ? "INACTIVE" : commsReps.received() ? "COMMS" : "WAIT_COMMS");
   wirelessStreamer.message(line);
+}
+
+ActivityStatus activityStatus() { return commsActivity.status(); }
+
+void reportActivity() {
+  const ActivityStatus status = activityStatus();
+  char line[192];
+  snprintf(line, sizeof(line), "[ACTIVITY | %s | boot=%lu | seq=%lu | state=%s | source=%s]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)status.boot,
+    (unsigned long)status.sequence, userActivityName(status.state),
+    status.received ? "COMMS" : "DEFAULT");
+  wirelessStreamer.message(line);
+}
+
+ActivityResult receiveActivity(uint32_t boot, uint32_t sequence, UserActivity state) {
+  const ActivityResult result = commsActivity.receive(boot, sequence, state);
+  char line[192];
+  snprintf(line, sizeof(line), "[ACTIVITY ACK | %s | boot=%lu | seq=%lu | state=%s | %s]",
+    nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)boot, (unsigned long)sequence,
+    userActivityName(state), activityResultName(result));
+  wirelessStreamer.message(line);
+  return result;
 }
 
 CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) {
@@ -309,6 +333,7 @@ void processCommand(char* command, unsigned long now) {
   if (!strcmp(text, "HELP")) {
     wirelessStreamer.message(commandHelp);
     wirelessStreamer.message(repCommandHelp);
+    wirelessStreamer.message(activityCommandHelp);
     wirelessStreamer.message(streamCommandHelp);
     wirelessStreamer.message(coordinationHelp);
     return;
@@ -317,9 +342,27 @@ void processCommand(char* command, unsigned long now) {
     nodeSession.status();
     reportExercise();
     reportCommsReps();
+    reportActivity();
     reportStreamStatus();
     wirelessStreamer.message(NodeRadio::ready() ? "[ESP-NOW configured and ready]"
       : "[ESP-NOW unavailable; check peer MAC configuration and USB boot messages]");
+    return;
+  }
+  if (!strcmp(text, "ACTIVITY")) {
+    reportActivity();
+    return;
+  }
+  if (!strncmp(text, "ACTIVITY:", 9)) {
+    char* stateText = strrchr(text + 9, ':');
+    uint32_t fields[2];
+    if (stateText) *stateText++ = '\0';
+    if (!stateText || !parseFields(text + 9, fields, 2) ||
+        (strcmp(stateText, "IDLE") && strcmp(stateText, "ACTIVE"))) {
+      wirelessStreamer.message("ERROR: Use ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE; unsigned 32-bit fields, sequence >= 1.");
+      return;
+    }
+    receiveActivity(fields[0], fields[1],
+      !strcmp(stateText, "ACTIVE") ? UserActivity::ACTIVE : UserActivity::IDLE);
     return;
   }
   if (!strcmp(text, "REPS")) {
@@ -589,17 +632,20 @@ void begin(NodeRole role) {
   const uint32_t boot = esp_random(); // Generate after radio initialization, as for NodeSession.
   streamControl.begin(nodeRole, boot);
   commsReps.begin(boot);
+  commsActivity.begin(boot);
   nodeSession.begin(nodeRole, boot, activeMode);
   restartSession(now);
   fallDetector.begin(now);
 
   wirelessStreamer.message(commandHelp);
   wirelessStreamer.message(repCommandHelp);
+  wirelessStreamer.message(activityCommandHelp);
   wirelessStreamer.message(streamCommandHelp);
   wirelessStreamer.message(coordinationHelp);
   reportStreamStatus();
   nodeSession.status();
   reportExercise();
+  reportActivity();
 
   lastSampleTime = micros();
   lastUsbOutputTime = now;
@@ -699,6 +745,7 @@ void update() {
       nodeSession.status();
       reportExercise();
       reportCommsReps();
+      reportActivity();
       if (!NodeRadio::ready()) wirelessStreamer.message("[ESP-NOW unavailable; configure peer MACs. Send STATUS for details.]");
     }
   }

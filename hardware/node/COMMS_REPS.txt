@@ -12,7 +12,8 @@ CONNECTION AND COMMANDS
 Comms connects to ExerciseHip or ExerciseWrist via Bluetooth Classic SPP. USB
 accepts the identical commands for bench testing. Send ASCII lines ending in LF
 (\n); CRLF is also accepted. Route results to the active board's connection.
-No external comms/AR application is included in this repository.
+This standalone hardware receiver needs a matching sender/adapter in the separate
+communications firmware. Its transport is not changed by this document.
 
 1. Power both boards with the updated firmware and their configured peer MACs.
 2. On the desired board select its exercise, then send ACTIVATE.
@@ -72,6 +73,61 @@ an ACK. Retry the same total/ticket if an ACK is lost; retries are idempotent.
 There is no spontaneous retry from HW. A downward correction requires a new set
 (RESET), not a smaller value within the old session.
 
+COMMS USER ACTIVITY (FEEDBACK STEP 1)
+
+User activity is independent of counting-board activation, selected exercise,
+rep counts and STREAM sessions. Step 1 stores/reports this state only; it does
+not yet change LEDs, play rep beeps, gate incoming reps or send peer packets.
+The existing ready/rep LED patterns and fall-only buzzer still apply below.
+
+Query on either board over USB/Bluetooth (newline-terminated):
+  ACTIVITY
+  [ACTIVITY | HIP | boot=12345 | seq=0 | state=IDLE | source=DEFAULT]
+
+Send an update with the actual boot ID returned by that board:
+  ACTIVITY:12345:1:ACTIVE
+  [ACTIVITY ACK | HIP | boot=12345 | seq=1 | state=ACTIVE | ACCEPTED]
+  ACTIVITY:12345:2:IDLE
+  [ACTIVITY ACK | HIP | boot=12345 | seq=2 | state=IDLE | ACCEPTED]
+
+ACTIVITY and STATUS return the current state, boot ID, last accepted sequence,
+and source. State is IDLE with source=DEFAULT after boot until the first valid
+update; source=COMMS then identifies an explicit comms-supplied state. Status is
+also reported at boot and Bluetooth connection. Periodic rep telemetry retains
+its current format; use ACTIVITY/STATUS to inspect activity.
+
+The format is ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE. Numeric fields are unsigned
+decimal uint32; sequence must be 1..4294967295 and strictly increase for each new
+update to this board, including updates that repeat the same state. Retransmit
+an identical boot/sequence/state if its ACK is lost. Lower sequence numbers are
+STALE_SEQUENCE; an identical retry is DUPLICATE; reusing the current sequence
+with a different state is SEQUENCE_CONFLICT. A wrong boot returns STALE_BOOT.
+Sequence zero returns INVALID_SEQUENCE. Invalid syntax/state text returns ERROR.
+The typed API also rejects unknown enum values with INVALID_STATE. Rejected
+updates leave state/sequence unchanged. ACK echoes the submitted update;
+ACTIVITY/STATUS returns the stored state.
+
+Sequence numbers do not wrap during a boot. Query after sender reconnect/restart
+and continue above the last accepted sequence. After uint32 exhaustion reboot
+and obtain a fresh boot ID. Use one authoritative activity sender per board;
+USB bench commands and Bluetooth share the same sequence/state.
+
+A rep RESET, exercise/mode change, ACTIVATE, STANDBY, activation failure, handover,
+or Bluetooth disconnect does not clear activity or its sequence. Only reboot
+resets it. This protocol is boot-scoped; it deliberately has no rep session
+field because activity persists across exercise/set changes. Activity messages
+are accepted on standby boards without requiring a peer or activating counting.
+There is no silence timeout or sensor-based idle detection: comms must explicitly
+send IDLE when the user becomes idle. A later ACTIVE means moving again, not
+necessarily performing a recognized exercise. Rep messages cannot change this.
+
+At this step, send updates separately to each board using that board's own boot
+ID. Automatic peer propagation is a later feedback step. Typed main-loop APIs:
+  ExerciseNode::activityStatus()
+  ExerciseNode::receiveActivity(boot, sequence, UserActivity::IDLE/ACTIVE)
+Never call the receive API from a transport callback; queue to the main loop.
+CommsActivityState.h/.cpp contains the state/ordering logic without GPIO or radio.
+
 FEEDBACK
 
 Each accepted increase flashes the active board and sends one mirrored LED event
@@ -97,7 +153,9 @@ callback; queue messages first. Its validation/ACK/feedback matches the command.
 
 VALIDATION
 
-exercise_node_startup_test.cpp covers both board roles, USB/Bluetooth input,
+exercise_node_startup_test.cpp covers activity state/ordering across board
+activation, set changes, reboot/reconnect, sensor failures and both transports.
+It also covers both board roles, USB/Bluetooth rep input,
 duplicates, malformed/stale/out-of-range/decreasing results, reconnect, standby,
 activation failure, reset/exercise/mode/reboot changes, count/LED feedback, and
 movement not counting. Existing sensor/stream regression checks remain there.

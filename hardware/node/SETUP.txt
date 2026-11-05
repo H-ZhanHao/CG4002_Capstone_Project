@@ -1,7 +1,9 @@
 HIP AND WRIST: COMMS REP COUNTS, LOCAL COUNTING DISABLED
 
 Rep totals now come from AR via comms over USB/Bluetooth. See COMMS_REPS.txt for
-message format, reset/session rules, acknowledgements and a step-by-step test.
+message formats, reset/session rules, acknowledgements and bench tests.
+ACTIVITY now stores comms-supplied IDLE/ACTIVE independently of counting-board
+activation. This is feedback step 1 only: LED/buzzer behavior is not changed yet.
 LocalRepCounting.cpp retains the former local detector orchestration for bench
 tests; it and RepCounter.cpp/ContinuousCounter.cpp are excluded from firmware.
 
@@ -432,8 +434,13 @@ MODE:PAUSE / MODE:CONTINUOUS (PAUSE / CONTINUOUS also accepted)
   counting. Local overrides require activation. An actual change clears reps,
   changes the ticket and syncs to the peer. Repeating the same mode only retries
   sync. Exercise preferences survive handovers until a different exercise or boot.
+ACTIVITY / ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE
+  Query or update user activity on this board, independently of activation and
+  exercise. Use the actual boot ID and an increasing sequence; retries must be
+  identical. State persists across rep resets and changes only through comms or
+  reboot. See COMMS_REPS.txt. Step 1 stores/reports activity without GPIO changes.
 STATUS / HELP
-  Show activation, exercise/mode, comms ticket/count and stream/radio status,
+  Show activation, user activity, exercise/mode, comms ticket/count and stream/radio status,
   or the command list. Radio readiness does not prove the peer is online.
 BUFFER / WINDOW / WINDOW:<t0_ms>
   Inspect sensor history. See LOCAL SENSOR HISTORY above.
@@ -543,7 +550,7 @@ Transport-independent node switching/LED tests:
   .build/node_session_test.exe
 
 Firmware comms-rep, startup and sensor/stream tests with fake hardware:
-  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/CommsRepCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp hardware/node/StreamCoordination.cpp -o .build/exercise_node_startup_test.exe
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_node_startup_test.cpp hardware/node/ExerciseNode.cpp hardware/node/CommsActivityState.cpp hardware/node/CommsRepCounter.cpp hardware/node/NodeSession.cpp hardware/node/WirelessStreamer.cpp hardware/node/FallDetector.cpp hardware/node/SensorHistory.cpp hardware/node/GenericPeakDetector.cpp hardware/node/WindowScheduler.cpp hardware/node/StreamCoordination.cpp -o .build/exercise_node_startup_test.exe
   .build/exercise_node_startup_test.exe
 
 Sensor history tests (window boundaries, retention, gaps, copies, jitter, rollover):

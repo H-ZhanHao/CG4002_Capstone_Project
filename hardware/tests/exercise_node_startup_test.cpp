@@ -6,6 +6,7 @@
 #include <string>
 #include "ExerciseNode.h"
 #include "ExerciseProfiles.h"
+#include "ExerciseConfig.h"
 #include "Mpu6050.h"
 #include "NodePlatform.h"
 #include "NodeRadio.h"
@@ -24,6 +25,7 @@ static bool sensorHealthy = true;
 static float accelZ = 9.81f, gyroX = 0.0f;
 static unsigned int readyEvents = 0, repEvents = 0, sampleReads = 0;
 static unsigned int radioPackets = 0;
+static int ledLevel = 0, buzzerLevel = 0;
 static void peerSend(const LinkPacket& packet) { incoming.push_back(packet); }
 static void ignoreLog(const char*) {}
 static NodeSession peer(peerSend, ignoreLog);
@@ -34,7 +36,10 @@ unsigned long millis() { return now; }
 unsigned long micros() { return now * 1000; }
 void delayMs(unsigned long duration) { now += duration; }
 void outputPin(int) {}
-void writePin(int, int) {}
+void writePin(int pin, int level) {
+  if (pin == GeneralConfig::LED_PIN) ledLevel = level;
+  if (pin == FallConfig::BUZZER_PIN) buzzerLevel = level;
+}
 }
 void UsbConsole::begin(int) {}
 int UsbConsole::read() {
@@ -156,7 +161,114 @@ static void sendReps(RepTicket target, uint32_t total, bool bluetooth = false) {
   do { step(1); } while (!btInput.empty());
 }
 
+static void sendActivity(uint32_t boot, uint32_t sequence, const char* state, bool bluetooth = false) {
+  char line[96];
+  snprintf(line, sizeof(line), "ACTIVITY:%lu:%lu:%s", (unsigned long)boot,
+    (unsigned long)sequence, state);
+  if (!bluetooth) { command(line); return; }
+  for (const char* c = line; *c; ++c) btInput.push_back(*c);
+  btInput.push_back('\n');
+  do { step(1); } while (!btInput.empty());
+}
+
+static void activityTests() {
+  for (NodeRole role : {HIP, WRIST}) {
+    peerOnline = false;
+    ExerciseNode::begin(role);
+    const auto initial = ExerciseNode::activityStatus();
+    assert(initial.boot && initial.state == UserActivity::IDLE);
+    assert(!initial.received && initial.sequence == 0);
+    output.clear(); command("ACTIVITY");
+    assert(output.find("state=IDLE | source=DEFAULT") != std::string::npos);
+    const auto radioBefore = radioPackets, readyBefore = readyEvents, repsBefore = repEvents;
+    const auto readsBefore = sampleReads;
+
+    // Comms can describe user movement on a standby board, even with no peer.
+    sendActivity(initial.boot, 1, "ACTIVE");
+    assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE);
+    assert(ExerciseNode::activityStatus().received);
+    assert(output.find("state=ACTIVE | ACCEPTED") != std::string::npos);
+    output.clear(); command("STATUS");
+    assert(output.find("state=ACTIVE | source=COMMS") != std::string::npos);
+    assert(output.find("[Standby |") != std::string::npos);
+    assert(ledLevel == 0 && buzzerLevel == 0); // Step 1 adds no GPIO behavior.
+    step(80);
+    assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE); // No inactivity inference.
+    sendReps(ticket(), 1);
+    assert(data().reps == 0); // Activity ACTIVE does not activate rep reception.
+
+    sendActivity(initial.boot, 1, "ACTIVE");
+    assert(output.find("state=ACTIVE | DUPLICATE") != std::string::npos);
+    sendActivity(initial.boot, 1, "IDLE");
+    assert(output.find("state=IDLE | SEQUENCE_CONFLICT") != std::string::npos);
+    sendActivity(initial.boot, 3, "IDLE");
+    sendActivity(initial.boot, 2, "ACTIVE");
+    assert(output.find("state=ACTIVE | STALE_SEQUENCE") != std::string::npos);
+    sendActivity(initial.boot + 1, 4, "ACTIVE");
+    assert(output.find("state=ACTIVE | STALE_BOOT") != std::string::npos);
+    sendActivity(initial.boot, 0, "ACTIVE");
+    assert(output.find("state=ACTIVE | INVALID_SEQUENCE") != std::string::npos);
+    assert(ExerciseNode::receiveActivity(initial.boot, 4, static_cast<UserActivity>(99))
+      == ActivityResult::INVALID_STATE);
+    for (const char* bad : {"ACTIVITY:", "ACTIVITY:1:2", "ACTIVITY:1:2:REST",
+         "ACTIVITY:1:2:ACTIVE:EXTRA", "ACTIVITY:1:2:3:ACTIVE", "ACTIVITY:1::ACTIVE",
+         "ACTIVITY:1:-1:IDLE", "ACTIVITY:1:4294967296:ACTIVE", "ACTIVITY:4294967296:1:IDLE"}) {
+      output.clear(); command(bad);
+      assert(output.find("ERROR: Use ACTIVITY:") != std::string::npos);
+      assert(ExerciseNode::activityStatus().sequence == 3);
+      assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+    }
+    pauseRep();
+    assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+    assert(radioPackets == radioBefore && readyEvents == readyBefore && repEvents == repsBefore);
+    assert(sampleReads > readsBefore && data().reps == 0 && !data().buzzer);
+
+    // Activity does not select an exercise, reset reps, or change counting activation.
+    peerOnline = true; command("ACTIVATE");
+    sendReps(ticket(), 5);
+    assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+    assert(data().reps == 5);
+    sendActivity(initial.boot, 4, "ACTIVE");
+    assert(data().reps == 5);
+    for (const char* change : {"RESET", role == HIP ? "EXERCISE:LUNGE" : "EXERCISE:SITUP",
+                              "MODE:CONTINUOUS", "STANDBY", "ACTIVATE"}) {
+      command(change);
+      assert(ExerciseNode::activityStatus().sequence == 4);
+      assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE);
+    }
+
+    // Bluetooth input uses the same validation, including retries after reconnect.
+    btConnected = true; ++btSession; btOutput.clear();
+    sensorHealthy = false;
+    sendActivity(initial.boot, 5, "IDLE", true);
+    assert(btOutput.find("state=IDLE | ACCEPTED") != std::string::npos);
+    assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+    sensorHealthy = true;
+    btConnected = false; step(1); btConnected = true; ++btSession;
+    sendActivity(initial.boot, 5, "IDLE", true);
+    assert(btOutput.find("state=IDLE | DUPLICATE") != std::string::npos);
+    sendActivity(initial.boot, 6, "ACTIVE", true);
+    btConnected = false;
+    step(60);
+    assert(ExerciseNode::activityStatus().state == UserActivity::ACTIVE);
+    sendActivity(initial.boot, UINT32_MAX, "IDLE");
+    sendActivity(initial.boot, 1, "ACTIVE"); // Sequence numbers do not wrap within a boot.
+    assert(ExerciseNode::activityStatus().sequence == UINT32_MAX);
+    assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+
+    ExerciseNode::begin(role);
+    assert(!ExerciseNode::activityStatus().received && ExerciseNode::activityStatus().sequence == 0);
+    sendActivity(initial.boot, UINT32_MAX, "ACTIVE");
+    assert(ExerciseNode::activityStatus().state == UserActivity::IDLE);
+    sendActivity(ExerciseNode::activityStatus().boot, 1, "ACTIVE");
+    assert(ExerciseNode::activityStatus().received);
+  }
+  puts("Activity input, ordering, reboot/reconnect and independence tests passed for HIP/WRIST");
+}
+
 int main() {
+  activityTests();
+  readyEvents = repEvents = 0;
   // The firmware never counts acceleration/gyro cycles; only comms totals count.
   for (NodeRole role : {HIP, WRIST}) {
     ExerciseNode::begin(role);
