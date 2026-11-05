@@ -293,7 +293,10 @@ namespace CG4002.Visualizer
             });
         }
 
-        /// <summary>Explicit set/reset. Call on Unity main thread; no rep is counted here.</summary>
+        /// <summary>
+        /// Explicit set/reset. Call on Unity main thread; no rep is counted here.
+        /// Waits for a busy rep send; returns false if disconnected or superseded.
+        /// </summary>
         public Task<bool> BeginRepSession(string exercise, int baselineCount = 0)
         {
             string identity = Guid.NewGuid().ToString("N");
@@ -306,7 +309,7 @@ namespace CG4002.Visualizer
             return SendRepRequestAsync("rep_session_start");
         }
 
-        /// <summary>Synchronize a reconnect/current count without a feedback pulse.</summary>
+        /// <summary>Synchronize without a feedback pulse, waiting for a busy rep send.</summary>
         public Task<bool> SyncRepSession(int currentCount)
         {
             if (currentCount < currentRepCount || currentCount > 1000000000)
@@ -343,13 +346,27 @@ namespace CG4002.Visualizer
         private async Task<bool> SendRepRequestAsync(string type)
         {
             PinnedWebSocketConnection socket = activeSocket;
-            if (socket == null || RepRunId == 0 || RepSessionId == null || !repSendGate.Wait(0))
+            long runId = RepRunId;
+            string sessionId = RepSessionId;
+            CancellationToken token = connectionToken;
+            if (socket == null || runId == 0 || sessionId == null)
                 return false;
+            bool acquired = false;
             try
             {
-                string json = RepFeedbackProtocol.Build(type, RepRunId,
-                    Interlocked.Increment(ref repSequence), RepSessionId, currentRepCount, repExercise);
-                await socket.SendTextAsync(json, connectionToken);
+                // Control requests must survive a busy rep write; ordinary rep events
+                // retain their existing non-queued behavior.
+                if (type == "rep_session_start" || type == "rep_sync")
+                    await repSendGate.WaitAsync(token);
+                else if (!repSendGate.Wait(0))
+                    return false;
+                acquired = true;
+                // A reset, exercise change or reconnect may supersede a waiting request.
+                if (activeSocket != socket || RepRunId != runId || RepSessionId != sessionId)
+                    return false;
+                string json = RepFeedbackProtocol.Build(type, runId,
+                    Interlocked.Increment(ref repSequence), sessionId, currentRepCount, repExercise);
+                await socket.SendTextAsync(json, token);
                 return true;
             }
             catch (Exception error) when (error is IOException || error is OperationCanceledException ||
@@ -357,7 +374,7 @@ namespace CG4002.Visualizer
             {
                 return false;
             }
-            finally { repSendGate.Release(); }
+            finally { if (acquired) repSendGate.Release(); }
         }
 
         /// <summary>
