@@ -73,12 +73,13 @@ an ACK. Retry the same total/ticket if an ACK is lost; retries are idempotent.
 There is no spontaneous retry from HW. A downward correction requires a new set
 (RESET), not a smaller value within the old session.
 
-COMMS USER ACTIVITY (FEEDBACK STEPS 1-2)
+COMMS USER ACTIVITY (FEEDBACK STEPS 1-3)
 
 User activity is independent of counting-board activation, selected exercise,
 rep counts and STREAM sessions. The LED is OFF for IDLE and steadily ON for
 ACTIVE, including on a standby counting board. Activity does not play rep beeps,
-gate incoming reps or send peer packets. The buzzer remains fall-only.
+gate incoming reps or send peer packets. Rep beeps are driven by accepted REPS
+increases, independently of ACTIVITY; sending ACTIVE alone never beeps.
 
 Query on either board over USB/Bluetooth (newline-terminated):
   ACTIVITY
@@ -137,8 +138,37 @@ until comms sends IDLE, including during disconnects and failed sensor reads.
 The existing fatal sensor-startup error blink is retained as a wiring diagnostic.
 
 To control both LEDs, deliver ACTIVITY to both boards with their respective boot
-IDs and sequences. Peer propagation and one beep per rep are later steps.
+IDs and sequences. Peer propagation is a later step.
 Counts themselves are not forwarded between boards.
+
+HIP REP BUZZER (FEEDBACK STEP 3)
+
+On HIP, each accepted REPS total increase produces one 100 ms beep on GPIO26.
+Zero, duplicate, decreasing, invalid, stale and inactive updates do not beep.
+A catch-up total such as 2 -> 5 produces one confirmation beep, not three replayed
+beeps. Comms should send each increment to get a beep for each rep. Rapid valid
+updates queue separate beeps with 100 ms silence between them. RESET, exercise/
+mode changes and counting deactivation cancel current/queued rep beeps.
+
+The existing HIP fall alarm has priority: it immediately replaces rep feedback
+with a 3-second alarm and discards queued beeps. Reps received during that alarm
+still update the total but do not queue sounds. Rep resets/deactivation cannot
+silence the alarm. Timers run without delays, including when sensor reads fail.
+WRIST does not drive a buzzer; routing WRIST rep feedback to HIP is the next step.
+
+Tune REP_BEEP_MS and REP_GAP_MS in ExerciseConfig.h (FeedbackConfig).
+These configure timing, not electrical volume: output remains digital HIGH/LOW
+at the existing buzzer drive level. Physical sound/loudness needs a board check.
+
+Bench test on HIP after uploading:
+  ACTIVATE                  (wait for the peer acknowledgement)
+  REPS                      (obtain current boot/session)
+  REPS:<boot>:<session>:1    (one short beep)
+  REPS:<boot>:<session>:1    (duplicate, silent)
+  REPS:<boot>:<session>:2    (one short beep)
+Use the actual ticket, send newline-terminated commands, and start from a fresh
+session. Telemetry distinguishes REP BEEP from FALL ALERT; a 100 ms beep
+may fall between telemetry messages, so listen on the real board as well.
 
 CODE LOCATIONS
 
@@ -146,6 +176,7 @@ CODE LOCATIONS
     emits ACK, restartSession changes the ticket, makeTelemetry displays
     the comms total. reportCommsReps prints the current ticket/state.
   CommsRepCounter.h/.cpp: ticket, total, and validation state without hardware IO.
+  BuzzerFeedback.h/.cpp: nonblocking rep beep queue, silent gaps and fall priority.
   WirelessStreamer.cpp: existing USB/Bluetooth framing and comms telemetry text.
   LocalRepCounting.h/.cpp: retained local counting orchestration, bench-only.
   RepCounter.cpp / ContinuousCounter.cpp: retained local algorithms, bench-only.
@@ -162,5 +193,7 @@ It also covers both board roles, USB/Bluetooth rep input,
 duplicates, malformed/stale/out-of-range/decreasing results, reconnect, standby,
 activation failure, reset/exercise/mode/reboot changes, count/LED feedback, and
 movement not counting. Existing sensor/stream regression checks remain there.
+It also checks buzzer timing/rollover, queued pulses, session cancellation,
+duplicate/stale rejection, fall preemption and absence of WRIST buzzer writes.
 local_rep_counting_test.cpp checks the extracted local algorithms in isolation.
 Host tests cannot establish real Bluetooth/ESP-NOW delivery or AR accuracy.

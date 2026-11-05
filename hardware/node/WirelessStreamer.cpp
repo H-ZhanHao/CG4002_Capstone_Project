@@ -37,7 +37,7 @@ namespace {
       exerciseName((ExerciseType)data.exercise),
       data.mode == PAUSE_MODE ? "PAUSE" : "CONTINUOUS",
       status,
-      data.buzzer ? " | FALL ALERT - BUZZER ON" : "");
+      data.fallAlert ? " | FALL ALERT - BUZZER ON" : data.buzzer ? " | REP BEEP - BUZZER ON" : "");
 
     return length > 0 && (size_t)length < capacity ? (size_t)length : 0;
   }

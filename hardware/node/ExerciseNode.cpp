@@ -9,6 +9,7 @@
 #include "ExerciseNode.h"
 #include "ExerciseConfig.h"
 #include "CommsRepCounter.h"
+#include "BuzzerFeedback.h"
 #include "ExercisePresets.h"
 #include "FallDetector.h"
 #include "WirelessStreamer.h"
@@ -53,9 +54,11 @@ CountingMode activeMode = PAUSE_MODE;
 unsigned long lastSampleTime = 0;
 unsigned long lastUsbOutputTime = 0;
 
-// Buzzer output.
-bool buzzerActive = false;
-unsigned long buzzerStartTime = 0;
+BuzzerFeedback buzzerFeedback;
+
+void writeBuzzer() {
+  if (nodeRole == HIP) writePin(FallConfig::BUZZER_PIN, buzzerFeedback.on() ? 1 : 0);
+}
 
 void setLed(bool on) {
   writePin(
@@ -101,7 +104,12 @@ ActivityResult receiveActivity(uint32_t boot, uint32_t sequence, UserActivity st
 }
 
 CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) {
+  const int32_t before = commsReps.total();
   const CommsRepResult result = commsReps.receive(boot, session, total, nodeSession.localActive());
+  if (nodeRole == HIP && result == CommsRepResult::ACCEPTED && commsReps.total() > before) {
+    buzzerFeedback.rep((uint32_t)millis());
+    writeBuzzer();
+  }
   char line[192];
   snprintf(line, sizeof(line), "[REPS ACK | %s | boot=%lu | session=%lu | total=%lu | %s]",
     nodeRole == HIP ? "HIP" : "WRIST", (unsigned long)boot, (unsigned long)session,
@@ -113,17 +121,14 @@ CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total) 
 void updateOutputTimers(unsigned long now) {
   updateActivityLed();
 
-  if (
-    buzzerActive &&
-    now - buzzerStartTime >= FallConfig::BUZZER_DURATION_MS
-  ) {
-    writePin(FallConfig::BUZZER_PIN, 0);
-    buzzerActive = false;
-  }
+  buzzerFeedback.update((uint32_t)now);
+  writeBuzzer();
 }
 
 void restartSession(unsigned long now) {
   commsReps.reset();
+  buzzerFeedback.cancelReps();
+  writeBuzzer();
   updateActivityLed();
   reportCommsReps();
   lastUsbOutputTime = now - GeneralConfig::OUTPUT_INTERVAL_MS;
@@ -573,7 +578,8 @@ TelemetryData makeTelemetry() {
   data.exercise = (uint8_t)activeExercise;
   data.gyroAxis = -1;
 
-  data.buzzer = buzzerActive;
+  data.buzzer = buzzerFeedback.on();
+  data.fallAlert = buzzerFeedback.fallActive();
   data.source = nodeRole;
 
   return data;
@@ -581,6 +587,7 @@ TelemetryData makeTelemetry() {
 
 void begin(NodeRole role) {
   nodeRole = role;
+  buzzerFeedback.begin();
   sensorHistory.clear(); // Boot only; counter resets must preserve sensor history.
   genericPeakDetector.reset();
   genericPeakPending = false;
@@ -671,6 +678,10 @@ void update() {
     restartSession(now);
   }
   // Legacy peer LED patterns must not override the comms activity state.
+  if (!nodeSession.localActive()) {
+    buzzerFeedback.cancelReps();
+    writeBuzzer();
+  }
 
   const unsigned long sampleTime = micros();
 
@@ -718,10 +729,9 @@ void update() {
 
   if (nodeRole == HIP) fallDetector.update(rawMagnitude, now);
 
-  if (fallDetector.consumeFallEvent()) {
-    writePin(FallConfig::BUZZER_PIN, 1);
-    buzzerActive = true;
-    buzzerStartTime = now;
+  if (nodeRole == HIP && fallDetector.consumeFallEvent()) {
+    buzzerFeedback.fall((uint32_t)now);
+    writeBuzzer();
   }
 
   const TelemetryData local = makeTelemetry();

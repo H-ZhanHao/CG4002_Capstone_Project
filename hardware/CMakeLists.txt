@@ -3,6 +3,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "node/BuzzerFeedback.cpp"
         "node/CommsActivityState.cpp"
         "node/CommsRepCounter.cpp"
         "node/ExerciseNode.cpp"

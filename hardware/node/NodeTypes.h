@@ -21,6 +21,7 @@ struct TelemetryData {
   float pauseMotion;
   float pausePeak;
   uint8_t buzzer;
+  uint8_t fallAlert;
   uint8_t source;
   uint8_t exercise;
 };

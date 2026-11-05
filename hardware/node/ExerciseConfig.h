@@ -126,6 +126,11 @@ namespace ContinuousConfig {
   constexpr unsigned long MAX_SAMPLE_GAP_MS = 100;
 }
 
+namespace FeedbackConfig {
+  constexpr uint32_t REP_BEEP_MS = 100;
+  constexpr uint32_t REP_GAP_MS = 100;
+}
+
 namespace FallConfig {
   constexpr int BUZZER_PIN = 26; // FireBeetle D3
 

@@ -7,6 +7,8 @@
 #include "ExerciseNode.h"
 #include "ExerciseProfiles.h"
 #include "ExerciseConfig.h"
+#include "BuzzerFeedback.h"
+#include "WirelessStreamer.h"
 #include "Mpu6050.h"
 #include "NodePlatform.h"
 #include "NodeRadio.h"
@@ -26,6 +28,7 @@ static float accelZ = 9.81f, gyroX = 0.0f;
 static unsigned int readyEvents = 0, repEvents = 0, sampleReads = 0;
 static unsigned int radioPackets = 0;
 static int ledLevel = 0, buzzerLevel = 0;
+static unsigned int buzzerWrites = 0;
 static void peerSend(const LinkPacket& packet) { incoming.push_back(packet); }
 static void ignoreLog(const char*) {}
 static NodeSession peer(peerSend, ignoreLog);
@@ -38,7 +41,7 @@ void delayMs(unsigned long duration) { now += duration; }
 void outputPin(int) {}
 void writePin(int pin, int level) {
   if (pin == GeneralConfig::LED_PIN) ledLevel = level;
-  if (pin == FallConfig::BUZZER_PIN) buzzerLevel = level;
+  if (pin == FallConfig::BUZZER_PIN) { buzzerLevel = level; ++buzzerWrites; }
 }
 }
 void UsbConsole::begin(int) {}
@@ -289,7 +292,124 @@ static void activityTests() {
   puts("Activity input, ordering, reboot/reconnect and independence tests passed for HIP/WRIST");
 }
 
+static void buzzerTests() {
+  // Rollover and a delayed main loop must retain a real silent gap.
+  BuzzerFeedback feedback;
+  feedback.begin();
+  feedback.rep(UINT32_MAX - 49);
+  feedback.rep(UINT32_MAX - 20);
+  feedback.update(49);
+  assert(feedback.on());
+  feedback.update(50);
+  assert(!feedback.on());
+  feedback.update(150);
+  assert(feedback.on());
+  feedback.update(1000);
+  assert(!feedback.on());
+  feedback.rep(1000);
+  assert(!feedback.on());
+  feedback.update(1100);
+  assert(feedback.on());
+  feedback.fall(1100);
+  feedback.cancelReps();
+  feedback.update(4099);
+  assert(feedback.on());
+  feedback.update(4100);
+  assert(!feedback.on());
+
+  peerOnline = true;
+  sensorHealthy = true;
+  btConnected = false;
+  ExerciseNode::begin(HIP);
+  command("ACTIVATE");
+  auto current = ticket();
+  sendReps(current, 0);
+  assert(!buzzerLevel);
+  const auto reads = sampleReads;
+  sendReps(current, 1);
+  assert(buzzerLevel && data().buzzer);
+  output.clear();
+  printTelemetry(usbConsole, data());
+  assert(output.find("REP BEEP - BUZZER ON") != std::string::npos);
+  assert(output.find("FALL ALERT") == std::string::npos);
+  step(4);
+  assert(buzzerLevel && sampleReads > reads); // 80 ms, sampling never blocked.
+  sendReps(current, 1); // Duplicate at 100 ms cannot restart the beep.
+  assert(!buzzerLevel && !data().buzzer);
+  step(10);
+  assert(!buzzerLevel);
+  sendReps(current, 0);
+  sendReps({current.boot + 1, current.session}, 2);
+  assert(!buzzerLevel);
+
+  // Bluetooth input and failed sensor reads still service the buzzer timer.
+  btConnected = true; ++btSession;
+  sensorHealthy = false;
+  sendReps(current, 5, true); // Catch-up total yields one confirmation beep.
+  assert(buzzerLevel);
+  step(5);
+  assert(!buzzerLevel);
+  step(15);
+  assert(!buzzerLevel);
+  sensorHealthy = true; btConnected = false;
+
+  sendReps(current, 6);
+  sendReps(current, 7); // Queue a separate beep, don't extend the first.
+  step(4);
+  assert(!buzzerLevel);
+  step(5);
+  assert(buzzerLevel);
+  step(5);
+  assert(!buzzerLevel);
+  command("RESET");
+  current = ticket();
+  sendReps(current, 1);
+  sendReps(current, 2);
+  command("RESET");
+  assert(!buzzerLevel);
+  step(20);
+  assert(!buzzerLevel); // Reset removes the queued beep too.
+  current = ticket();
+  sendReps(current, 1);
+  command("STANDBY");
+  assert(!buzzerLevel);
+  sendReps(current, 2);
+  assert(!buzzerLevel);
+
+  command("ACTIVATE");
+  current = ticket();
+  step(6, 0.0f); // Qualifying freefall.
+  sendReps(current, 1); // Still in freefall, rep beep is active at impact.
+  step(1, 30.0f);
+  const auto fallAt = now;
+  assert(buzzerLevel);
+  output.clear();
+  printTelemetry(usbConsole, data());
+  assert(output.find("FALL ALERT - BUZZER ON") != std::string::npos);
+  sendReps(current, 2); // Suppressed, never queued behind the alarm.
+  command("RESET");
+  command("STANDBY");
+  assert(buzzerLevel); // Rep/session operations cannot silence a fall.
+  while (now - fallAt < FallConfig::BUZZER_DURATION_MS - 20) {
+    step(1);
+    assert(buzzerLevel);
+  }
+  step(1);
+  assert(!buzzerLevel);
+  step(20);
+  assert(!buzzerLevel);
+
+  const auto beforeWrist = buzzerWrites;
+  ExerciseNode::begin(WRIST);
+  command("ACTIVATE");
+  sendReps(ticket(), 1);
+  step(20);
+  assert(buzzerWrites == beforeWrist && !data().buzzer);
+  puts("Single rep beeps, queue/gap, duplicate rejection, fall priority and HIP-only GPIO tests passed");
+}
+
 int main() {
+  buzzerTests();
   activityTests();
   readyEvents = repEvents = 0;
   // The firmware never counts acceleration/gyro cycles; only comms totals count.
