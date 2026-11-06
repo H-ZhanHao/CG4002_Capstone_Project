@@ -41,13 +41,13 @@ except ImportError:
 try:
     from feedback_delivery import (
         FeedbackDelivery, MESSAGE_TYPE_FEEDBACK_COMMAND, FEEDBACK_PAYLOAD_SIZE,
-        FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ,
+        FEEDBACK_REP_BUZZ, FEEDBACK_ACTIVITY_ACTIVE, FEEDBACK_ACTIVITY_IDLE,
         encode_feedback, decode_feedback,
     )
 except ImportError:
     from .feedback_delivery import (
         FeedbackDelivery, MESSAGE_TYPE_FEEDBACK_COMMAND, FEEDBACK_PAYLOAD_SIZE,
-        FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ,
+        FEEDBACK_REP_BUZZ, FEEDBACK_ACTIVITY_ACTIVE, FEEDBACK_ACTIVITY_IDLE,
         encode_feedback, decode_feedback,
     )
 
@@ -1506,6 +1506,7 @@ class CaptureCoordinator:
         return True
 
     def _stop_locked(self, reason):
+        was_active = self.run_active
         self._cancel_arm_sync_locked()
         if self._pending_arm_acks:
             self._cancelled_arm_sequence = next(
@@ -1545,6 +1546,17 @@ class CaptureCoordinator:
         self._accepted_trigger = None
         if self.window_assembler is not None:
             self.window_assembler.stop_run(reason)
+
+        if was_active:
+            self._publish_activity(False)
+
+    def _publish_activity(self, active):
+        """Output delivery failure must never block capture controls."""
+        try:
+            self.request_feedback(
+                FEEDBACK_ACTIVITY_ACTIVE if active else FEEDBACK_ACTIVITY_IDLE)
+        except Exception:
+            LOGGER.exception("ACTIVITY_FEEDBACK_FAILED active=%s", active)
 
     def tick(self, now_us=None):
         """Advance feedback delivery and fail group ARM/START ACK deadlines."""
@@ -1679,6 +1691,7 @@ class CaptureCoordinator:
                         self.window_assembler.start_run(
                             command_sequence, self._pending_start_us)
                     self._pending_start_us = None
+                    self._publish_activity(True)
                 return
 
             if command_type == MESSAGE_TYPE_STOP:
@@ -1726,12 +1739,12 @@ class CaptureCoordinator:
                                     str(error)) from error
 
     def request_feedback(self, action):
-        """Explicit Stage 2 bench controls; no AR or AI-triggered feedback yet."""
-        if action not in (FEEDBACK_REP_LED, FEEDBACK_READY_LED, FEEDBACK_IDLE_BUZZ):
+        """Submit bounded feedback through the shared per-node delivery path."""
+        if action not in (FEEDBACK_REP_BUZZ, FEEDBACK_ACTIVITY_ACTIVE, FEEDBACK_ACTIVITY_IDLE):
             raise ValueError("Unsupported feedback action")
         with self._lock:
             sequence = self._next_sequence()
-            nodes = (1,) if action == FEEDBACK_IDLE_BUZZ else (1, 2)
+            nodes = (1,) if action == FEEDBACK_REP_BUZZ else (1, 2)
             return self.feedback_delivery.submit(action, sequence, build_header, nodes)
 
     def stop_all(self, reason="operator shutdown"):
@@ -1799,7 +1812,7 @@ class CaptureCoordinator:
 def run_control_console(coordinator):
     """Accept optional line-based capture controls without extra services."""
     LOGGER.info("Control commands: start (s), stop (x), idle (i), "
-                "feedback rep|ready|idle|status|repeat")
+                "feedback rep|active|idle|status|repeat")
     for line in sys.stdin:
         command = line.strip().lower()
         if command in ("start", "s"):
@@ -1808,10 +1821,10 @@ def run_control_console(coordinator):
             coordinator.manual_stop()
         elif command in ("idle", "i"):
             coordinator.idle_pause()
-        elif command in ("feedback rep", "feedback ready", "feedback idle"):
-            action = {"feedback rep": FEEDBACK_REP_LED,
-                      "feedback ready": FEEDBACK_READY_LED,
-                      "feedback idle": FEEDBACK_IDLE_BUZZ}[command]
+        elif command in ("feedback rep", "feedback active", "feedback idle"):
+            action = {"feedback rep": FEEDBACK_REP_BUZZ,
+                      "feedback active": FEEDBACK_ACTIVITY_ACTIVE,
+                      "feedback idle": FEEDBACK_ACTIVITY_IDLE}[command]
             coordinator.request_feedback(action)
         elif command == "feedback status":
             LOGGER.info("FEEDBACK_STATUS event,node,status,result=%s",
@@ -1821,7 +1834,7 @@ def run_control_console(coordinator):
                         coordinator.feedback_delivery.repeat_last())
         elif command:
             LOGGER.warning("Unknown control command %r; use start, stop, idle, "
-                           "or feedback rep|ready|idle|status|repeat", command)
+                           "or feedback rep|active|idle|status|repeat", command)
 
 
 class ManagedClient:

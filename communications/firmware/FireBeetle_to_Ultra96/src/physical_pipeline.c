@@ -135,9 +135,9 @@ static bool apply_feedback(uint8_t action, uint64_t now_us, void *context)
     (void)context;
     feedback_action_t output;
     switch (action) {
-    case PROTOCOL_FEEDBACK_REP_LED: output = FEEDBACK_REP_LED; break;
-    case PROTOCOL_FEEDBACK_READY_LED: output = FEEDBACK_READY_LED; break;
-    case PROTOCOL_FEEDBACK_IDLE_BUZZ: output = FEEDBACK_IDLE_BUZZ; break;
+    case PROTOCOL_FEEDBACK_REP_BUZZ: output = FEEDBACK_REP_BUZZ; break;
+    case PROTOCOL_FEEDBACK_ACTIVITY_ACTIVE: output = FEEDBACK_ACTIVITY_ACTIVE; break;
+    case PROTOCOL_FEEDBACK_ACTIVITY_IDLE: output = FEEDBACK_ACTIVITY_IDLE; break;
     default: return false;
     }
     return feedback_bridge_trigger(output, (uint32_t)(now_us / 1000U));
@@ -152,6 +152,7 @@ static void handle_command(const pipeline_command_t *command,
 {
     command_result_t reply = { .effective_local_us = (uint64_t)esp_timer_get_time() };
     if (command->type == COMMAND_BEGIN) {
+        feedback_bridge_reset_session();
         feedback_delivery_begin(&feedback_delivery, command->session_id, configured_node_id);
         *session_id = command->session_id;
         *boot_id = command->boot_id;
@@ -171,6 +172,9 @@ static void handle_command(const pipeline_command_t *command,
     } else if (command->session_id != *session_id) {
         reply.result = PROTOCOL_CONTROL_RESULT_STALE_IDENTITY;
     } else if (command->type == COMMAND_END || command->type == COMMAND_STOP) {
+        // STOP also clears the LED locally if the feedback command is lost.
+        (void)feedback_bridge_trigger(FEEDBACK_ACTIVITY_IDLE,
+            (uint32_t)(reply.effective_local_us / 1000U));
         reply.result = feeder->active ? PROTOCOL_CONTROL_RESULT_APPLIED
                                       : PROTOCOL_CONTROL_RESULT_ALREADY_STOPPED;
         physical_feeder_stop(feeder);
@@ -182,6 +186,7 @@ static void handle_command(const pipeline_command_t *command,
         xQueueReset(trigger_queue);
 #endif
         if (command->type == COMMAND_END) {
+            feedback_bridge_reset_session();
             feedback_delivery_begin(&feedback_delivery, 0, configured_node_id);
             *session_id = 0;
             *boot_id = 0;

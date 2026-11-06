@@ -1,5 +1,10 @@
 # AR Feedback, Idle Buzzer, and Fall Reporting Implementation Plan
 
+> Output behavior superseded on 2026-11-05: steady activity LEDs on both nodes,
+> Hip-only rep beeps, silent idle and no ready flashes. See
+> [the current integrated contract](../../ultra96/README.md#integrated-activity-and-rep-outputs).
+> The stage descriptions below remain a historical implementation record.
+
 Status: Stages 1 and 2 physical checkpoints confirmed by the user. Stage 3
 implementation, automated checks, and node1_stage3/node2_stage3 builds complete;
 Stage 3 simulator physical cases passed per user; actual AR caller/APK testing

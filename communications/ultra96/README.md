@@ -23,16 +23,64 @@ BeginRepSession/SendRepEvent API. See the
 [Stage 3 checkpoint](../firmware/FireBeetle_to_Ultra96/test/protocol_host/STAGE3_CHECKPOINT.md)
 for schemas, delivery receipts, reconnect behavior, and complete test commands.
 
-Stage 2 adds foreground console commands `feedback rep`, `feedback ready`, and
-`feedback idle` for both-node LEDs and Hip-only buzzer output over the existing
-ESP transport. Both `server.py` and `server_AI.py` support these controls; deploy
-`feedback_delivery.py` beside whichever updated server you run. The AI server's
-intended `window_assembler_updated` import and inference hooks are retained.
-`feedback status` reports the latest result; `feedback repeat` resends the same
-unexpired event for a duplicate-suppression test. `idle` retains its existing
-capture-control meaning and does not automatically beep yet. See the firmware
-[Stage 2 checkpoint](../firmware/FireBeetle_to_Ultra96/test/protocol_host/STAGE2_CHECKPOINT.md)
-for the contract and complete physical test.
+## Integrated activity and rep outputs
+
+Both ESP LEDs now indicate the shared streaming state: steadily ON only after
+both successful START/START_FLUSH acknowledgements, OFF while connected/armed
+but waiting for movement, and OFF on AI idle pause, manual STOP or a stopped run.
+The existing AI idle threshold and stop/ACK/rearm capture workflow are retained.
+Idle is silent. Rep and ready LED flashes and the idle double beep are removed.
+
+Phone rep sessions, sequence validation, reconnect/sync and count handling stay
+in `rep_control.py`. One accepted count increase sends one 100 ms beep to Hip
+(Node 1) directly over its existing TLS connection. A catch-up count generates
+one confirmation beep, not a replay of missed reps. Wrist receives no rep event.
+The canonical `hardware/node/BuzzerFeedback` queues rapid beeps with 100 ms gaps.
+Fall alarms take priority, discard queued reps and suppress new sounds during
+the alarm. Activity LED updates never silence a fall or trigger a buzzer.
+
+Both `server.py` and `server_AI.py` use FEEDBACK_COMMAND (0x0B), retaining its
+24-byte header, 16-byte `!QB7x` payload and CONTROL_ACK format. Current actions:
+
+| Action | Value | Destination |
+| --- | --- | --- |
+| REP_BUZZ | 4 | Hip only |
+| ACTIVITY_ACTIVE | 5 | Both nodes |
+| ACTIVITY_IDLE | 6 | Both nodes |
+
+Old action values 1/2/3 (REP_LED/READY_LED/IDLE_BUZZ) are retired and rejected.
+Deploy the updated server, `feedback_delivery.py`, `rep_control.py`, and firmware
+on **both boards together**; old firmware cannot apply the new actions. No phone
+JSON, gateway, TLS or fall-reporting protocol changes are required.
+
+Feedback keeps its session validation, bounded retries and duplicate protection.
+A newer activity state cancels pending retries of the older state. STOP also
+clears the LED locally, and transport session begin/end resets activity and rep
+sounds while preserving an active local fall alarm. Reconnecting a node stops
+the shared run; LEDs remain OFF until another dual START confirmation. An ACK
+means the request was handled, not that physical light or sound was measured.
+Delivery remains bounded; a failed ACTIVE command can leave that board dark
+until a later state/session update. An isolated board clears its LED when its
+transport session ends; this is not an immediate network-loss indicator.
+
+USB diagnostics and either server console accept `feedback rep`, `feedback
+active`, `feedback idle`, and `feedback status`. Here `active`/`idle` are explicit
+output tests and do not start/stop capture. Server-only `feedback repeat` resends
+the last unexpired event to check duplicate suppression. USB `feedback
+fall-alarm` and `fall inject` retain their separate output/event meanings.
+`feedback ready` is removed. Normal operation drives activity automatically.
+
+From the repository root, run the tracked regression checks:
+
+```powershell
+.\communications\ultra96\check_feedback_outputs.ps1
+```
+
+Physical check: boot/arm both boards (LEDs OFF), trigger and confirm both starts
+(LEDs stay ON), submit AR reps (Hip beeps once each; LEDs unchanged), then confirm
+AI idle (both LEDs OFF, no idle beep). Verify resume, manual STOP, reconnect,
+rapid reps and fall preemption. These replace the output expectations in older
+Stage 1-4 checkpoint records.
 
 The server writes each human-readable record to both the coloured terminal and
 a plain-text rotating file. Its Ultra96 defaults are:
@@ -132,13 +180,13 @@ Stage 4's supported AI entrypoint is `server_AI.py`. It retains the intentional
 `window_assembler_updated` import (the local updated `window_assembler.py` is
 deployed under that name). The existing Ultra96 `inference_pipeline.py` confirms
 five consecutive idle classifications at confidence >= 0.80. An accepted current
-generation calls `handle_idle_classification`, which pauses streaming and submits
-one `IDLE_BUZZ` event to Hip/node 1 through `feedback_delivery.py`. Non-idle or
-low-confidence results reset the streak; rejected windows do not add evidence.
-Fresh capture resets evidence and generation; stale inference is ignored. Manual
-`idle`, manual STOP, disconnects and control timeouts do not submit AI feedback.
-Feedback retries reuse the event identity; failure does not block STOP/ACK/ARM.
-Ready LEDs remain an explicit `feedback ready` diagnostic only.
+generation calls `handle_idle_classification`, which pauses streaming and sends
+the silent ACTIVITY_IDLE state to both nodes through the existing delivery path.
+Non-idle or low-confidence results reset the streak; rejected windows do not add
+evidence. Fresh capture resets evidence and generation; stale inference is
+ignored. Every confirmed shared start sends ACTIVITY_ACTIVE. Manual STOP and
+disconnect also clear activity; no idle buzzer event is produced. Feedback
+failure does not block STOP/ACK/ARM.
 
 For `server_AI.py`, the default rotating log file is the absolute path
 `/home/xilinx/comms/logs/server.log`, including when launched as root. Override

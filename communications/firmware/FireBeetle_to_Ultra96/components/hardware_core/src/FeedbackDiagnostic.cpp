@@ -13,7 +13,7 @@ FeedbackDiagnostic::Command FeedbackDiagnostic::feed(char byte) {
   if (!overflow_) {
     if (!length_) result = Command::None;
     else if (!strcmp(line_, "feedback rep")) result = Command::Rep;
-    else if (!strcmp(line_, "feedback ready")) result = Command::Ready;
+    else if (!strcmp(line_, "feedback active")) result = Command::Active;
     else if (!strcmp(line_, "feedback idle")) result = Command::Idle;
     else if (!strcmp(line_, "feedback fall-alarm")) result = Command::FallAlarm;
     else if (!strcmp(line_, "fall inject")) result = Command::FallEvent;

@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS
+        "../../../../../hardware/node/BuzzerFeedback.cpp"
         "../../../../../hardware/node/ContinuousCounter.cpp"
         "../../../../../hardware/node/NodeSession.cpp"
         "../../../../../hardware/node/RepCounter.cpp"

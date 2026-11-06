@@ -33,7 +33,8 @@ Ultra96 owns clock/flush coordination and overlapping windows.
 `exercise_bridge.cpp` is the C ABI for the next integration phase. The
 component builds the hardware teammate's original `RepCounter.cpp`,
 `ContinuousCounter.cpp`, and `NodeSession.cpp` directly from `hardware/node`;
-those files are not edited or forked. Every captured sample is offered to this
+those files are not edited or forked. The feedback controller also builds the
+canonical `hardware/node/BuzzerFeedback.cpp` directly. Every captured sample is offered to this
 bridge by the existing physical pipeline, so there is still only one MPU6050
 read and one acquisition clock.
 
@@ -46,8 +47,9 @@ tested without MPU6050s or provisioned peer MAC addresses.
 The bridge exposes the hardware `LinkPacket` as an opaque, fixed 24-byte C
 object and stores outgoing control events in a bounded 12-entry queue. These
 legacy peer interfaces have no transport connected. The planned AR feedback
-path uses phone -> Ultra96 -> both ESPs over the existing Wi-Fi/TLS connections,
-so it does not require ESP-NOW LED mirroring.
+path uses phone -> Ultra96 -> Hip for rep beeps, and Ultra96 -> both ESPs for
+steady activity LEDs, over the existing Wi-Fi/TLS connections. It does not
+require ESP-NOW forwarding.
 
 ## Wi-Fi-only communications runtime
 
@@ -62,13 +64,22 @@ also been regenerated with Bluetooth disabled. This releases the controller,
 host, task, and queue memory for Wi-Fi/TLS. Existing generated configurations
 for other profiles may still contain their older Bluetooth settings.
 
-USB serial logging remains available through ESP-IDF. The removed Bluetooth
-command interface is not replaced by a USB command parser in this change.
-Future local feedback diagnostics must add their own command adapter. The
-standalone hardware application's Bluetooth implementation is unchanged.
+USB serial logging remains available through ESP-IDF. Builds with
+`APP_FEEDBACK_DIAGNOSTICS=1` also enable the bounded USB feedback command parser
+described below. The standalone hardware application's Bluetooth implementation
+is unchanged.
 
 The checked-in `partitions_2mb.csv` provides a 0x1e0000-byte factory slot on
 the boards' detected 2 MiB flash. This project already used a single factory
 application, so the larger slot does not remove a previously available OTA
 slot.
 
+## Current integrated outputs
+
+`FeedbackController` owns persistent activity LED state and delegates queued
+100 ms rep beeps, 100 ms gaps and three-second fall priority to the canonical
+`BuzzerFeedback`. Only Hip may drive the buzzer. Idle is silent; ready/rep LED
+patterns and the idle double beep are removed. Session reset cancels rep sounds
+and clears activity without silencing a fall. STOP clears activity locally too.
+USB diagnostics use `feedback rep|active|idle|fall-alarm|status` and `fall inject`.
+See the Ultra96 README for action IDs, deployment and physical checks.

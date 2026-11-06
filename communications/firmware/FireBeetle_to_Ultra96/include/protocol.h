@@ -33,9 +33,10 @@
 #define PROTOCOL_MESSAGE_TYPE_ARM       0x0A
 #define PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND 0x0B
 #define PROTOCOL_FEEDBACK_PAYLOAD_SIZE 16
-#define PROTOCOL_FEEDBACK_REP_LED 1
-#define PROTOCOL_FEEDBACK_READY_LED 2
-#define PROTOCOL_FEEDBACK_IDLE_BUZZ 3
+/* Values 1..3 are retired; do not reinterpret commands from older firmware. */
+#define PROTOCOL_FEEDBACK_REP_BUZZ 4
+#define PROTOCOL_FEEDBACK_ACTIVITY_ACTIVE 5
+#define PROTOCOL_FEEDBACK_ACTIVITY_IDLE 6
 #define PROTOCOL_MESSAGE_TYPE_DATA      0x10
 #define PROTOCOL_MESSAGE_TYPE_HEARTBEAT 0x11
 #define PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA 0x12
@@ -277,7 +278,7 @@ typedef struct {
 
 /* FEEDBACK_COMMAND (0x0B): unchanged 24-byte header, coordinator node=0,
  * flags=0, active nonzero Session. Payload offsets: [0..7] nonzero, increasing
- * uint64 event_id, [8] action (1 REP_LED, 2 READY_LED, 3 IDLE_BUZZ), [9..15]
+ * uint64 event_id, [8] action (4 REP_BUZZ, 5 ACTIVITY_ACTIVE, 6 ACTIVITY_IDLE), [9..15]
  * reserved zero. All integers big endian. Retries preserve sequence and payload.
  * Event IDs increase within each transport Session; older evicted IDs fail
  * closed. CONTROL_ACK.command_type=0x0B reports acceptance, not physical proof. */

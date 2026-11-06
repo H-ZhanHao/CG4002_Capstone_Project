@@ -1,7 +1,7 @@
 """Bounded, session-scoped feedback delivery, independent of capture controls.
 
 0x0B payload: !QB7x (16 bytes): increasing nonzero uint64 event_id, uint8
-action (1 REP_LED, 2 READY_LED, 3 IDLE_BUZZ), seven reserved zero bytes.
+action (4 REP_BUZZ, 5 ACTIVITY_ACTIVE, 6 ACTIVITY_IDLE), seven reserved zero bytes.
 Header stays !HBBBBHIIQ: node=0, flags=0, current transport session/sequence.
 Retries keep the entire frame unchanged. ACK is the existing !BBHIQ payload,
 command_type=0x0B; APPLIED/DUPLICATE mean firmware accepted the output request,
@@ -18,9 +18,10 @@ import time
 
 MESSAGE_TYPE_FEEDBACK_COMMAND = 0x0B
 FEEDBACK_PAYLOAD_SIZE = 16
-FEEDBACK_REP_LED = 1
-FEEDBACK_READY_LED = 2
-FEEDBACK_IDLE_BUZZ = 3
+# Values 1..3 are retired; an older peer must never silently change outputs.
+FEEDBACK_REP_BUZZ = 4
+FEEDBACK_ACTIVITY_ACTIVE = 5
+FEEDBACK_ACTIVITY_IDLE = 6
 FEEDBACK_RETRY_US = 750_000
 FEEDBACK_DEADLINE_US = 2_500_000
 FEEDBACK_MAX_ATTEMPTS = 3
@@ -30,7 +31,8 @@ LOGGER = logging.getLogger("server")
 
 def encode_feedback(event_id, action):
     if (type(event_id) is not int or not 0 < event_id <= 0xFFFFFFFFFFFFFFFF or
-            type(action) is not int or action not in (1, 2, 3)):
+            type(action) is not int or action not in
+            (FEEDBACK_REP_BUZZ, FEEDBACK_ACTIVITY_ACTIVE, FEEDBACK_ACTIVITY_IDLE)):
         raise ValueError("Invalid feedback identity or action")
     return struct.pack("!QB7x", event_id, action)
 
@@ -51,6 +53,7 @@ class Delivery:
     frame: bytes
     deadline_us: int
     next_retry_us: int
+    action: int
     attempts: int = 0
     status: str = "pending"
     result: int | None = None
@@ -169,6 +172,12 @@ class FeedbackDelivery:
                 raise ValueError("Feedback event identity exhausted; restart the server")
             self.event_id += 1
             payload = encode_feedback(self.event_id, action)
+            if action in (FEEDBACK_ACTIVITY_ACTIVE, FEEDBACK_ACTIVITY_IDLE):
+                # A newer state replaces unsent/retry work for the same boards.
+                for item in list(self.pending.values()):
+                    if (item.connection.node_id in nodes and item.action in
+                            (FEEDBACK_ACTIVITY_ACTIVE, FEEDBACK_ACTIVITY_IDLE)):
+                        self._finish(item, "superseded")
             now = self.clock()
             self.last = []
             ticket = self.tickets[self.event_id] = {}
@@ -184,7 +193,8 @@ class FeedbackDelivery:
                     payload_length=FEEDBACK_PAYLOAD_SIZE, session_id=connection.session_id,
                     sequence=sequence) + payload
                 item = Delivery(connection, self.event_id, sequence, frame,
-                                now + FEEDBACK_DEADLINE_US, now + FEEDBACK_RETRY_US)
+                                now + FEEDBACK_DEADLINE_US, now + FEEDBACK_RETRY_US,
+                                action)
                 self.last.append(item)
                 ticket[node] = item
                 if sum(key[0] == node for key in self.pending) >= FEEDBACK_MAX_PENDING_PER_NODE:
@@ -241,12 +251,12 @@ class FeedbackDelivery:
             return [(item.event_id, item.connection.node_id, item.status, item.result)
                     for item in self.last]
 
-    def event_status(self, event_id):
+    def event_status(self, event_id, nodes=(1, 2)):
         """Snapshot one logical event independently of later console/AR events."""
         with self.lock:
             ticket = self.tickets.get(event_id)
             if ticket is None:
-                return [{"node_id": n, "status": "expired", "result": -1} for n in (1, 2)]
+                return [{"node_id": n, "status": "expired", "result": -1} for n in nodes]
             return [{"node_id": n, "status": item.status if item else "unavailable",
                      "result": item.result if item and item.result is not None else -1}
                     for n, item in sorted(ticket.items())]

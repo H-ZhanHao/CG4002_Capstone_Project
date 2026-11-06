@@ -431,16 +431,16 @@ bool protocol_decode_feedback_payload(const uint8_t *payload, size_t length,
         if (payload[i] != 0) return false;
     feedback->event_id = read_u64_be(payload);
     feedback->action = payload[8];
-    return feedback->event_id != 0 && feedback->action >= PROTOCOL_FEEDBACK_REP_LED &&
-        feedback->action <= PROTOCOL_FEEDBACK_IDLE_BUZZ;
+    return feedback->event_id != 0 && feedback->action >= PROTOCOL_FEEDBACK_REP_BUZZ &&
+        feedback->action <= PROTOCOL_FEEDBACK_ACTIVITY_IDLE;
 }
 
 bool protocol_encode_feedback_payload(uint8_t payload[PROTOCOL_FEEDBACK_PAYLOAD_SIZE],
                                      const protocol_feedback_t *feedback)
 {
     if (payload == NULL || feedback == NULL || feedback->event_id == 0 ||
-        feedback->action < PROTOCOL_FEEDBACK_REP_LED ||
-        feedback->action > PROTOCOL_FEEDBACK_IDLE_BUZZ) return false;
+        feedback->action < PROTOCOL_FEEDBACK_REP_BUZZ ||
+        feedback->action > PROTOCOL_FEEDBACK_ACTIVITY_IDLE) return false;
     memset(payload, 0, PROTOCOL_FEEDBACK_PAYLOAD_SIZE);
     write_u64_be(payload, feedback->event_id);
     payload[8] = feedback->action;

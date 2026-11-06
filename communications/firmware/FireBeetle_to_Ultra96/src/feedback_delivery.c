@@ -59,9 +59,9 @@ protocol_control_ack_t feedback_delivery_process(feedback_delivery_t *state,
         ack.result = PROTOCOL_CONTROL_RESULT_STALE_IDENTITY;
         return ack;
     } else {
-        if (request->action < PROTOCOL_FEEDBACK_REP_LED ||
-            request->action > PROTOCOL_FEEDBACK_IDLE_BUZZ ||
-            (request->action == PROTOCOL_FEEDBACK_IDLE_BUZZ && state->node_id != 1))
+        if (request->action < PROTOCOL_FEEDBACK_REP_BUZZ ||
+            request->action > PROTOCOL_FEEDBACK_ACTIVITY_IDLE ||
+            (request->action == PROTOCOL_FEEDBACK_REP_BUZZ && state->node_id != 1))
             ack.result = PROTOCOL_CONTROL_RESULT_UNSUPPORTED;
         else
             ack.result = apply != NULL && apply(request->action, now_us, context)

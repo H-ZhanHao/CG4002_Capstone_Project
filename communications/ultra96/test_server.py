@@ -230,12 +230,14 @@ class PhysicalIntegrationTest(unittest.TestCase):
     def confirm_arm(self, coordinator, *connections):
         if not coordinator.arm_pending:
             self.assertTrue(coordinator._arm_locked("test"))
-        sequence = server.unpack_header(connections[0].client.frames[-1])[7]
+        sequence = coordinator._pending_arm_acks[connections[0].node_id]
         self.assertEqual(
-            server.unpack_header(connections[0].client.frames[-1])[2],
+            server.unpack_header(next(f for f in reversed(connections[0].client.frames)
+                if f[3] == server.MESSAGE_TYPE_ARM))[2],
             server.MESSAGE_TYPE_ARM)
         decoded = [
-            struct.unpack("!QqI", connection.client.frames[-1][server.HEADER_SIZE:])
+            struct.unpack("!QqI", next(f for f in reversed(connection.client.frames)
+                if f[3] == server.MESSAGE_TYPE_ARM)[server.HEADER_SIZE:])
             for connection in connections
         ]
         self.assertTrue(all(item[0] == decoded[0][0] for item in decoded))
@@ -582,7 +584,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
         coordinator.register(node2)
 
         coordinator.manual_stop()
-        stop_sequence = server.unpack_header(sock1.frames[-1])[7]
+        stop_sequence = coordinator._pending_stop_acks[1]
         server.process_control_ack(build_control_ack(
             node1, server.MESSAGE_TYPE_STOP, stop_sequence), node1)
         server.process_control_ack(build_control_ack(
@@ -644,7 +646,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertTrue(coordinator.idle_paused)
         self.assertFalse(coordinator.run_active)
         self.assertIn("AI idle pause", assembler.stopped)
-        stop_sequence = server.unpack_header(sock1.frames[-1])[7]
+        stop_sequence = coordinator._pending_stop_acks[1]
 
         # A peak cannot race STOP acknowledgements and restart the old feeder.
         self.assertFalse(server.process_activity_trigger(initial_trigger, node1))
@@ -865,7 +867,8 @@ class ClockSynchronizationTest(unittest.TestCase):
         coordinator.unregister(node2)
         self.assertFalse(coordinator.run_active)
         self.assertEqual(
-            server.unpack_header(socket1.frames[-1])[2],
+            server.unpack_header(next(frame for frame in reversed(socket1.frames)
+                if frame[3] != server.MESSAGE_TYPE_FEEDBACK_COMMAND))[2],
             server.MESSAGE_TYPE_STOP,
         )
 
@@ -1348,7 +1351,8 @@ class ClockSynchronizationTest(unittest.TestCase):
         coordinator.request_stop()
         self.assertFalse(coordinator.desired_running)
         self.assertEqual(
-            server.unpack_header(socket1.frames[-1])[2],
+            server.unpack_header(next(frame for frame in reversed(socket1.frames)
+                if frame[3] != server.MESSAGE_TYPE_FEEDBACK_COMMAND))[2],
             server.MESSAGE_TYPE_STOP,
         )
         frame_count = len(socket1.frames)

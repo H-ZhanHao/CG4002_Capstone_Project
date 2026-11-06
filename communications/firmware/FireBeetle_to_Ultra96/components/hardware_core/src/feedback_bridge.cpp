@@ -63,7 +63,7 @@ extern "C" esp_err_t feedback_bridge_begin(uint8_t node_id) {
   static_assert(CONFIG_ESP_CONSOLE_UART_NUM == 0, "Diagnostics require UART0 console");
   err = uart_driver_install(UART_NUM_0, 256, 0, 0, nullptr, 0);
   if (err != ESP_OK) return err;
-  ESP_LOGI(TAG, "USB diagnostics: feedback rep|ready|idle|fall-alarm|status; fall inject (synthetic) (115200)");
+  ESP_LOGI(TAG, "USB diagnostics: feedback rep|active|idle|fall-alarm|status; fall inject (synthetic) (115200)");
 #endif
   drive();
   return ESP_OK;
@@ -73,15 +73,20 @@ extern "C" bool feedback_bridge_trigger(feedback_action_t action, uint32_t now_m
   using Action = FeedbackController::Action;
   Action requested;
   switch (action) {
-    case FEEDBACK_REP_LED: requested = Action::Rep; break;
-    case FEEDBACK_READY_LED: requested = Action::Ready; break;
-    case FEEDBACK_IDLE_BUZZ: requested = Action::Idle; break;
+    case FEEDBACK_REP_BUZZ: requested = Action::Rep; break;
+    case FEEDBACK_ACTIVITY_ACTIVE: requested = Action::Active; break;
+    case FEEDBACK_ACTIVITY_IDLE: requested = Action::Idle; break;
     case FEEDBACK_FALL_ALARM: requested = Action::FallAlarm; break;
     default: return false;
   }
   const bool accepted = controller.trigger(requested, now_ms);
   drive();
   return accepted;
+}
+
+extern "C" void feedback_bridge_reset_session(void) {
+  controller.resetSession();
+  drive();
 }
 
 extern "C" void feedback_bridge_set_fall_injector(bool (*injector)(void)) {
@@ -105,13 +110,13 @@ extern "C" void feedback_bridge_service(uint32_t now_ms) {
       continue;
     }
     if (command == Command::Invalid) {
-      ESP_LOGW(TAG, "Invalid/oversized command: feedback rep|ready|idle|fall-alarm|status; fall inject (synthetic)");
+      ESP_LOGW(TAG, "Invalid/oversized command: feedback rep|active|idle|fall-alarm|status; fall inject (synthetic)");
       continue;
     }
     if (command != Command::Status) {
-      const feedback_action_t action = command == Command::Rep ? FEEDBACK_REP_LED :
-          command == Command::Ready ? FEEDBACK_READY_LED :
-          command == Command::Idle ? FEEDBACK_IDLE_BUZZ : FEEDBACK_FALL_ALARM;
+      const feedback_action_t action = command == Command::Rep ? FEEDBACK_REP_BUZZ :
+          command == Command::Active ? FEEDBACK_ACTIVITY_ACTIVE :
+          command == Command::Idle ? FEEDBACK_ACTIVITY_IDLE : FEEDBACK_FALL_ALARM;
       const bool accepted = feedback_bridge_trigger(action, now_ms);
       ESP_LOGI(TAG, "Diagnostic output %s%s", accepted ? "accepted" : "rejected",
           command == Command::FallAlarm ? " (output test only; no fall detected)" : "");

@@ -21,3 +21,6 @@ communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/*
 hardware/tests/sampling_diagnostics_test.cpp
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs.meta
+communications/ultra96/check_feedback_outputs.ps1
+communications/ultra96/check_feedback_outputs.py
+hardware/tests/

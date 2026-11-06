@@ -14,6 +14,7 @@ import time
 
 from visualizer_protocol import parse_rep_message, VisualizerProtocolError, MAX_PHONE_BYTES
 from fall_delivery import parse_fall
+from feedback_delivery import FEEDBACK_REP_BUZZ
 
 CONTROL_PORT = 9101
 
@@ -60,7 +61,7 @@ class RepController:
                 "rep_session_id": request.get("rep_session_id", ""),
                 "rep_index": request.get("rep_index", -1), "status": status,
                 "reason": reason, "feedback_event_id": event_id,
-                "nodes": self.coordinator.feedback_delivery.event_status(event_id) if event_id else []}
+                "nodes": self.coordinator.feedback_delivery.event_status(event_id, nodes=(1,)) if event_id else []}
 
     def handle(self, link, payload):
         with self.lock:
@@ -127,8 +128,8 @@ class RepController:
             return self.response(message, reason="stale_count; start a new session to reset")
         if count == self.count:
             return self.response(message, "duplicate", "baseline_count")
-        # One current pulse even if the cumulative count jumps over missed reps.
-        event_id = self.coordinator.request_feedback(1)
+        # One current beep even if the cumulative count jumps over missed reps.
+        event_id = self.coordinator.request_feedback(FEEDBACK_REP_BUZZ)
         self.count = count
         self.receipts[count] = event_id
         while len(self.receipts) > 128:
@@ -180,7 +181,8 @@ class _Handler(socketserver.BaseRequestHandler):
                         for event in controller.coordinator.device_events.falls.due(fall_sent):
                             send(event)
                 for original, deadline in list(notifications):
-                    nodes = controller.coordinator.feedback_delivery.event_status(original["feedback_event_id"])
+                    nodes = controller.coordinator.feedback_delivery.event_status(
+                        original["feedback_event_id"], nodes=(1,))
                     if all(node["status"] != "pending" for node in nodes) or time.monotonic() >= deadline:
                         result = dict(original, type="rep_delivery", status="complete", nodes=nodes)
                         send(result)
