@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ultra96 · Live motion</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <header><div><p class="eyebrow">ULTRA96 / SENSOR MONITOR</p><h1>Live motion</h1></div>
+    <span id="connection" class="badge">Connecting…</span></header>
+  <main>
+    <p id="demo" class="notice" hidden>SIMULATION — readings and classification labels are generated, not measured by sensors or predicted by the AI model.</p>
+    <p id="loss" class="notice" hidden></p>
+    <section class="overview" aria-label="System overview">
+      <article><span>Capture</span><strong id="capture">Waiting for server</strong><small id="capture-detail">IMU updates arrive independently of inference.</small></article>
+      <article><span>Confirmed exercise</span><strong id="confirmed">—</strong><small id="confirmed-detail">Waiting for sufficient evidence</small></article>
+      <article><span>Latest prediction</span><strong id="prediction">—</strong><small id="confidence">Waiting for a complete inference window</small></article>
+      <article><span>Latest window</span><strong id="window">—</strong><small id="window-detail">Waiting for synchronized samples</small></article>
+    </section>
+    <section class="panel device-panel" aria-label="Device connections">
+      <h2>Device connections</h2>
+      <p class="hint">Heartbeats confirm the connection while idle. IMU packets keep it connected while streaming. No heartbeat or IMU data for 3 seconds marks the device disconnected.</p>
+      <div id="device-connections" class="device-connections"></div>
+    </section>
+    <div class="section-title"><h2>IMU streams</h2><label>Time range <select id="range"><option value="10">10 seconds</option><option value="20" selected>20 seconds</option><option value="30">30 seconds</option></select></label></div>
+    <p class="hint">X <i class="x"></i> Y <i class="y"></i> Z <i class="z"></i> · Capture-time plots · Dashed lines indicate historical samples · Numeric readings show the latest received sample</p>
+    <div class="panel inference-panel">
+      <label for="inference-window">Highlighted inference <select id="inference-window"><option value="">Follow latest inference</option></select></label>
+      <p class="hint">Labels above each graph identify overlapping windows. Hover or click a label to emphasize the same interval on both nodes. Colored areas show model input; queued, skipped and rejected windows have dashed outlines. ✓ marks a confirmed result.</p>
+      <p id="inference-detail">Waiting for inference windows.</p>
+    </div>
+    <section id="nodes" class="nodes" aria-label="Live IMU charts"></section>
+    <section class="diagnostics">
+      <article class="panel"><h2>Fall / device reports</h2><p id="device">No device reports received.</p><small>Reports follow device-side validation. Retransmissions are not counted as separate falls.</small></article>
+      <article class="panel"><h2>Feedback delivery</h2><pre id="feedback">Waiting for feedback status</pre></article>
+    </section>
+    <section class="panel"><div class="section-title"><h2>Recent server events</h2><span class="hint">Latest 100 records</span></div><ol id="events"></ol></section>
+    <footer>Live IMU batches every 100 ms · Status every second · Data stays on this server and your browser</footer>
+  </main>
+</body>
+</html>
