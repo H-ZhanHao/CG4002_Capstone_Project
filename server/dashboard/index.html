@@ -11,7 +11,7 @@
   <header><div><p class="eyebrow">ULTRA96 / SENSOR MONITOR</p><h1>Live motion</h1></div>
     <span id="connection" class="badge">Connecting…</span></header>
   <main>
-    <p id="demo" class="notice" hidden>SIMULATION — these readings are generated, not measured by sensors.</p>
+    <p id="demo" class="notice" hidden>SIMULATION — readings and classification labels are generated, not measured by sensors or predicted by the AI model.</p>
     <p id="loss" class="notice" hidden></p>
     <section class="overview" aria-label="System overview">
       <article><span>Capture</span><strong id="capture">Waiting for server</strong><small id="capture-detail">IMU updates arrive independently of inference.</small></article>
@@ -26,6 +26,11 @@
     </section>
     <div class="section-title"><h2>IMU streams</h2><label>Time range <select id="range"><option value="10">10 seconds</option><option value="20" selected>20 seconds</option><option value="30">30 seconds</option></select></label></div>
     <p class="hint">X <i class="x"></i> Y <i class="y"></i> Z <i class="z"></i> · Capture-time plots · Dashed lines indicate historical samples · Numeric readings show the latest received sample</p>
+    <div class="panel inference-panel">
+      <label for="inference-window">Highlighted inference <select id="inference-window"><option value="">Follow latest inference</option></select></label>
+      <p class="hint">Labels above each graph identify overlapping windows. Hover or click a label to emphasize the same interval on both nodes. Colored areas show model input; queued, skipped and rejected windows have dashed outlines. ✓ marks a confirmed result.</p>
+      <p id="inference-detail">Waiting for inference windows.</p>
+    </div>
     <section id="nodes" class="nodes" aria-label="Live IMU charts"></section>
     <section class="diagnostics">
       <article class="panel"><h2>Fall / device reports</h2><p id="device">No device reports received.</p><small>Reports follow device-side validation. Retransmissions are not counted as separate falls.</small></article>

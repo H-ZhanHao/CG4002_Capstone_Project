@@ -51,6 +51,8 @@ class Telemetry:
         self._nodes = {}
         self._cursor = 0
         self._event_id = 0
+        self._inference_windows = {}
+        self._inference_revision = 0
         self._state = {"capture": "starting", "prediction": None,
                        "confirmed": None, "window": None, "device_event": None}
 
@@ -170,14 +172,77 @@ class Telemetry:
                             "start_us": window.start_us, "end_us": window.end_us,
                             "quality": asdict(window.quality)})
 
-    def prediction(self, result, confirmed=False):
+    def inference_window(self, window, generation, model_intervals):
+        """Retain window provenance, independently of the latest status cards."""
+        with self._lock:
+            nodes = {}
+            for node_id, samples in window.samples_by_node.items():
+                if not samples:
+                    continue
+                last = samples[-1]
+                # Sensor capture generations and pipeline generations are separate
+                # counters. Recover the epoch of an actual input sample, not the
+                # latest node state (which may already belong to a new capture).
+                source = next((record for record in reversed(self._samples)
+                               if record["node"] == node_id and
+                               record["session"] == last.session_id and
+                               record["sequence"] == last.sequence and
+                               record["capture_us"] == last.coordinator_timestamp_us), {})
+                nodes[str(node_id)] = {
+                    "session": samples[0].session_id,
+                    "generation": source.get("generation"),
+                    "first_sequence": samples[0].sequence,
+                    "last_sequence": samples[-1].sequence,
+                }
+            key = f"{generation}:{window.run_id}:{window.window_id}"
+            self._inference_windows[key] = json_safe({
+                "key": key, "generation": generation, "run_id": window.run_id,
+                "window_id": window.window_id, "start_us": window.start_us,
+                "end_us": window.end_us, "nodes": nodes,
+                "model_intervals": model_intervals,
+                "status": "queued" if window.quality.accepted else "rejected",
+                "reason": window.quality.rejection_reason,
+                "quality": asdict(window.quality), "confirmed": False,
+                "sent_for_inference": False,
+            })
+            while len(self._inference_windows) > 100:
+                del self._inference_windows[next(iter(self._inference_windows))]
+            self._inference_revision += 1
+
+    def inference_status(self, window, generation, status, reason=None):
+        key = f"{generation}:{window.run_id}:{window.window_id}"
+        with self._lock:
+            record = self._inference_windows.get(key)
+            if record is not None:
+                record.update(status=status, reason=reason)
+                if status == "processing":
+                    record["sent_for_inference"] = True
+                self._inference_revision += 1
+
+    def cancel_inference(self, reason):
+        with self._lock:
+            for record in self._inference_windows.values():
+                if record["status"] in ("queued", "processing"):
+                    record.update(status="cancelled", reason=reason)
+                    self._inference_revision += 1
+
+    def prediction(self, result, confirmed=False, generation=None):
         value = {name: getattr(result, name, None) for name in (
             "capture_run_id", "window_id", "exercise", "confidence", "class_id",
             "start_us", "end_us", "model_window_count")}
         value["received_at"] = time.time()
-        self.update(**{"confirmed" if confirmed else "prediction": value})
+        value = json_safe(value)
+        with self._lock:
+            self._state["confirmed" if confirmed else "prediction"] = value
+            key = f"{generation}:{result.capture_run_id}:{result.window_id}"
+            record = self._inference_windows.get(key)
+            if record is not None:
+                record.update(value, status="classified", reason=None,
+                              sent_for_inference=True,
+                              confirmed=record["confirmed"] or confirmed)
+                self._inference_revision += 1
 
-    def snapshot(self, cursor=None, include_state=True):
+    def snapshot(self, cursor=None, include_state=True, inference_revision=None):
         """Copy under lock, serialize outside it. No per-client pending queues."""
         now = self._clock()
         with self._lock:
@@ -196,6 +261,10 @@ class Telemetry:
                 samples.reverse()
             result = {"run": self.run, "cursor": self._cursor, "reset": reset,
                       "lost_samples": lost, "samples": samples, "demo": self.demo}
+            result["inference_revision"] = self._inference_revision
+            if reset or inference_revision != self._inference_revision:
+                result["inference_windows"] = [dict(record) for record in
+                                               self._inference_windows.values()]
             if include_state:
                 result["state"] = dict(self._state)
                 result["events"] = list(self._events)
@@ -317,10 +386,12 @@ class DashboardServer:
                 except ValueError:
                     pass
                 next_state = 0
+                inference_revision = None
                 while not owner.stopping.is_set():
                     now = time.monotonic()
                     include_state = now >= next_state
-                    batch = owner.telemetry.snapshot(cursor, include_state)
+                    batch = owner.telemetry.snapshot(cursor, include_state, inference_revision)
+                    inference_revision = batch["inference_revision"]
                     if include_state:
                         next_state = now + 1
                     payload = json.dumps(batch, separators=(",", ":"), allow_nan=False)
@@ -363,6 +434,25 @@ class DashboardServer:
 
 
 def main():
+    from inference_pipeline import InferencePipeline
+    from window_assembler_updated import WindowAssembler, WindowConfig
+
+    class DemoInference:
+        @staticmethod
+        def model_intervals(window):
+            return [(window.start_us, window.end_us)]
+
+        @staticmethod
+        def infer_window(window):
+            # Deliberate delay makes the processing highlight visible in demo mode.
+            time.sleep(0.35)
+            exercise = ("squat", "push_up", "jumping_jack")[(window.window_id // 6) % 3]
+            return SimpleNamespace(
+                capture_run_id=window.run_id, window_id=window.window_id,
+                start_us=window.start_us, end_us=window.end_us,
+                exercise=exercise, class_id=0, confidence=0.94,
+                model_window_count=1)
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo", action="store_true", required=True,
                         help="generate simulated IMU samples; does not use sensors or DPU")
@@ -376,6 +466,11 @@ def main():
     server.start()
     print("SIMULATED DATA: open http://<this-machine-IP>:{}".format(server.port), flush=True)
     start = time.monotonic()
+    assembler = WindowAssembler(WindowConfig(sample_rate_hz=100, window_us=3_000_000,
+                                              hop_us=1_000_000))
+    publisher = SimpleNamespace(set_capture=lambda *_: None, publish_classification=lambda *_: None)
+    pipeline = InferencePipeline(assembler, DemoInference(), publisher, telemetry=telemetry)
+    pipeline.start_run(1, int(start * 1_000_000))
     sequence = 0
     try:
         while True:
@@ -388,13 +483,15 @@ def main():
                     timestamp_us=timestamp, coordinator_timestamp_us=timestamp,
                     ax=2 * math.sin(phase), ay=math.cos(phase), az=9.81 + math.sin(phase * 2),
                     gx=0.4 * math.cos(phase), gy=0.7 * math.sin(phase), gz=0.2 * math.cos(phase * 2),
-                    status=1)
+                    status=1, flags=0)
                 telemetry.sample(sample)
+                pipeline.submit(sample)
             sequence += 1
             time.sleep(max(0, start + sequence / 100 - time.monotonic()))
     except KeyboardInterrupt:
         pass
     finally:
+        pipeline.close()
         server.close()
 
 

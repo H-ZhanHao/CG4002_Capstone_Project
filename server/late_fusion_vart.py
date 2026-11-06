@@ -328,6 +328,12 @@ class LateFusionInference:
             raise ValueError("invalid fusion output")
         return softmax(logits)
 
+    def model_intervals(self, window):
+        """Exact coordinator-time intervals consumed by the model."""
+        model_us = round(WINDOW_SECONDS * 1_000_000)
+        return [(start, start + model_us) for start in
+                range(window.start_us, window.end_us - model_us + 1, self.stride_us)]
+
     def infer_window(self, window):
         """Average paired three-second predictions inside one assembled segment.
 
@@ -357,12 +363,13 @@ class LateFusionInference:
             streams[node_id] = ts, signal
 
         all_probs = []
-        for start in range(0, duration_us - model_us + 1, self.stride_us):
+        for start_us, end_us in self.model_intervals(window):
+            start, end = start_us - window.start_us, end_us - window.start_us
             pair = []
             # predict_pair expects wrist first, then thigh.
             for node_id in (2, 1):
                 ts, signal = streams[node_id]
-                segment = signal[(ts >= start) & (ts < start + model_us)]
+                segment = signal[(ts >= start) & (ts < end)]
                 if len(segment) < self.min_samples:
                     raise ValueError(f"insufficient model-window coverage: Node {node_id}")
                 pair.append(resample_poly_to_window(segment, self.cfg.window_size))

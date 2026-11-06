@@ -4,9 +4,72 @@ const byId = id => document.getElementById(id);
 const charts = new Map();
 let serverRun = null, state = {}, nodeInfo = {}, lastMessage = 0, lastState = 0;
 let seconds = 20, eventVersion = -1, lostTotal = 0;
+let inferenceWindows = [], selectedWindow = null, hoveredWindow = null;
 const colors = ["#66c9ff", "#ffd37a", "#c3a0ff"];
 const pretty = value => String(value || "—").replaceAll("_", " ");
 const num = value => Number.isFinite(value) ? value.toFixed(3) : "—";
+const classColors = {push_up: "#66c9ff", squat: "#5ee0b0", lunge: "#ffd37a",
+  leg_raise: "#c3a0ff", sit_up: "#ff9ca8", jumping_jack: "#ffad70", idle: "#a0b2cb"};
+
+function windowLabel(record) {
+  if (record.status !== "classified") return `#${record.window_id} ${pretty(record.status)}`;
+  const confidence = Number.isFinite(record.confidence) ? `${(record.confidence * 100).toFixed(0)}%` : "?%";
+  return `#${record.window_id} ${pretty(record.exercise)} · ${confidence}${record.confirmed ? " ✓" : ""}`;
+}
+
+function windowColor(record) {
+  return record.status === "classified" ? classColors[record.exercise] || "#66c9ff"
+    : record.status === "processing" || record.status === "queued" ? "#ffd37a" : "#a0b2cb";
+}
+
+function windowDetail(record) {
+  const intervals = record.model_intervals || [];
+  const summary = [windowLabel(record), `Run ${record.run_id}`,
+    `${((record.end_us - record.start_us) / 1e6).toFixed(2)}s window`,
+    record.status === "classified" ? record.confirmed ? "Confirmed exercise" : "Model prediction (not confirmed)" : "",
+    record.reason ? pretty(record.reason) : "",
+    intervals.length > 1 ? `Aggregate of ${intervals.length} model inputs` : ""];
+  if (intervals.length) summary.push("Model input relative to window start: " + intervals.map(
+    ([start, end]) => `${((start - record.start_us) / 1e6).toFixed(2)}–${((end - record.start_us) / 1e6).toFixed(2)}s`
+  ).join(", "));
+  for (const [id, node] of Object.entries(record.nodes || {})) {
+    summary.push(`Node ${id}: samples ${node.first_sequence}–${node.last_sequence}`);
+  }
+  return summary.filter(Boolean).join(" · ");
+}
+
+function matchingWindows(points, nodeId, end) {
+  if (!points.length) return [];
+  const first = points[0], last = points[points.length - 1];
+  return inferenceWindows.filter(record => {
+    const node = record.nodes?.[nodeId];
+    return node && node.session === last.session && node.generation === last.generation &&
+      node.first_sequence <= last.sequence && node.last_sequence >= first.sequence &&
+      record.end_us > end - seconds * 1e6 && record.start_us < end;
+  });
+}
+
+function activeWindowKey(records) {
+  const requested = hoveredWindow || selectedWindow;
+  if (requested) return requested;
+  return records.findLast(record => record.status === "processing")?.key ||
+    records.findLast(record => record.status === "classified")?.key || records.at(-1)?.key;
+}
+
+function receiveWindows(records) {
+  inferenceWindows = records;
+  if (!records.some(record => record.key === selectedWindow)) selectedWindow = null;
+  if (!records.some(record => record.key === hoveredWindow)) hoveredWindow = null;
+  const select = byId("inference-window");
+  const follow = document.createElement("option");
+  follow.value = ""; follow.textContent = "Follow latest inference";
+  select.replaceChildren(follow, ...records.slice().reverse().map(record => {
+    const option = document.createElement("option");
+    option.value = record.key; option.textContent = `Run ${record.run_id} · ${windowLabel(record)}`;
+    return option;
+  }));
+  select.value = selectedWindow || "";
+}
 
 function ensureNode(id) {
   id = String(id);
@@ -36,6 +99,27 @@ function ensureNode(id) {
   byId("device-connections").append(device);
   const entry = {card, device, points: [], epoch: null, latest: null, received: 0};
   charts.set(id, entry);
+  for (const canvas of card.querySelectorAll("canvas")) {
+    const hit = event => {
+      const rect = canvas.getBoundingClientRect();
+      return (canvas.inferenceHits || []).find(item =>
+        event.clientX - rect.left >= item.left && event.clientX - rect.left <= item.right &&
+        event.clientY - rect.top >= item.top && event.clientY - rect.top <= item.bottom);
+    };
+    canvas.addEventListener("pointermove", event => {
+      const item = hit(event);
+      hoveredWindow = item?.record.key || null;
+      canvas.style.cursor = item ? "pointer" : "default";
+      canvas.title = item ? windowDetail(item.record) : "";
+    });
+    canvas.addEventListener("pointerleave", () => { hoveredWindow = null; });
+    canvas.addEventListener("click", event => {
+      const item = hit(event);
+      if (!item) return;
+      selectedWindow = selectedWindow === item.record.key ? null : item.record.key;
+      byId("inference-window").value = selectedWindow || "";
+    });
+  }
   return entry;
 }
 
@@ -102,17 +186,78 @@ function renderState(batch) {
   }
 }
 
-function draw(canvas, points, offset, end) {
+function annotationLayout(ctx, records, start, end, left, right) {
+  const lanes = [];
+  return records.slice().sort((a, b) => a.start_us - b.start_us || a.window_id - b.window_id).map(record => {
+    const x = time => Math.max(left, Math.min(right, left + (time - start) / (end - start) * (right - left)));
+    const x0 = x(record.start_us), x1 = x(record.end_us);
+    const text = windowLabel(record);
+    const labelWidth = Math.min(right - left, ctx.measureText(text).width + 12);
+    const labelLeft = Math.max(left, Math.min(right - labelWidth, (x0 + x1 - labelWidth) / 2));
+    const occupiedLeft = Math.min(labelLeft, x0), occupiedRight = Math.max(labelLeft + labelWidth, x1);
+    let lane = lanes.findIndex(laneEnd => laneEnd + 6 <= occupiedLeft);
+    if (lane < 0) lane = lanes.length;
+    lanes[lane] = occupiedRight;
+    return {record, text, lane, x0, x1, labelLeft, labelWidth, x};
+  });
+}
+
+function drawAnnotations(ctx, canvas, layout, top, bottom, activeKey) {
+  canvas.inferenceHits = [];
+  for (const item of layout) {
+    const {record, text, lane, x0, x1, labelLeft, labelWidth, x} = item;
+    const color = windowColor(record), active = record.key === activeKey;
+    const y = 6 + lane * 26;
+    // Only data actually handed to inference receives a colored plot fill.
+    const sent = record.sent_for_inference;
+    if (sent) {
+      // Merge overlapping model inputs so an aggregate is shaded uniformly.
+      const merged = [];
+      for (const [start, end] of record.model_intervals || []) {
+        const previous = merged.at(-1);
+        if (previous && start <= previous[1]) previous[1] = Math.max(end, previous[1]);
+        else merged.push([start, end]);
+      }
+      ctx.fillStyle = color; ctx.globalAlpha = active ? 0.19 : 0.035;
+      for (const [start, end] of merged) ctx.fillRect(x(start), top, x(end) - x(start), bottom - top);
+      ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = color; ctx.lineWidth = active ? 1.5 : 1;
+    ctx.setLineDash(sent ? [] : [3, 3]);
+    ctx.globalAlpha = active ? 0.85 : 0.18;
+    ctx.beginPath(); ctx.moveTo(x0, y + 22); ctx.lineTo(x0, bottom);
+    ctx.moveTo(x1, y + 22); ctx.lineTo(x1, bottom); ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.moveTo(x0, y + 19); ctx.lineTo(x0, y + 22);
+    ctx.lineTo(x1, y + 22); ctx.lineTo(x1, y + 19); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#121e30"; ctx.fillRect(labelLeft, y, labelWidth, 18);
+    ctx.globalAlpha = active ? 0.3 : 0.12;
+    ctx.fillStyle = color; ctx.fillRect(labelLeft, y, labelWidth, 18); ctx.globalAlpha = 1;
+    ctx.fillStyle = color; ctx.textAlign = "left"; ctx.font = "11px system-ui";
+    ctx.fillText(text, labelLeft + 6, y + 13, Math.max(1, labelWidth - 12));
+    canvas.inferenceHits.push({record, left: labelLeft, right: labelLeft + labelWidth, top: y, bottom: y + 23});
+  }
+}
+
+function draw(canvas, points, offset, end, records, activeKey) {
   const ratio = window.devicePixelRatio || 1;
-  const width = canvas.clientWidth, height = canvas.clientHeight;
+  const width = canvas.clientWidth;
+  const ctx = canvas.getContext("2d");
+  const left = 48, right = Math.max(left + 1, width - 12);
+  const start = end - seconds * 1e6;
+  ctx.font = "11px system-ui";
+  const layout = annotationLayout(ctx, records, start, end, left, right);
+  const top = 12 + (layout.length ? (Math.max(...layout.map(item => item.lane)) + 1) * 26 : 0);
+  const height = top + 178, bottom = height - 25;
+  canvas.style.height = `${height}px`;
   if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
     canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
   }
-  const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  const left = 48, right = width - 12, top = 12, bottom = height - 25;
-  const start = end - seconds * 1e6;
+  drawAnnotations(ctx, canvas, layout, top, bottom, activeKey);
+  canvas.setAttribute("aria-label", `${offset ? "Angular velocity" : "Acceleration"} over capture time. ${records.map(windowLabel).join("; ")}`);
   const visible = points.filter(p => p.capture_us >= start && p.capture_us <= end);
   let low = Infinity, high = -Infinity;
   for (const point of visible) for (let axis = offset; axis < offset + 3; axis++) {
@@ -167,6 +312,13 @@ function refresh() {
   byId("connection").className = `badge ${online ? "live" : "offline"}`;
   let end = 0;
   for (const node of charts.values()) if (node.latest) end = Math.max(end, node.latest.capture_us);
+  const windowsByNode = new Map([...charts].map(([id, node]) => [id, matchingWindows(node.points, id, end)]));
+  const visibleKeys = new Set([...windowsByNode.values()].flat().map(record => record.key));
+  const visibleRecords = inferenceWindows.filter(record => visibleKeys.has(record.key));
+  const activeKey = activeWindowKey(visibleRecords);
+  const active = inferenceWindows.find(record => record.key === activeKey);
+  byId("inference-detail").textContent = active ? windowDetail(active) +
+    (visibleRecords.includes(active) ? "" : " · Outside the displayed samples") : "Waiting for inference windows.";
   for (const [id, node] of charts) {
     const info = nodeInfo[id] || {}, conn = (state.connections || {})[id];
     const link = info.connection;
@@ -218,11 +370,15 @@ function refresh() {
         span.textContent = `${["X", "Y", "Z"][i]}  ${num(latest?.axes[offset + i])}`;
       });
     }
-    node.card.querySelectorAll("canvas").forEach((canvas, i) => draw(canvas, node.points, i * 3, end));
+    const records = windowsByNode.get(id);
+    node.card.querySelectorAll("canvas").forEach((canvas, i) => draw(canvas, node.points, i * 3, end, records, activeKey));
   }
 }
 
 byId("range").addEventListener("change", event => { seconds = Number(event.target.value); });
+byId("inference-window").addEventListener("change", event => {
+  selectedWindow = event.target.value || null; hoveredWindow = null;
+});
 ensureNode(1); ensureNode(2);
 const stream = new EventSource("/events");
 stream.onmessage = event => {
@@ -231,6 +387,7 @@ stream.onmessage = event => {
   if (batch.run !== serverRun || batch.reset) {
     for (const node of charts.values()) { node.points = []; node.latest = null; node.epoch = null; }
     state = {}; nodeInfo = {}; eventVersion = -1; lostTotal = 0;
+    selectedWindow = null; hoveredWindow = null; receiveWindows([]);
   }
   serverRun = batch.run;
   byId("demo").hidden = !batch.demo;
@@ -238,6 +395,7 @@ stream.onmessage = event => {
   byId("loss").hidden = lostTotal === 0;
   byId("loss").textContent = `${lostTotal} display samples expired while this browser was behind. Sensor acquisition and inference continue independently.`;
   for (const sample of batch.samples) addSample(sample);
+  if (batch.inference_windows) receiveWindows(batch.inference_windows);
   renderState(batch);
 };
 stream.onerror = () => { lastMessage = 0; };

@@ -28,8 +28,9 @@ class LatestWindowQueue(queue.Queue):
     ``join()`` cannot under/over-count.
     """
 
-    def __init__(self):
+    def __init__(self, on_replace=None):
         super().__init__(maxsize=1)
+        self.on_replace = on_replace
 
     def put(self, item, block=True, timeout=None):
         """Store ``item``, evicting any pending window first.
@@ -48,6 +49,8 @@ class LatestWindowQueue(queue.Queue):
                 window = getattr(dropped[1], "window_id", None)
                 LOGGER.debug("INFERENCE_REPLACE run=%s window=%s reason=newer_window",
                              run, window)
+                if self.on_replace is not None:
+                    self.on_replace(*dropped)
             self.queue.append(item)
             self.unfinished_tasks += 1
             self.not_empty.notify()
@@ -77,7 +80,7 @@ class InferencePipeline:
         # queue_size is retained for call-site compatibility but no longer bounds
         # a backlog: the worker always classifies the freshest window. The queue
         # holds at most one pending window and a newer window replaces it.
-        self._queue = LatestWindowQueue()
+        self._queue = LatestWindowQueue(self._window_replaced)
         self._lock = threading.Lock()
         self._generation = 0
         self._active = False
@@ -87,6 +90,10 @@ class InferencePipeline:
         self._worker = threading.Thread(
             target=self._run, name="imu-inference", daemon=True)
         self._worker.start()
+
+    def _window_replaced(self, generation, window):
+        if self.telemetry is not None:
+            self.telemetry.inference_status(window, generation, "skipped", "newer_window")
 
     def _discard_queued_locked(self):
         while True:
@@ -100,6 +107,8 @@ class InferencePipeline:
         with self._lock:
             if self._stopping.is_set():
                 return
+            if self.telemetry is not None:
+                self.telemetry.cancel_inference("capture_reset")
             self._generation += 1
             self._active = True
             self._consecutive_idle = 0
@@ -113,6 +122,8 @@ class InferencePipeline:
 
     def stop_run(self, reason):
         with self._lock:
+            if self.telemetry is not None:
+                self.telemetry.cancel_inference(reason)
             self._active = False
             self._consecutive_idle = 0
             self._exercise_scores.clear()
@@ -131,6 +142,9 @@ class InferencePipeline:
             for window in windows:
                 if self.telemetry is not None:
                     self.telemetry.window(window)
+                    intervals = (self.inference.model_intervals(window)
+                                 if window.quality.accepted else [])
+                    self.telemetry.inference_window(window, self._generation, intervals)
                 if not window.quality.accepted:
                     continue
                 try:
@@ -139,6 +153,9 @@ class InferencePipeline:
                     # dead code in case the queue implementation changes.
                     self._queue.put_nowait((self._generation, window))
                 except queue.Full:
+                    if self.telemetry is not None:
+                        self.telemetry.inference_status(
+                            window, self._generation, "skipped", "queue_full")
                     LOGGER.warning("INFERENCE_DROP run=%d window=%d reason=queue_full",
                                    window.run_id, window.window_id)
             return windows
@@ -161,7 +178,8 @@ class InferencePipeline:
             self.publisher.set_capture(None)
             self.publisher.publish_classification(result, None)
             if self.telemetry is not None:
-                self.telemetry.prediction(result, confirmed=True)
+                self.telemetry.prediction(result, confirmed=True, generation=generation)
+                self.telemetry.cancel_inference("idle_pause")
             return True
 
     @staticmethod
@@ -175,11 +193,15 @@ class InferencePipeline:
                 generation, window = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
+            inference_complete = False
             try:
                 with self._lock:
                     if not self._active or generation != self._generation:
                         continue
+                    if self.telemetry is not None:
+                        self.telemetry.inference_status(window, generation, "processing")
                 result = self.inference.infer_window(window)
+                inference_complete = True
                 with self._lock:
                     if not self._active or generation != self._generation:
                         LOGGER.info("INFERENCE_DISCARDED run=%d window=%d reason=capture_reset",
@@ -192,7 +214,7 @@ class InferencePipeline:
                         result.end_us, result.class_id, result.exercise,
                         result.confidence, result.model_window_count)
                     if self.telemetry is not None:
-                        self.telemetry.prediction(result)
+                        self.telemetry.prediction(result, generation=generation)
                     confident = self._confident(result)
                     candidate = (result.exercise if confident and
                                  result.exercise != "idle" else None)
@@ -228,13 +250,18 @@ class InferencePipeline:
                     if idle_handler is None:
                         self.publisher.publish_classification(result, generation)
                         if self.telemetry is not None:
-                            self.telemetry.prediction(result, confirmed=True)
+                            self.telemetry.prediction(result, confirmed=True, generation=generation)
                 # Capture control takes coordinator -> pipeline locks. Calling
                 # it under our lock would deadlock against stop_run/start_run.
                 # The handler must revalidate generation under that lock order.
                 if idle_handler is not None:
                     idle_handler(result, generation)
             except Exception:
+                with self._lock:
+                    if (not inference_complete and self.telemetry is not None and self._active and
+                            generation == self._generation):
+                        self.telemetry.inference_status(
+                            window, generation, "failed", "inference_error")
                 LOGGER.exception("INFERENCE_FAILED run=%d window=%d",
                                  window.run_id, window.window_id)
             finally:
