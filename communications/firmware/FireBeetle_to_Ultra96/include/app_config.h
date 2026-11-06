@@ -48,6 +48,11 @@
 #define APP_IDLE_RESUME_INTEGRATION 0
 #endif
 
+/* Opt-in live-only START_FLUSH joins; enabled only in the new profiles. */
+#ifndef APP_ONE_NODE
+#define APP_ONE_NODE 0
+#endif
+
 /* Sampling measurements are enabled only by the dedicated diagnostic builds. */
 #ifndef APP_SAMPLING_DIAGNOSTICS
 #define APP_SAMPLING_DIAGNOSTICS 0

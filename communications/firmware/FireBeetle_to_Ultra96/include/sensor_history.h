@@ -41,6 +41,9 @@ bool physical_feeder_begin(physical_feeder_t *feeder,
                            uint64_t history_start_us,
                            uint64_t t0_us);
 void physical_feeder_stop(physical_feeder_t *feeder);
+bool physical_feeder_begin_live(physical_feeder_t *feeder,
+    const physical_history_t *history, uint32_t command_sequence,
+    uint32_t trigger_sequence, uint64_t now_us);
 bool physical_feeder_next(physical_feeder_t *feeder,
                           const physical_history_t *history,
                           protocol_physical_sample_t *sample);

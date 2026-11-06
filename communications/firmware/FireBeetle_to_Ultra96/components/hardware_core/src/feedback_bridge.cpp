@@ -12,6 +12,14 @@
 #define APP_FEEDBACK_DIAGNOSTICS 0
 #endif
 
+#ifndef APP_ONE_NODE
+#define APP_ONE_NODE 0
+#endif
+
+#if APP_ONE_NODE
+#include "esp_timer.h"
+#endif
+
 namespace {
 FeedbackController controller;
 bool (*fallInjector)(void) = nullptr;
@@ -47,6 +55,10 @@ esp_err_t output(int pin) {
 extern "C" esp_err_t feedback_bridge_begin(uint8_t node_id) {
   if (node_id != 1 && node_id != 2) return ESP_ERR_INVALID_ARG;
   controller.begin(node_id);
+#if APP_ONE_NODE
+  controller.enableConnectionFeedback(
+      static_cast<uint32_t>(static_cast<uint64_t>(esp_timer_get_time()) / 1000U));
+#endif
 #if APP_FEEDBACK_DIAGNOSTICS
   diagnostic = FeedbackDiagnostic{};
 #endif
@@ -86,6 +98,11 @@ extern "C" bool feedback_bridge_trigger(feedback_action_t action, uint32_t now_m
 
 extern "C" void feedback_bridge_reset_session(void) {
   controller.resetSession();
+  drive();
+}
+
+extern "C" void feedback_bridge_set_server_connected(bool connected, uint32_t now_ms) {
+  controller.setServerConnected(connected, now_ms);
   drive();
 }
 

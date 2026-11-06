@@ -76,6 +76,23 @@ void physical_feeder_stop(physical_feeder_t *feeder)
     memset(feeder, 0, sizeof(*feeder));
 }
 
+bool physical_feeder_begin_live(physical_feeder_t *feeder,
+    const physical_history_t *history, uint32_t command_sequence,
+    uint32_t trigger_sequence, uint64_t now_us)
+{
+    if (feeder == NULL || history == NULL || history->count == 0 || feeder->active)
+        return false;
+    const protocol_physical_sample_t *latest = at(history, history->count - 1U);
+    if (now_us < latest->timestamp_us) return false;
+    memset(feeder, 0, sizeof(*feeder));
+    feeder->active = true;
+    feeder->command_sequence = command_sequence;
+    feeder->trigger_sequence = trigger_sequence;
+    feeder->next_sequence = latest->sequence + 1U;
+    feeder->history_start_us = feeder->t0_us = now_us;
+    return true;
+}
+
 bool physical_feeder_next(physical_feeder_t *feeder,
                           const physical_history_t *history,
                           protocol_physical_sample_t *sample)

@@ -10,6 +10,13 @@ The active sensor topology is two direct ESP32 producers named Node 1 and
 Node 2. References to Hub 3, Hub 6, or leaf forwarding in older phase records
 describe the superseded assessment topology rather than current setup steps.
 
+## Independent node startup
+
+The new `node1_one_node` and `node2_one_node` firmware profiles support either
+node starting alone and a partner joining later. Both servers now use this
+behavior by default; no mode flag is needed. See
+[setup, behavior, AI contract, and validation](ONE_NODE_MODE.md).
+
 ## Start the sensor server and retain logs
 
 Stage 3 adds phone-owned rep feedback over the same WSS connection. Deploy the
@@ -25,9 +32,12 @@ for schemas, delivery receipts, reconnect behavior, and complete test commands.
 
 ## Integrated activity and rep outputs
 
-Both ESP LEDs now indicate the shared streaming state: steadily ON only after
-both successful START/START_FLUSH acknowledgements, OFF while connected/armed
-but waiting for movement, and OFF on AI idle pause, manual STOP or a stopped run.
+In the new node profiles, each ESP LED blinks slowly while connecting and gives
+three fast blinks after a valid Ultra96 HELLO_ACK. It then indicates that node's
+streaming state: steadily ON after its successful START_FLUSH acknowledgement
+and activity feedback, OFF while connected/armed but waiting for movement, and
+OFF on AI idle pause, manual STOP or a stopped run. A connection burst finishes
+before showing the streaming/idle state; connection loss resumes slow blinking.
 The existing AI idle threshold and stop/ACK/rearm capture workflow are retained.
 Idle is silent. Rep and ready LED flashes and the idle double beep are removed.
 
@@ -97,16 +107,14 @@ Start it with the defaults:
 python server.py
 ```
 
-The physical path continuously captures on both nodes. After HELLO, the server
-synchronizes both clocks, schedules one shared `ARM` generation, and waits for
-both acknowledgements. Each ESP resets its generic detector at the common arm
-boundary without clearing IMU history. Only then does the server accept an
-`ACTIVITY_TRIGGER` from either node. It maps the reported peak into the Ultra96
-clock and sends one
-`START_FLUSH` to each node. Both commands must receive `CONTROL_ACK` within
-three seconds. The server then opens its assembler at three seconds before the
-common peak. A timeout sends STOP to both and requires a manual `start` to
-re-arm trigger handling. The terminal also accepts `start` and `stop`.
+Each connected node continuously captures locally. After HELLO, the server
+synchronizes and arms each node independently without waiting for its partner.
+A valid `ACTIVITY_TRIGGER` from either armed node is mapped into the Ultra96
+clock and starts the ready producers. The first successful `START_FLUSH` ACK
+opens the assembler at three seconds before the mapped peak. Command timeouts
+isolate the affected node while another usable stream continues. A late node
+synchronizes and joins live on the existing timeline without another peak.
+The terminal also accepts `start` and `stop`; manual STOP persists across joins.
 
 Stage 5 local fall reporting adds `device_events.py`, required beside either
 updated server (or on its Python import path). Hip detects falls locally and
@@ -242,6 +250,7 @@ The server options are:
 | `--sample-rate-hz` | `100` | Expected sampling rate used for window quality checks. |
 | `--window-seconds` | `3.0` | Duration of each assembled window. |
 | `--hop-seconds` | `1.0` | Time between consecutive window starts. |
+| `--node-wait-ms` | `250` | Capture-time grace period for a lagging partner before using available data. |
 
 `--sample-rate-hz` changes only the expected sample count used for window
 quality checks and the server's sample-interval diagnostics; it does not
@@ -267,10 +276,14 @@ against the expected timestamp grid. The summary reports `dropped=` and
 `dropped_sequences=`. More than two extras, conflicting duplicate contents, or
 a sequence gap mixed with unique extras rejects the window. `server.py` remains
 a window/logging adapter; `server_new.py` sends accepted windows to the AI
-inference pipeline. The checked-in `server_AI.py` uses the same assembler and
-quality settings; its model/runtime dependencies are supplied separately.
+inference pipeline. The checked-in `server_AI.py` uses the available-node
+assembler and inference worker; its model/runtime dependencies are supplied
+separately. Its missing-sample default remains 4%, compared with 3% in
+`server.py`; pass `--max-missing-fraction 0.03` to use the same limit in both.
 
-Both servers accept `--max-missing-fraction 0.03`. There is no separate
+Both servers accept `--max-missing-fraction 0.03`. Missing producers are omitted
+from AI input rather than zero-filled; each included producer must satisfy the
+window quality policy. There is no separate
 elapsed-time gap rejection rule: a long internal or edge gap alone does not
 reject an otherwise valid window. Invalid real timestamp order still reports
 `reason=invalid_timestamps`. Startup `WINDOW_CONFIG` reports the effective

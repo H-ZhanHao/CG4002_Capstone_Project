@@ -8,6 +8,8 @@ communications/ultra96/server_new.py
 communications/ultra96/test_server_new.py
 communications/firmware/FireBeetle_to_Ultra96/test/
 communications/ultra96/test*y
+!communications/ultra96/test_dynamic_capture.py
+!communications/ultra96/test_dynamic_inference.py
 communications/ultra96/stage4_fixtures/inference_pipeline.py
 communications/unity/tests/
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/

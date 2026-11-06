@@ -33,9 +33,9 @@ except ImportError:
     from .visualizer_protocol import build_message, serialize_message
 
 try:
-    from window_assembler_updated import DecodedImuSample, WindowAssembler, WindowConfig
+    from window_assembler import DecodedImuSample, WindowAssembler, WindowConfig
 except ImportError:
-    from .window_assembler_updated import DecodedImuSample, WindowAssembler, WindowConfig
+    from .window_assembler import DecodedImuSample, WindowAssembler, WindowConfig
 
 
 try:
@@ -1182,11 +1182,12 @@ class NodeControlConnection:
             self.begin_sync(now_us)
 
 
-class CaptureCoordinator:
-    """Coordinate scheduled legacy capture or trigger-driven physical capture."""
+class CaptureCoordinatorBase:
+    """Shared capture state, STOP, feedback, and operator/idle controls."""
 
     def __init__(self, required_nodes=(1, 2), auto_start=True,
-                 window_assembler=None, physical_mode=False):
+                 window_assembler=None, physical_mode=True):
+        # Supported identities, not a startup quorum. Either node is sufficient.
         self.required_nodes = frozenset(required_nodes)
         self._connections = {}
         self._lock = threading.RLock()
@@ -1199,18 +1200,11 @@ class CaptureCoordinator:
         self._pending_stop_acks = {}
         self.arm_pending = False
         self._pending_arm_acks = {}
-        self._arm_ack_deadline_us = None
-        self._cancelled_arm_sequence = None
         self._arm_generation = 0
         self._arm_ready = False
-        self._start_ack_deadline_us = None
-        self._cancelled_start_sequence = None
-        self._pending_start_us = None
         self.desired_running = auto_start
         self.window_assembler = window_assembler
         self.physical_mode = physical_mode
-        self._accepted_trigger = None
-        self._announced_sync_sessions = None
         # Physical capture can be armed without streaming.  A non-None value
         # rejects peaks captured before the most recent manual START or idle
         # pause, preventing queued trigger frames from reopening an old run.
@@ -1226,346 +1220,9 @@ class CaptureCoordinator:
         for connection in self._connections.values():
             connection.cancel_arm_sync()
 
-    def register(self, connection):
-        with self._lock:
-            previous = self._connections.get(connection.node_id)
-            if (self.run_active or self.start_pending or self.arm_pending or
-                    self._arm_ready):
-                self._stop_locked("session changed")
-            self._connections[connection.node_id] = connection
-            self.feedback_delivery.register(connection)
-            self._announced_sync_sessions = None
-        if previous is not None and previous is not connection:
-            try:
-                previous.client.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-    def unregister(self, connection):
-        with self._lock:
-            if self._connections.get(connection.node_id) is not connection:
-                return
-            if (self.run_active or self.start_pending or self.arm_pending or
-                    self._arm_ready):
-                self._stop_locked(f"Node {connection.node_id} disconnected")
-            self.feedback_delivery.unregister(connection)
-            del self._connections[connection.node_id]
-            connection.cancel_arm_sync()
-            self._announced_sync_sessions = None
-            self._pending_start_acks.pop(connection.node_id, None)
-            self._pending_stop_acks.pop(connection.node_id, None)
-            self._pending_arm_acks.pop(connection.node_id, None)
-
-    def mapping_updated(self, connection):
-        with self._lock:
-            if self._connections.get(connection.node_id) is not connection:
-                return
-            if self.physical_mode:
-                if (set(self._connections) == self.required_nodes and
-                        all(item.mapping is not None
-                            for item in self._connections.values())):
-                    sessions = tuple(
-                        (node_id, self._connections[node_id].session_id)
-                        for node_id in sorted(self.required_nodes))
-                    if sessions != self._announced_sync_sessions:
-                        self._announced_sync_sessions = sessions
-                        LOGGER.info(
-                            "BOTH_NODES_SYNCED nodes=%s sessions=%s "
-                            "arming_activity_detection",
-                            sorted(self.required_nodes), dict(sessions))
-                    if (self.desired_running and not self.run_active and
-                            not self.start_pending and not self.arm_pending and
-                            not self._arm_ready):
-                        self._arm_locked("both nodes synchronized")
-            else:
-                self._maybe_start_locked()
-
-    def activity_triggered(self, connection, header, trigger):
-        """Map one authenticated peak and start one two-node historical flush."""
-        with self._lock:
-            if self._connections.get(connection.node_id) is not connection:
-                return False
-            if not self.desired_running:
-                return False
-            if not self._arm_ready or self.arm_pending:
-                return False
-            # STOP is asynchronous.  Do not let a trigger race the command and
-            # reopen streaming before every node confirms that its old feeder
-            # has stopped.
-            if self._pending_stop_acks:
-                return False
-            identity = (connection.node_id, connection.session_id, header[7])
-            contents = (trigger[0], trigger[1], trigger[2], header[8])
-            if self._accepted_trigger is not None:
-                old_identity, old_contents = self._accepted_trigger
-                if identity == old_identity:
-                    if contents != old_contents:
-                        raise ProtocolError(
-                            ERROR_INVALID_SEQUENCE,
-                            MESSAGE_TYPE_ACTIVITY_TRIGGER,
-                            "ACTIVITY_TRIGGER Sequence reused with different contents",
-                        )
-                    return False
-                if self.run_active or self.start_pending:
-                    return False
-            if trigger[0] != connection.boot_id or trigger[1] == 0:
-                raise ProtocolError(
-                    ERROR_INVALID_FRAME, MESSAGE_TYPE_ACTIVITY_TRIGGER,
-                    "ACTIVITY_TRIGGER has stale boot or arm identity",
-                )
-            if trigger[1] != self._arm_generation:
-                log_hub(
-                    logging.INFO, connection.node_id,
-                    f"ACTIVITY_TRIGGER_IGNORED node={connection.node_id} "
-                    f"reason=stale_arm_generation received={trigger[1]} "
-                    f"expected={self._arm_generation}")
-                return False
-            if set(self._connections) != self.required_nodes:
-                return False
-            now_us = time.monotonic_ns() // 1000
-            mappings = {
-                node_id: item.get_mapping(now_us)
-                for node_id, item in self._connections.items()
-            }
-            unusable_nodes = []
-            mapping_ages_ms = {}
-            for node_id, mapping in mappings.items():
-                if mapping is None:
-                    unusable_nodes.append(node_id)
-                    mapping_ages_ms[node_id] = None
-                    continue
-                age_us = max(0, now_us - mapping.synchronized_at_us)
-                mapping_ages_ms[node_id] = age_us // 1000
-                if age_us > CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US:
-                    unusable_nodes.append(node_id)
-            if unusable_nodes:
-                self._arm_ready = False
-                self._armed_after_us = None
-                for node_id in unusable_nodes:
-                    self._connections[node_id].request_arm_sync(
-                        "activity trigger mapping expired", now_us)
-                LOGGER.warning(
-                    "ACTIVITY_TRIGGER_IGNORED reason=mapping_holdover_expired "
-                    "nodes=%s mapping_ages_ms=%s max_holdover_ms=%d "
-                    "rearming_after_sync",
-                    sorted(unusable_nodes), mapping_ages_ms,
-                    CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US // 1000)
-                return False
-            source_mapping = mappings[connection.node_id]
-            coordinator_t0_us = (
-                trigger[2] - source_mapping.node_minus_coordinator_us
-            )
-            if (self._armed_after_us is not None and
-                    coordinator_t0_us <= self._armed_after_us):
-                log_hub(
-                    logging.INFO, connection.node_id,
-                    f"ACTIVITY_TRIGGER_IGNORED node={connection.node_id} "
-                    f"reason=before_arm_boundary peak_us={coordinator_t0_us} "
-                    f"armed_after_us={self._armed_after_us}",
-                )
-                return False
-            sequence = self._next_sequence()
-            self.start_pending = True
-            self._pending_start_us = coordinator_t0_us - PHYSICAL_HISTORY_DURATION_US
-            self._pending_start_acks = {
-                node_id: sequence for node_id in self._connections
-            }
-            self._start_ack_deadline_us = now_us + int(
-                CONTROL_ACK_TIMEOUT_SECONDS * 1_000_000)
-            self._accepted_trigger = (identity, contents)
-            self.idle_paused = False
-            self._arm_ready = False
-            connection.last_arm_generation = trigger[1]
-            for node_id in sorted(self._connections):
-                item = self._connections[node_id]
-                mapping = mappings[node_id]
-                payload = struct.pack(
-                    "!QqIB3xI", coordinator_t0_us,
-                    mapping.node_minus_coordinator_us,
-                    PHYSICAL_HISTORY_DURATION_US,
-                    connection.node_id, header[7],
-                )
-                frame = build_header(
-                    MESSAGE_TYPE_START_FLUSH, node_id=0,
-                    payload_length=START_FLUSH_PAYLOAD_SIZE,
-                    session_id=item.session_id, sequence=sequence,
-                ) + payload
-                capture_generation = item.begin_physical_capture()
-                item.send(frame)
-                log_hub(
-                    logging.INFO, node_id,
-                    f"START_FLUSH_SENT node={node_id} session={item.session_id} "
-                    f"sequence={sequence} trigger_node={connection.node_id} "
-                    f"trigger_sequence={header[7]} "
-                    f"capture_generation={capture_generation} "
-                    f"coordinator_t0_us={coordinator_t0_us}",
-                )
-            return True
-
-    def _arm_locked(self, reason):
-        """Schedule one shared, acknowledged trigger-arm generation."""
-        if not self.physical_mode:
-            LOGGER.info("ARM_DEFERRED reason=physical_mode_disabled request=%r",
-                        reason)
-            return False
-        if not self.desired_running:
-            LOGGER.info("ARM_DEFERRED reason=running_not_requested request=%r",
-                        reason)
-            return False
-        if self.run_active:
-            LOGGER.info("ARM_DEFERRED reason=already_running request=%r", reason)
-            return False
-        if self.start_pending:
-            LOGGER.info("ARM_DEFERRED reason=start_pending request=%r", reason)
-            return False
-        if self.arm_pending:
-            LOGGER.info("ARM_ALREADY_PENDING request=%r", reason)
-            return False
-        if self._arm_ready:
-            LOGGER.info(
-                "ARM_ALREADY_READY arm_generation=%d waiting_for_activity_trigger "
-                "request=%r", self._arm_generation, reason)
-            return False
-        if self._pending_stop_acks:
-            LOGGER.info(
-                "ARM_DEFERRED reason=waiting_for_stop_ack nodes=%s request=%r",
-                sorted(self._pending_stop_acks), reason)
-            return False
-        connected_nodes = set(self._connections)
-        if connected_nodes != self.required_nodes:
-            LOGGER.info(
-                "ARM_DEFERRED reason=waiting_for_nodes missing_nodes=%s "
-                "connected_nodes=%s request=%r",
-                sorted(self.required_nodes - connected_nodes),
-                sorted(connected_nodes), reason)
-            return False
-        now_us = time.monotonic_ns() // 1000
-        mappings = {
-            node_id: item.get_mapping(now_us)
-            for node_id, item in self._connections.items()
-        }
-        holdover_nodes = []
-        unusable_nodes = []
-        mapping_ages_ms = {}
-        for node_id, mapping in mappings.items():
-            if mapping is None:
-                unusable_nodes.append(node_id)
-                mapping_ages_ms[node_id] = None
-                continue
-            age_us = max(0, now_us - mapping.synchronized_at_us)
-            mapping_ages_ms[node_id] = age_us // 1000
-            if age_us > CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US:
-                unusable_nodes.append(node_id)
-            elif age_us > CLOCK_MAPPING_MAX_AGE_US:
-                holdover_nodes.append(node_id)
-        refresh_nodes = sorted(set(holdover_nodes + unusable_nodes))
-        for node_id in refresh_nodes:
-            self._connections[node_id].request_arm_sync(
-                "ARM mapping holdover refresh", now_us)
-        if unusable_nodes:
-            LOGGER.info(
-                "ARM_DEFERRED reason=missing_or_expired_mapping nodes=%s "
-                "mapping_ages_ms=%s max_holdover_ms=%d request=%r",
-                sorted(unusable_nodes), mapping_ages_ms,
-                CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US // 1000, reason)
-            return False
-        if holdover_nodes:
-            LOGGER.warning(
-                "ARM_USING_MAPPING_HOLDOVER nodes=%s mapping_ages_ms=%s "
-                "fresh_age_ms=%d max_holdover_ms=%d "
-                "background_refresh=true request=%r",
-                sorted(holdover_nodes), mapping_ages_ms,
-                CLOCK_MAPPING_MAX_AGE_US // 1000,
-                CLOCK_MAPPING_ARM_HOLDOVER_MAX_AGE_US // 1000, reason)
-        else:
-            self._cancel_arm_sync_locked()
-        sequence = self._next_sequence()
-        self._arm_generation = (self._arm_generation + 1) & 0xFFFFFFFF
-        if self._arm_generation == 0:
-            self._arm_generation = 1
-        arm_at_us = now_us + ARM_LEAD_US
-        self.arm_pending = True
-        self._arm_ready = False
-        self._armed_after_us = arm_at_us
-        self._accepted_trigger = None
-        self._pending_arm_acks = {
-            node_id: sequence for node_id in self._connections
-        }
-        self._arm_ack_deadline_us = now_us + int(
-            CONTROL_ACK_TIMEOUT_SECONDS * 1_000_000)
-        self._cancelled_arm_sequence = None
-        for node_id in sorted(self._connections):
-            item = self._connections[node_id]
-            mapping = mappings[node_id]
-            payload = struct.pack(
-                "!QqI", arm_at_us, mapping.node_minus_coordinator_us,
-                self._arm_generation)
-            frame = build_header(
-                MESSAGE_TYPE_ARM, node_id=0,
-                payload_length=ARM_PAYLOAD_SIZE,
-                session_id=item.session_id, sequence=sequence,
-            ) + payload
-            item.send(frame)
-            log_hub(
-                logging.INFO, node_id,
-                f"ARM_SENT node={node_id} session={item.session_id} "
-                f"sequence={sequence} arm_generation={self._arm_generation} "
-                f"coordinator_arm_us={arm_at_us} "
-                f"local_arm_us={arm_at_us + mapping.node_minus_coordinator_us} "
-                f"reason={reason}")
-        return True
-
-    def _maybe_start_locked(self):
-        if self.physical_mode:
-            return False
-        if (not self.desired_running or self.run_active or self.start_pending or
-                set(self._connections) != self.required_nodes):
-            return False
-        now_us = time.monotonic_ns() // 1000
-        mappings = {
-            node_id: item.get_mapping(now_us)
-            for node_id, item in self._connections.items()
-        }
-        if any(mapping is None for mapping in mappings.values()):
-            return False
-        start_us = now_us + SCHEDULED_START_LEAD_US
-        sequence = self._next_sequence()
-        self.start_pending = True
-        self._pending_start_us = start_us
-        self._pending_start_acks = {
-            node_id: sequence for node_id in self._connections
-        }
-        self._start_ack_deadline_us = now_us + int(
-            CONTROL_ACK_TIMEOUT_SECONDS * 1_000_000)
-        self._cancelled_start_sequence = None
-        for node_id in sorted(self._connections):
-            item = self._connections[node_id]
-            mapping = mappings[node_id]
-            payload = struct.pack(
-                "!Qq", start_us, mapping.node_minus_coordinator_us)
-            frame = build_header(
-                MESSAGE_TYPE_START,
-                node_id=0,
-                payload_length=START_PAYLOAD_SIZE,
-                session_id=item.session_id,
-                sequence=sequence,
-            ) + payload
-            item.send(frame)
-            log_hub(logging.INFO, node_id,
-                f"START_SENT node={node_id} session={item.session_id} "
-                f"sequence={sequence} coordinator_start_us={start_us} "
-                f"local_start_us={start_us + mapping.node_minus_coordinator_us}")
-        return True
-
     def _stop_locked(self, reason):
         was_active = self.run_active
         self._cancel_arm_sync_locked()
-        if self._pending_arm_acks:
-            self._cancelled_arm_sequence = next(
-                iter(self._pending_arm_acks.values()))
-        if self._pending_start_acks:
-            self._cancelled_start_sequence = next(
-                iter(self._pending_start_acks.values()))
         sequence = self._next_sequence()
         self._pending_stop_acks = {
             node_id: sequence for node_id in self._connections
@@ -1589,194 +1246,14 @@ class CaptureCoordinator:
         self.start_pending = False
         self.arm_pending = False
         self._arm_ready = False
-        self._arm_ack_deadline_us = None
         self._pending_arm_acks.clear()
         self._armed_after_us = None
-        self._start_ack_deadline_us = None
         self._pending_start_acks.clear()
-        self._pending_start_us = None
-        self._accepted_trigger = None
         if self.window_assembler is not None:
             self.window_assembler.stop_run(reason)
 
         if was_active:
             self._publish_activity(False)
-
-    def _publish_activity(self, active):
-        """Output delivery failure must never block capture controls."""
-        try:
-            self.request_feedback(
-                FEEDBACK_ACTIVITY_ACTIVE if active else FEEDBACK_ACTIVITY_IDLE)
-        except Exception:
-            LOGGER.exception("ACTIVITY_FEEDBACK_FAILED active=%s", active)
-
-    def tick(self, now_us=None):
-        """Advance feedback delivery and fail group ARM/START ACK deadlines."""
-        self.feedback_delivery.tick(now_us)
-        if now_us is None:
-            now_us = time.monotonic_ns() // 1000
-        with self._lock:
-            if (self.arm_pending and self._arm_ack_deadline_us is not None and
-                    now_us >= self._arm_ack_deadline_us):
-                missing_nodes = sorted(self._pending_arm_acks)
-                sequence = next(iter(self._pending_arm_acks.values()))
-                self.desired_running = False
-                self.idle_paused = False
-                LOGGER.error(
-                    "ARM_ACK_TIMEOUT sequence=%d missing_nodes=%s "
-                    "timeout_seconds=%.1f; automatic restart disabled until "
-                    "manual START", sequence, missing_nodes,
-                    CONTROL_ACK_TIMEOUT_SECONDS)
-                self._stop_locked("ARM acknowledgement timeout")
-                return True
-            if (not self.start_pending or self._start_ack_deadline_us is None or
-                    now_us < self._start_ack_deadline_us):
-                return False
-            missing_nodes = sorted(self._pending_start_acks)
-            sequence = next(iter(self._pending_start_acks.values()))
-            self.desired_running = False
-            self.idle_paused = False
-            self._armed_after_us = None
-            LOGGER.error(
-                "START_ACK_TIMEOUT sequence=%d missing_nodes=%s timeout_seconds=%.1f; "
-                "automatic restart disabled until manual START",
-                sequence, missing_nodes, CONTROL_ACK_TIMEOUT_SECONDS)
-            self._stop_locked("START acknowledgement timeout")
-            return True
-
-    def control_acknowledged(
-        self, connection, command_type, command_sequence, result,
-        effective_local_us,
-    ):
-        """Apply one authenticated ESP result to the pending group command."""
-        with self._lock:
-            if self._connections.get(connection.node_id) is not connection:
-                return
-            if command_type == MESSAGE_TYPE_FEEDBACK_COMMAND:
-                try:
-                    self.feedback_delivery.acknowledge(
-                        connection, command_sequence, result, effective_local_us)
-                except ValueError as error:
-                    raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
-                                        str(error)) from error
-                return
-            if command_type == MESSAGE_TYPE_ARM:
-                expected = self._pending_arm_acks.get(connection.node_id)
-                if expected != command_sequence:
-                    if (expected is None and not self.arm_pending and
-                            command_sequence == self._cancelled_arm_sequence):
-                        log_hub(
-                            logging.WARNING, connection.node_id,
-                            f"LATE_ARM_ACK_IGNORED node={connection.node_id} "
-                            f"sequence={command_sequence}")
-                        return
-                    raise ProtocolError(
-                        ERROR_INVALID_SEQUENCE, MESSAGE_TYPE_CONTROL_ACK,
-                        "CONTROL_ACK does not match the pending ARM")
-                if result != CONTROL_RESULT_APPLIED:
-                    log_hub(
-                        logging.ERROR, connection.node_id,
-                        f"ARM_REJECTED node={connection.node_id} "
-                        f"sequence={command_sequence} result={result}")
-                    self.desired_running = False
-                    self.idle_paused = False
-                    self._stop_locked("ARM rejected")
-                    return
-                del self._pending_arm_acks[connection.node_id]
-                log_hub(
-                    logging.INFO, connection.node_id,
-                    f"ARM_ACK node={connection.node_id} "
-                    f"sequence={command_sequence} "
-                    f"local_arm_us={effective_local_us}")
-                if not self._pending_arm_acks:
-                    self.arm_pending = False
-                    self._arm_ack_deadline_us = None
-                    now_us = time.monotonic_ns() // 1000
-                    if now_us >= self._armed_after_us:
-                        LOGGER.warning(
-                            "ARM_CONFIRMATION_LATE sequence=%d; rescheduling",
-                            command_sequence)
-                        self._arm_locked("late ARM confirmation retry")
-                    else:
-                        self._arm_ready = True
-                        LOGGER.info(
-                            "ARM_CONFIRMED nodes=%s sequence=%d "
-                            "arm_generation=%d coordinator_arm_us=%d "
-                            "waiting_for_activity_trigger",
-                            sorted(self.required_nodes), command_sequence,
-                            self._arm_generation, self._armed_after_us)
-                return
-
-            if command_type in (MESSAGE_TYPE_START, MESSAGE_TYPE_START_FLUSH):
-                expected = self._pending_start_acks.get(connection.node_id)
-                if expected != command_sequence:
-                    if (expected is None and not self.start_pending and
-                            command_sequence == self._cancelled_start_sequence):
-                        log_hub(logging.WARNING, connection.node_id,
-                            f"LATE_START_ACK_IGNORED node={connection.node_id} "
-                            f"sequence={command_sequence}")
-                        return
-                    raise ProtocolError(
-                        ERROR_INVALID_SEQUENCE, MESSAGE_TYPE_CONTROL_ACK,
-                        "CONTROL_ACK does not match the pending START/START_FLUSH",
-                    )
-                if result != CONTROL_RESULT_APPLIED:
-                    log_hub(logging.ERROR, connection.node_id,
-                    f"START_REJECTED node={connection.node_id} "
-                        f"sequence={command_sequence} result={result}")
-                    self.desired_running = False
-                    self.idle_paused = False
-                    self._armed_after_us = None
-                    self._stop_locked("START rejected")
-                    return
-                del self._pending_start_acks[connection.node_id]
-                log_hub(logging.INFO, connection.node_id,
-                    f"START_ACK node={connection.node_id} "
-                    f"sequence={command_sequence} local_start_us={effective_local_us}")
-                if not self._pending_start_acks:
-                    self.start_pending = False
-                    self._start_ack_deadline_us = None
-                    self.run_active = True
-                    LOGGER.info("START_CONFIRMED nodes=%s sequence=%d",
-                        sorted(self.required_nodes), command_sequence)
-                    if self.window_assembler is not None:
-                        self.window_assembler.start_run(
-                            command_sequence, self._pending_start_us)
-                    self._pending_start_us = None
-                    self._publish_activity(True)
-                return
-
-            if command_type == MESSAGE_TYPE_STOP:
-                expected = self._pending_stop_acks.get(connection.node_id)
-                if expected != command_sequence:
-                    raise ProtocolError(
-                        ERROR_INVALID_SEQUENCE, MESSAGE_TYPE_CONTROL_ACK,
-                        "CONTROL_ACK does not match the pending STOP",
-                    )
-                if result not in (
-                    CONTROL_RESULT_APPLIED,
-                    CONTROL_RESULT_ALREADY_STOPPED,
-                ):
-                    raise ProtocolError(
-                        ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
-                        f"STOP acknowledgement result {result} is invalid",
-                    )
-                del self._pending_stop_acks[connection.node_id]
-                log_hub(logging.INFO, connection.node_id,
-                    f"STOP_ACK node={connection.node_id} "
-                    f"sequence={command_sequence} result={result} "
-                    f"local_stop_us={effective_local_us}")
-                if (not self._pending_stop_acks and self.physical_mode and
-                        self.desired_running):
-                    self._arm_locked(
-                        "AI idle pause" if self.idle_paused else
-                        "manual START after STOP")
-                return
-
-            raise ProtocolError(
-                ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
-                f"Unsupported acknowledged command 0x{command_type:02X}",
-            )
 
     def receive_device_event(self, frame, connection):
         """Accept fall reports independently of acquisition/idle state."""
@@ -1809,17 +1286,11 @@ class CaptureCoordinator:
             self._stop_locked(reason)
 
     def request_start(self):
-        """Arm physical triggers or START legacy capture after a manual stop."""
+        """Arm each ready node after a manual stop."""
         with self._lock:
             self.desired_running = True
             self.idle_paused = False
-            if self.physical_mode:
-                started = self._arm_locked("manual START")
-            else:
-                started = self._maybe_start_locked()
-        if not started and not self.physical_mode:
-            LOGGER.info("START_REQUESTED waiting_for_both_synchronized_nodes")
-        return started
+            return self._arm_locked("manual START")
 
     def manual_stop(self):
         """STOP both nodes and disarm triggers until a manual START."""
@@ -1875,6 +1346,14 @@ class CaptureCoordinator:
             LOGGER.info(
                 "IDLE_PAUSE_REQUESTED waiting_for_stop_ack_then_ARM")
             return True
+
+
+try:
+    from dynamic_capture import coordinator_class
+except ImportError:
+    from .dynamic_capture import coordinator_class
+
+CaptureCoordinator = coordinator_class(sys.modules[__name__])
 
 
 def run_control_console(coordinator):
@@ -2763,7 +2242,10 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
                                 if control_connection is not None else 0),
                         )
                         if sample is not None and window_assembler is not None:
-                            for window in window_assembler.submit(sample):
+                            windows = (coordinator.submit_sample(control_connection, sample)
+                                       if hasattr(coordinator, "submit_sample")
+                                       else window_assembler.submit(sample))
+                            for window in windows:
                                 log_window_summary(window)
                     elif message_type == MESSAGE_TYPE_DATA:
                         sample = process_data(
@@ -2776,7 +2258,10 @@ def handle_client(client, address, visualizer_publisher=None, coordinator=None,
                             sample_rate_hz,
                         )
                         if sample is not None and window_assembler is not None:
-                            for window in window_assembler.submit(sample):
+                            windows = (coordinator.submit_sample(control_connection, sample)
+                                       if hasattr(coordinator, "submit_sample")
+                                       else window_assembler.submit(sample))
+                            for window in windows:
                                 log_window_summary(window)
                     elif message_type == MESSAGE_TYPE_HEARTBEAT:
                         process_heartbeat(
@@ -2951,6 +2436,10 @@ def parse_args(argv=None):
     )
     parser.add_argument("--rep-control-port", type=int, default=9101,
                         help="loopback AR rep control port (default: 9101)")
+    parser.add_argument("--node-wait-ms", type=nonnegative_integer, default=250,
+                        help="capture-time wait for a lagging partner (default: 250 ms)")
+    parser.add_argument("--inference-adapter", default=None,
+                        help="optional AI module:factory implementing infer_window")
     args = parser.parse_args(argv)
     if not 1 <= args.rep_control_port <= 65535:
         parser.error("--rep-control-port must be in 1..65535")
@@ -2958,9 +2447,6 @@ def parse_args(argv=None):
         parser.error("--max-missing-fraction must be finite and in [0, 1)")
     if args.hop_seconds > args.window_seconds:
         parser.error("--hop-seconds must not exceed --window-seconds")
-    from config import WINDOW_SECONDS
-    if args.window_seconds < WINDOW_SECONDS:
-        parser.error(f"--window-seconds must be at least {WINDOW_SECONDS:g} for inference")
     return args
 
 
@@ -2968,7 +2454,6 @@ def main(argv=None):
     """Serve hub connections with one shared run-wide visualizer publisher."""
     args = parse_args(argv)
     from inference_pipeline import InferencePipeline
-    from dpu_runtime import initialize_dpu_overlay
     configure_logging(
         args.log_file,
         args.log_max_mb * 1024 * 1024,
@@ -2983,6 +2468,7 @@ def main(argv=None):
         window_us=round(args.window_seconds * 1_000_000),
         hop_us=round(args.hop_seconds * 1_000_000),
         max_missing_fraction=args.max_missing_fraction,
+        node_wait_us=args.node_wait_ms * 1000,
     )
     window_assembler = WindowAssembler(window_config)
     LOGGER.info(
@@ -2992,14 +2478,24 @@ def main(argv=None):
         window_config.hop_us / 1_000_000, window_config.expected_per_node,
         window_config.missing_limit)
 
-    # Initialize hardware before creating VART runners; retain the overlay.
-    dpu_overlay = initialize_dpu_overlay(args.dpu_overlay)
-    from late_fusion_vart import LateFusionInference
-    LOGGER.info("Loading wrist, thigh, and fusion VART models")
-    inference = LateFusionInference(
-        wrist_xmodel=args.wrist_xmodel, thigh_xmodel=args.thigh_xmodel,
-        fusion_xmodel=args.fusion_xmodel, sample_rate_hz=args.sample_rate_hz,
-    )
+    if args.inference_adapter:
+        import importlib
+        module_name, separator, factory_name = args.inference_adapter.partition(":")
+        if not separator or not module_name or not factory_name:
+            raise ValueError("--inference-adapter must be module:factory")
+        inference = getattr(importlib.import_module(module_name), factory_name)(args)
+        if not callable(getattr(inference, "infer_window", None)):
+            raise TypeError("AI adapter must implement infer_window")
+    else:
+        # Initialize hardware before creating VART runners; retain the overlay.
+        from dpu_runtime import initialize_dpu_overlay
+        dpu_overlay = initialize_dpu_overlay(args.dpu_overlay)
+        from late_fusion_vart import LateFusionInference
+        LOGGER.info("Loading wrist, thigh, and fusion VART models")
+        inference = LateFusionInference(
+            wrist_xmodel=args.wrist_xmodel, thigh_xmodel=args.thigh_xmodel,
+            fusion_xmodel=args.fusion_xmodel, sample_rate_hz=args.sample_rate_hz,
+        )
     visualizer_publisher = VisualizerEventPublisher()
     inference_pipeline = InferencePipeline(
         window_assembler, inference, visualizer_publisher,

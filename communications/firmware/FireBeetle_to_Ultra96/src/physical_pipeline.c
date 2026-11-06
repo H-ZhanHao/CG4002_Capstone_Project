@@ -153,6 +153,13 @@ static void handle_command(const pipeline_command_t *command,
     command_result_t reply = { .effective_local_us = (uint64_t)esp_timer_get_time() };
     if (command->type == COMMAND_BEGIN) {
         feedback_bridge_reset_session();
+#if APP_ONE_NODE
+        /* tcp_client accepts HELLO_ACK before application_begin_session queues
+         * this command. ARM/SYNC and Wi-Fi/TLS alone do not confirm connection. */
+        feedback_bridge_set_server_connected(true,
+            (uint32_t)(reply.effective_local_us / 1000U));
+        ESP_LOGI(TAG, "SERVER_CONNECTED node=%u LED=3_fast_blinks", configured_node_id);
+#endif
         feedback_delivery_begin(&feedback_delivery, command->session_id, configured_node_id);
         *session_id = command->session_id;
         *boot_id = command->boot_id;
@@ -187,6 +194,11 @@ static void handle_command(const pipeline_command_t *command,
 #endif
         if (command->type == COMMAND_END) {
             feedback_bridge_reset_session();
+#if APP_ONE_NODE
+            feedback_bridge_set_server_connected(false,
+                (uint32_t)(reply.effective_local_us / 1000U));
+            ESP_LOGI(TAG, "SERVER_DISCONNECTED node=%u LED=slow_blink", configured_node_id);
+#endif
             feedback_delivery_begin(&feedback_delivery, 0, configured_node_id);
             *session_id = 0;
             *boot_id = 0;
@@ -215,6 +227,19 @@ static void handle_command(const pipeline_command_t *command,
             reply.result = (feeder->command_sequence == command->command_sequence &&
                 feeder->trigger_sequence == command->flush.trigger_sequence)
                 ? PROTOCOL_CONTROL_RESULT_DUPLICATE : PROTOCOL_CONTROL_RESULT_BUSY;
+#if APP_ONE_NODE
+        } else if (command->flush.history_duration_us == 0 &&
+                   physical_feeder_begin_live(feeder, history,
+                       command->command_sequence, command->flush.trigger_sequence,
+                       (uint64_t)esp_timer_get_time())) {
+            /* Join from the next acquisition, never from the original peak.
+             * No previous-boot history or three-second warmup is required. */
+            reply.effective_local_us = feeder->t0_us;
+            *trigger_armed = false;
+            *scheduled_arm_us = 0;
+            xQueueReset(trigger_queue);
+            reply.result = PROTOCOL_CONTROL_RESULT_APPLIED;
+#endif
         } else if (local_t0 <= 0 || command->flush.history_duration_us == 0 ||
                    command->flush.history_duration_us >= (uint64_t)local_t0 ||
                    !physical_feeder_begin(feeder, history,
