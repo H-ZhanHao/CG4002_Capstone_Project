@@ -532,6 +532,31 @@ BENCH AND WEARABLE CHECKS
   and WRIST RESET cancels pending feedback without changing HIP's own count.
 - Host tests validate logic; real AR/comms delivery requires a live integration test.
 
+FALL CONFIRMATION
+
+HIP fall detection remains active in standby, including while WRIST counts
+jumping jacks. After acceleration below 4 m/s2 for at least 100 ms and an
+impact above 25 m/s2 within the next 1000 ms, the detector waits 500 ms.
+It alerts only if the final 200 ms of sampled evidence has both:
+- At least 45 degrees of posture change from the pre-event gravity direction.
+- Acceleration within 2 m/s2 of gravity and gyro magnitude at most 0.8 rad/s.
+The posture check uses current and filtered acceleration directions. Gravity
+is learned near rest, with about 200 ms of quiet readings required on startup
+or after a sensor gap above 100 ms/invalid data. Candidates are discarded on
+those gaps or invalid samples. Detection uses XYZ acceleration and gyro; it
+does not assume that any fixed sensor axis is upright.
+
+Confirmation is nonblocking. The alarm begins on the first qualifying sample
+at or after 500 ms from impact (normally within one 10 ms sample interval),
+then sounds for the existing 3 seconds. An unconfirmed candidate is cleared
+at that deadline; it does not wait longer for the wearer to settle.
+
+These are initial tuning values in FallConfig, not validated fall guarantees.
+Upright jump landings are rejected, but upright falls, falls without freefall,
+or falls with continued movement can be missed. Record worn-HIP jumping jacks,
+normal movements and safely simulated falls to measure false alarms and misses
+before adjusting the constants. Host tests use synthetic sensor traces only.
+
 BUILD / HOST VERIFICATION
 
 PlatformIO terminal, from the repository root:
@@ -553,6 +578,10 @@ Local detector fixed preset tests (bench-only):
 Legacy calibration/profile detector regression tests (bench-only):
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/tests/stubs -Ihardware/node hardware/tests/exercise_profiles_test.cpp hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp -o .build/exercise_profiles_test.exe
   .build/exercise_profiles_test.exe
+
+Fall confirmation tests (synthetic jumps/falls, timing, posture and sensor gaps):
+  g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/fall_detector_test.cpp hardware/node/FallDetector.cpp -o .build/fall_detector_test.exe
+  .build/fall_detector_test.exe
 
 Transport-independent node switching/LED tests:
   g++ -std=c++11 -Wall -Wextra -Werror -Ihardware/node hardware/tests/node_session_test.cpp hardware/node/NodeSession.cpp -o .build/node_session_test.exe

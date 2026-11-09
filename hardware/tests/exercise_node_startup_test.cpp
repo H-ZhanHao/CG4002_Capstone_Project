@@ -25,6 +25,7 @@ static std::deque<LinkPacket> incoming;
 static bool peerOnline = true;
 static bool sensorHealthy = true;
 static float accelZ = 9.81f, gyroX = 0.0f;
+static bool hipLyingDown = false;
 static unsigned int readyEvents = 0, repEvents = 0, sampleReads = 0;
 static unsigned int radioPackets = 0;
 static int ledLevel = 0, buzzerLevel = 0;
@@ -87,6 +88,10 @@ bool Mpu6050::read(float acceleration[3], float gyro[3]) {
   if (!sensorHealthy) return false;
   acceleration[0] = acceleration[1] = gyro[1] = gyro[2] = 0;
   acceleration[2] = accelZ;
+  if (hipLyingDown) {
+    acceleration[0] = accelZ;
+    acceleration[2] = 0.0f;
+  }
   gyro[0] = gyroX;
   return true;
 }
@@ -386,6 +391,12 @@ static void buzzerTests() {
   step(6, 0.0f); // Qualifying freefall.
   sendReps(current, 1); // Still in freefall, rep beep is active at impact.
   step(1, 30.0f);
+  assert(!data().fallAlert); // Impact alone is no longer a confirmed fall.
+  hipLyingDown = true;
+  step(24);
+  assert(!data().fallAlert);
+  step(1); // Confirm at 500 ms, after a sustained change in posture.
+  hipLyingDown = false;
   const auto fallAt = now;
   assert(buzzerLevel);
   output.clear();
@@ -437,7 +448,21 @@ static void remoteBuzzerTests() {
   assert(!buzzerLevel);
   step(20); assert(!buzzerLevel); // Remote reset cancels queued beeps too.
 
+  // The HIP still monitors falls in standby while WRIST is active, but an
+  // upright jump landing must not produce a fall alarm.
   step(6, 0.0f); step(1, 30.0f);
+  for (int i = 0; i < 25; ++i) {
+    step(1);
+    assert(!buzzerLevel && !data().fallAlert);
+  }
+
+  step(6, 0.0f); step(1, 30.0f);
+  assert(!data().fallAlert);
+  hipLyingDown = true;
+  step(24);
+  assert(!data().fallAlert);
+  step(1);
+  hipLyingDown = false;
   const auto fallAt = now;
   assert(buzzerLevel && data().fallAlert);
   peer.showRepFeedback(now); step(1);

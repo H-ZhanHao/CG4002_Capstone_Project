@@ -731,13 +731,7 @@ void update() {
     usbConsole.printf("[MPU6050 read blocked %lu ms]\n", now - readStarted);
   }
 
-  const float rawMagnitude = sqrtf(
-    acceleration[0] * acceleration[0] +
-    acceleration[1] * acceleration[1] +
-    acceleration[2] * acceleration[2]
-  );
-
-  if (nodeRole == HIP) fallDetector.update(rawMagnitude, now);
+  if (nodeRole == HIP) fallDetector.update(acceleration, gyro, now);
 
   if (nodeRole == HIP && fallDetector.consumeFallEvent()) {
     buzzerFeedback.fall((uint32_t)now);
