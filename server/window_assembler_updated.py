@@ -1,4 +1,4 @@
-"""Thread-safe capture-time sliding windows for the two sensor nodes.
+"""Thread-safe capture-time windows using either or both sensor nodes.
 
 Windows carry only REAL samples. The assembler never fabricates zero-valued
 padding samples and never discards real samples to hit an exact count. Each
@@ -9,12 +9,14 @@ tools do.
 
 The resampler only sees a sample count, not timestamps, so a genuine dropout
 inside a window slightly compresses time after the hole. To bound that, a
-window is accepted only when each node is missing at most ``missing_limit``
-samples (``max_missing_fraction`` of the expected count, 3% by default).
+an included node must be missing at most ``missing_limit`` samples
+(``max_missing_fraction`` of the expected count, 3% by default). Unavailable or
+unusable nodes are omitted. One usable node is sufficient for an accepted
+window; a known lagging partner receives only a bounded capture-time grace.
 """
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import math
 import threading
@@ -33,10 +35,13 @@ class WindowConfig:
     max_missing_per_node: int | None = None
     max_extra_per_node: int = 2
     max_missing_fraction: float = 0.03
+    node_wait_us: int = 250_000
 
     def __post_init__(self):
         if self.sample_rate_hz <= 0 or self.window_us <= 0 or self.hop_us <= 0:
             raise ValueError("sample rate, window, and hop must be positive")
+        if self.node_wait_us < 0:
+            raise ValueError("node wait must not be negative")
         if self.hop_us > self.window_us:
             raise ValueError("hop must not exceed window length")
         if not self.required_nodes or len(set(self.required_nodes)) != len(
@@ -95,6 +100,8 @@ class WindowQuality:
     max_index_skew_us: int | None
     accepted: bool
     rejection_reason: str | None
+    available_nodes: tuple[int, ...] = ()
+    node_rejection_reasons: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,7 @@ class WindowAssembler:
         self._next_window_id = 0
         self._buffers = {node_id: deque() for node_id in config.required_nodes}
         self._latest = {node_id: None for node_id in config.required_nodes}
+        self._active_nodes = set()
 
     def start_run(self, run_id: int, start_us: int) -> None:
         with self._lock:
@@ -151,6 +159,7 @@ class WindowAssembler:
                 return []
 
             self._buffers[sample.node_id].append(sample)
+            self._active_nodes.add(sample.node_id)
             self._latest[sample.node_id] = sample.coordinator_timestamp_us
             completed = []
             while self._window_ready_locked():
@@ -158,10 +167,23 @@ class WindowAssembler:
             return completed
 
     def _clear_locked(self):
+        self._active_nodes.clear()
         for samples in self._buffers.values():
             samples.clear()
         for node_id in self._latest:
             self._latest[node_id] = None
+
+    def node_joined(self, node_id):
+        """Give an acknowledged/starting producer a bounded first-sample grace."""
+        with self._lock:
+            self._active_nodes.add(node_id)
+
+    def node_lost(self, node_id):
+        """Discard obsolete-session samples without resetting the window origin."""
+        with self._lock:
+            self._buffers[node_id].clear()
+            self._latest[node_id] = None
+            self._active_nodes.discard(node_id)
 
     def _window_bounds_locked(self):
         start = self._start_us + self._next_window_id * self.config.hop_us
@@ -169,8 +191,11 @@ class WindowAssembler:
 
     def _window_ready_locked(self):
         _start, end = self._window_bounds_locked()
-        return all(timestamp is not None and timestamp >= end
-                   for timestamp in self._latest.values())
+        timestamps = [t for t in self._latest.values() if t is not None]
+        return bool(timestamps) and (
+            all(self._latest[node] is not None and self._latest[node] >= end
+                for node in self._active_nodes) or
+            max(timestamps) >= end + self.config.node_wait_us)
 
     @staticmethod
     def _missing_sequences(samples):
@@ -279,13 +304,15 @@ class WindowAssembler:
                 missing[node_id], has_gap)
             real_samples[node_id] = unique
 
-        accepted = all(reason is None for reason in invalid_reasons.values())
+        available = tuple(node for node, reason in invalid_reasons.items()
+                          if reason is None)
+        accepted = bool(available)
         rejection_reason = None
         if not accepted:
             rejection_reason = next(
                 reason for reason in invalid_reasons.values() if reason is not None)
 
-        sample_lists = list(selected.values())
+        sample_lists = [real_samples[node] for node in available]
         if (len(sample_lists) == 2 and len(sample_lists[0]) > 0 and
                 len(sample_lists[0]) == len(sample_lists[1])):
             max_skew = max(abs(left.coordinator_timestamp_us -
@@ -303,13 +330,17 @@ class WindowAssembler:
             max_index_skew_us=max_skew,
             accepted=accepted,
             rejection_reason=rejection_reason,
+            available_nodes=available,
+            node_rejection_reasons={node: reason for node, reason in invalid_reasons.items()
+                                    if reason is not None},
         )
         window = AssembledWindow(
             run_id=self._run_id,
             window_id=self._next_window_id,
             start_us=start,
             end_us=end,
-            samples_by_node=real_samples if accepted else selected,
+            samples_by_node=({node: real_samples[node] for node in available}
+                             if accepted else selected),
             quality=quality,
         )
         self._next_window_id += 1
