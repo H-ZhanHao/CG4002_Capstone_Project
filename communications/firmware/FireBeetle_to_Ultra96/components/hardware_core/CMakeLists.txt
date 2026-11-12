@@ -1,17 +1,21 @@
 idf_component_register(
     SRCS
+        "../../../../../hardware/node/BuzzerFeedback.cpp"
         "../../../../../hardware/node/ContinuousCounter.cpp"
         "../../../../../hardware/node/NodeSession.cpp"
-        "../../../../../hardware/node/NodePlatform.cpp"
         "../../../../../hardware/node/RepCounter.cpp"
-        "src/GenericPeakDetector.cpp"
-        "src/Mpu6050.cpp"
-        "src/SensorHistory.cpp"
-        "src/bluetooth_bridge.cpp"
+        "../../../../../hardware/node/FallDetector.cpp"
+        "../../../../../hardware/node/GenericPeakDetector.cpp"
+        "../../../../../hardware/node/Mpu6050.cpp"
+        "src/node_platform_adapter.cpp"
+        "src/FeedbackController.cpp"
+        "src/FeedbackDiagnostic.cpp"
+        "src/feedback_bridge.cpp"
         "src/exercise_bridge.cpp"
         "src/hardware_bridge.cpp"
+        "src/fall_bridge.cpp"
     INCLUDE_DIRS "include" "../../../../../hardware/node"
-    REQUIRES bt esp_driver_gpio esp_driver_i2c esp_driver_uart esp_timer freertos
+    REQUIRES esp_driver_uart esp_driver_gpio esp_driver_i2c esp_timer freertos
 )
 
 

@@ -1,0 +1,253 @@
+COMMS REP COUNTS (hw-update)
+
+Firmware counts exclusively from AR totals forwarded by comms. Sensor movement
+never increments reps. LocalRepCounting.cpp preserves the old filtering and
+RepCounter/ContinuousCounter integration for bench tests; all three source files
+are excluded from hardware/CMakeLists.txt. There is no runtime local-count mode.
+Sensor sampling, history, generic peak detection, window preparation and HIP fall
+monitoring continue. Generic PEAK messages trigger windows, not rep increments.
+
+CONNECTION AND COMMANDS
+
+Comms connects to ExerciseHip or ExerciseWrist via Bluetooth Classic SPP. USB
+accepts the identical commands for bench testing. Send ASCII lines ending in LF
+(\n); CRLF is also accepted. Route results to the active board's connection.
+This standalone hardware receiver needs a matching sender/adapter in the separate
+communications firmware. Its transport is not changed by this document.
+
+1. Power both boards with the updated firmware and their configured peer MACs.
+2. On the desired board select its exercise, then send ACTIVATE.
+3. Wait for successful activation; the other board must acknowledge standby.
+4. Send REPS (or STATUS) and read the HW-issued ticket, for example:
+     [REPS | HIP | boot=12345 | session=2 | total=0 | WAIT_COMMS]
+5. Comms sends the AR cumulative total using that exact boot/session:
+     REPS:12345:2:5
+6. Both the USB monitor and connected Bluetooth client receive:
+     [REPS ACK | HIP | boot=12345 | session=2 | total=5 | ACCEPTED]
+   Periodic telemetry shows:
+     ... | COUNTING | Reps: 5 | Rep source: COMMS
+
+The numbers above are examples: always read the actual ticket. Use the USB
+monitor at 115200 baud with Newline selected, or monitor-serial.ps1 -Port COMx.
+STATUS includes the latest total/ticket. REPS queries only that information.
+While active but awaiting the first result, telemetry shows WAIT COMMS | Reps: 0.
+An accepted zero is a valid first result and changes status to COUNTING.
+Standby telemetry hides reps (Reps: --); REPS/STATUS can still inspect the last
+stored total. A command acknowledgement is emitted even if sensor reads fail;
+periodic telemetry still depends on successful sensor sampling.
+
+MESSAGE CONTRACT
+
+  REPS:<boot>:<session>:<total>
+
+boot and session are unsigned decimal 32-bit HW-issued values. total is an
+unsigned decimal integer from 0 to 2147483647. Extra fields, negative values,
+non-digits, and values beyond uint32 are rejected as syntax errors. The command
+must fit the existing 127-character line limit. No JSON or binary decoder is
+provided. This is a new protocol; the comms teammate must implement its sender.
+
+The ticket is separate from STREAM coordinator/session IDs. Obtain it AFTER
+activation completes. Activation, RESET, a different exercise, or an actual mode
+change clears the total and issues a new session. Repeating ACTIVATE on an active
+board, selecting the same exercise/mode, or reconnecting Bluetooth preserves it.
+Boot creates a fresh random boot identifier. STANDBY or handover stops acceptance;
+reactivation issues a new session. A new set must use RESET and the new ticket.
+
+Comms must associate each in-flight AR result with the ticket of the set that
+produced it. Discard old inference results on reset/change; do not relabel an old
+result with the new ticket. The count message does not select an exercise or
+activate a board. PAUSE/CONTINUOUS remain mode metadata/sync controls and cannot
+enable local counting; changing mode still resets the set for compatibility.
+
+Results in REPS ACK:
+  ACCEPTED       Valid first result or increasing cumulative total; stored.
+  DUPLICATE      Same total as last accepted result; no extra count.
+  DECREASING     Lower total in the same session; ignored.
+  STALE_SESSION  boot/session does not match the current ticket; ignored.
+  INACTIVE       Board is standby, activating, or activation failed; ignored.
+  OUT_OF_RANGE   total is greater than 2147483647; ignored.
+
+ACK echoes the submitted ticket/total, even when rejected. REPS/STATUS returns
+the actual stored state. Invalid syntax returns ERROR: Use REPS... rather than
+an ACK. Retry the same total/ticket if an ACK is lost; retries are idempotent.
+There is no spontaneous retry from HW. A downward correction requires a new set
+(RESET), not a smaller value within the old session.
+
+COMMS USER ACTIVITY (FEEDBACK STEPS 1-3)
+
+User activity is independent of counting-board activation, selected exercise,
+rep counts and STREAM sessions. The LED is OFF for IDLE and steadily ON for
+ACTIVE, including on a standby counting board. Activity does not play rep beeps,
+gate incoming reps or send peer packets. Rep beeps are driven by accepted REPS
+increases, independently of ACTIVITY; sending ACTIVE alone never beeps.
+
+Query on either board over USB/Bluetooth (newline-terminated):
+  ACTIVITY
+  [ACTIVITY | HIP | boot=12345 | seq=0 | state=IDLE | source=DEFAULT]
+
+Send an update with the actual boot ID returned by that board:
+  ACTIVITY:12345:1:ACTIVE
+  [ACTIVITY ACK | HIP | boot=12345 | seq=1 | state=ACTIVE | ACCEPTED]
+  ACTIVITY:12345:2:IDLE
+  [ACTIVITY ACK | HIP | boot=12345 | seq=2 | state=IDLE | ACCEPTED]
+
+ACTIVITY and STATUS return the current state, boot ID, last accepted sequence,
+and source. State is IDLE with source=DEFAULT after boot until the first valid
+update; source=COMMS then identifies an explicit comms-supplied state. Status is
+also reported at boot and Bluetooth connection. Periodic rep telemetry retains
+its current format; use ACTIVITY/STATUS to inspect activity.
+
+The format is ACTIVITY:<boot>:<sequence>:IDLE|ACTIVE. Numeric fields are unsigned
+decimal uint32; sequence must be 1..4294967295 and strictly increase for each new
+update to this board, including updates that repeat the same state. Retransmit
+an identical boot/sequence/state if its ACK is lost. Lower sequence numbers are
+STALE_SEQUENCE; an identical retry is DUPLICATE; reusing the current sequence
+with a different state is SEQUENCE_CONFLICT. A wrong boot returns STALE_BOOT.
+Sequence zero returns INVALID_SEQUENCE. Invalid syntax/state text returns ERROR.
+The typed API also rejects unknown enum values with INVALID_STATE. Rejected
+updates leave state/sequence unchanged. ACK echoes the submitted update;
+ACTIVITY/STATUS returns the stored state.
+
+Sequence numbers do not wrap during a boot. Query after sender reconnect/restart
+and continue above the last accepted sequence. After uint32 exhaustion reboot
+and obtain a fresh boot ID. Use one authoritative activity sender per board;
+USB bench commands and Bluetooth share the same sequence/state.
+
+A rep RESET, exercise/mode change, ACTIVATE, STANDBY, activation failure, handover,
+or Bluetooth disconnect does not clear activity or its sequence. Only reboot
+resets it. This protocol is boot-scoped; it deliberately has no rep session
+field because activity persists across exercise/set changes. Activity messages
+are accepted on standby boards without requiring a peer or activating counting.
+There is no silence timeout or sensor-based idle detection: comms must explicitly
+send IDLE when the user becomes idle. A later ACTIVE means moving again, not
+necessarily performing a recognized exercise. Rep messages cannot change this.
+
+Send activity separately to each board using that board's own boot ID.
+Activity is not forwarded over ESP-NOW. Typed main-loop APIs:
+  ExerciseNode::activityStatus()
+  ExerciseNode::receiveActivity(boot, sequence, UserActivity::IDLE/ACTIVE)
+Never call the receive API from a transport callback; queue to the main loop.
+CommsActivityState.h/.cpp contains the state/ordering logic without GPIO or radio.
+
+FEEDBACK
+
+The runtime LED follows only the last accepted ACTIVITY state. It starts OFF
+(default IDLE). ACTIVATE, RESET, exercise/mode changes and rep updates no longer
+flash it. Legacy peer LED packets cannot override it. An ACTIVE state persists
+until comms sends IDLE, including during disconnects and failed sensor reads.
+The existing fatal sensor-startup error blink is retained as a wiring diagnostic.
+
+To control both LEDs, deliver ACTIVITY to both boards with their respective boot
+IDs and sequences. Counts themselves are not forwarded between boards; only
+WRIST rep-feedback events are forwarded to HIP for its buzzer.
+
+HIP REP BUZZER (FEEDBACK STEP 3)
+
+On HIP, each accepted REPS total increase produces one 100 ms beep on GPIO26.
+Zero, duplicate, decreasing, invalid, stale and inactive updates do not beep.
+A catch-up total such as 2 -> 5 produces one confirmation beep, not three replayed
+beeps. Comms should send each increment to get a beep for each rep. Rapid valid
+updates queue separate beeps with 100 ms silence between them. RESET, exercise/
+mode changes and counting deactivation cancel current/queued rep beeps.
+
+The existing HIP fall alarm has priority: it immediately replaces rep feedback
+with a 3-second alarm and discards queued beeps. Reps received during that alarm
+still update the total but do not queue sounds. Rep resets/deactivation cannot
+silence the alarm. Timers run without delays, including when sensor reads fail.
+WRIST does not drive a buzzer; its validated increases notify HIP over ESP-NOW.
+
+Tune REP_BEEP_MS and REP_GAP_MS in ExerciseConfig.h (FeedbackConfig).
+These configure timing, not electrical volume: output remains digital HIGH/LOW
+at the existing buzzer drive level. Physical sound/loudness needs a board check.
+
+Bench test on HIP after uploading:
+  ACTIVATE                  (wait for the peer acknowledgement)
+  REPS                      (obtain current boot/session)
+  REPS:<boot>:<session>:1    (one short beep)
+  REPS:<boot>:<session>:1    (duplicate, silent)
+  REPS:<boot>:<session>:2    (one short beep)
+Use the actual ticket, send newline-terminated commands, and start from a fresh
+session. Telemetry distinguishes REP BEEP from FALL ALERT; a 100 ms beep
+may fall between telemetry messages, so listen on the real board as well.
+
+WRIST-TO-HIP REP FEEDBACK (FEEDBACK STEP 4)
+
+Comms -> active WRIST REPS receiver -> ESP-NOW feedback -> standby HIP buzzer.
+Only an accepted count increase creates a REP event (one per increase, including
+catch-up totals). HIP's counter remains inactive and unchanged. HIP activity/LED
+state is unchanged. A HIP-owned exercise still beeps locally without forwarding.
+
+The existing 24-byte version-4 packet has two new kinds: REP_FEEDBACK (6) and
+REP_FEEDBACK_ACK (7). boot/targetBoot identify the sender/receiver boots, request
+identifies the WRIST activation handshake, sequence orders feedback within it,
+and mode is CLEAR (1) or REP (2). No total or sensor data is transmitted.
+The HIP accepts events only in standby from the WRIST handshake it acknowledged.
+Sequence is independent of legacy LED events and persists across rep resets.
+Duplicate/older events are acknowledged without replaying a beep; ACKs must match
+the pending event, peer boot, activation request, sequence and kind.
+
+WRIST holds at most 8 events, sends in order, and retries every 250 ms, up to
+5 attempts. Events expire 1.25 seconds after enqueue, including time spent waiting
+behind another event. Expired/full-queue events are dropped with a diagnostic;
+the accepted rep count is retained. This bounds outage traffic/backlog, not a
+guarantee that a beep is delivered. An ACK means feedback was handled, not that
+sound was measured; fall alarms intentionally suppress rep beeps.
+
+RESET, exercise/mode resets and STANDBY cancel pending WRIST feedback and send
+an ordered CLEAR to cancel HIP's current/queued rep beeps without silencing a
+fall alarm. Once CLEAR arrives, older events cannot play. An in-flight event can
+arrive before CLEAR; loss of CLEAR can leave already received beeps to finish.
+Handover cancels local feedback and invalidates the previous feedback context.
+After HIP reboots, WRIST can still count but cannot notify its new boot until a
+fresh handshake: send STANDBY then ACTIVATE on WRIST and obtain its new REPS ticket.
+Activity remains a direct comms message to each node.
+
+Upload the updated firmware to BOTH boards, then test on WRIST:
+  ACTIVATE                  (HIP acknowledges standby)
+  REPS                      (read WRIST boot/session)
+  REPS:<boot>:<session>:1    (HIP beeps once; WRIST displays 1)
+  REPS:<boot>:<session>:1    (duplicate; HIP stays silent)
+  REPS:<boot>:<session>:2    (HIP beeps once; WRIST displays 2)
+Check HIP still reports STANDBY and its own total is unchanged. Verify both LEDs
+continue following their separately supplied ACTIVITY states. Then verify reset,
+handover and fall-alarm priority on the physical boards.
+
+USB/Bluetooth diagnostics:
+  WRIST: [REP FEEDBACK | HIP acknowledged]
+  HIP:   [REP FEEDBACK | WRIST event received]
+  WRIST: [REP FEEDBACK | Unconfirmed/expired | Count retained] on an outage
+Older HIP firmware ignores the new event kinds; upgrade both boards before testing.
+
+CODE LOCATIONS
+
+  ExerciseNode.cpp: processCommand parses REPS, receiveRepCount applies it and
+    emits ACK, restartSession changes the ticket, makeTelemetry displays
+    the comms total. reportCommsReps prints the current ticket/state.
+  CommsRepCounter.h/.cpp: ticket, total, and validation state without hardware IO.
+  BuzzerFeedback.h/.cpp: nonblocking rep beep queue, silent gaps and fall priority.
+  NodeSession.h/.cpp: rep-feedback ordering, bounded queue, retries, ACKs and
+    activation/boot checks. ExerciseNode.cpp connects accepted events to the buzzer.
+  WirelessStreamer.cpp: existing USB/Bluetooth framing and comms telemetry text.
+  LocalRepCounting.h/.cpp: retained local counting orchestration, bench-only.
+  RepCounter.cpp / ContinuousCounter.cpp: retained local algorithms, bench-only.
+
+A future in-process comms adapter can call ExerciseNode::receiveRepCount from the
+same main loop as update(), using the current ticket. Never call it from a radio
+callback; queue messages first. Its validation/ACK matches the command.
+
+VALIDATION
+
+exercise_node_startup_test.cpp covers activity state/ordering across board
+activation, set changes, reboot/reconnect, sensor failures and both transports.
+It also covers both board roles, USB/Bluetooth rep input,
+duplicates, malformed/stale/out-of-range/decreasing results, reconnect, standby,
+activation failure, reset/exercise/mode/reboot changes, count/LED feedback, and
+movement not counting. Existing sensor/stream regression checks remain there.
+It also checks buzzer timing/rollover, queued pulses, session cancellation,
+duplicate/stale rejection, fall preemption and absence of WRIST buzzer writes.
+rep_feedback_test.cpp covers packet/ACK loss, duplicate delivery, ordering,
+remote cancellation, handover, reboot, queue/age bounds and timer rollover.
+The startup test covers actual WRIST command-to-radio forwarding and HIP standby
+buzzer behavior with sensor failures, fall priority and unchanged counts/LEDs.
+local_rep_counting_test.cpp checks the extracted local algorithms in isolation.
+Host tests cannot establish real Bluetooth/ESP-NOW delivery or AR accuracy.

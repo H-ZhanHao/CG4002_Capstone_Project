@@ -45,6 +45,23 @@ namespace CG4002.Visualizer
         private volatile string lastTlsValidationDetail = "TLS callback not reached";
         private float lastMessageRealtime;
         private bool hasMessage;
+        private PinnedWebSocketConnection activeSocket;
+        private CancellationToken connectionToken;
+        private readonly SemaphoreSlim repSendGate = new(1, 1);
+        private long repSequence;
+        private int queuedActions;
+        private long previousRepRun;
+        private string repExercise;
+        private int currentRepCount;
+        public long RepRunId { get; private set; }
+        public string RepSessionId { get; private set; }
+        public bool RepSessionReady { get; private set; }
+        public event Action<RepFeedbackResponse> RepFeedbackReceived;
+        private readonly FallReceiptTracker fallReceipts = new();
+        public FallEventMessage LatestFall { get; private set; }
+        public bool FallAlertVisible { get; private set; }
+        public event Action<FallEventMessage> FallReceived;
+        public void DismissFallAlert() => FallAlertVisible = false;
 
         public string Url { get; private set; } = DefaultUrl;
         public VisualizerConnectionState State { get; private set; } =
@@ -104,7 +121,10 @@ namespace CG4002.Visualizer
             // Drain cross-thread work before evaluating freshness so a newly
             // received packet cannot be marked stale in the same frame.
             while (mainThreadActions.TryDequeue(out Action action))
+            {
+                Interlocked.Decrement(ref queuedActions);
                 action();
+            }
 
             if (State == VisualizerConnectionState.Live && hasMessage &&
                 Time.realtimeSinceStartup - lastMessageRealtime > StaleAfterSeconds)
@@ -140,7 +160,14 @@ namespace CG4002.Visualizer
                         ValidateServerCertificate);
                     await socket.ConnectAsync(cancellationToken);
                     attempt = 0;
-                    await ReceiveLoopAsync(socket, cancellationToken);
+                    activeSocket = socket;
+                    connectionToken = cancellationToken;
+                    try { await ReceiveLoopAsync(socket, cancellationToken); }
+                    finally
+                    {
+                        activeSocket = null;
+                        QueueOnMainThread(() => RepSessionReady = false);
+                    }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -174,7 +201,7 @@ namespace CG4002.Visualizer
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                ProcessMessage(await socket.ReceiveTextAsync(cancellationToken));
+                ProcessMessage(await socket.ReceiveTextAsync(cancellationToken), socket);
             }
         }
 
@@ -182,8 +209,60 @@ namespace CG4002.Visualizer
         /// Validate one JSON update, then queue ordering and UI notification work
         /// for Unity's main thread.
         /// </summary>
-        private void ProcessMessage(string json)
+        private void ProcessMessage(string json, PinnedWebSocketConnection source)
         {
+            if (FallProtocol.TryParse(json, out FallEventMessage fall))
+            {
+                QueueOnMainThread(() =>
+                {
+                    if (activeSocket != source) return;
+                    // Bound memory without evicting identities and re-alerting old events.
+                    if (!fallReceipts.Accept(fall, out bool isNew))
+                    {
+                        Debug.LogWarning("Fall identity capacity exhausted; restart client");
+                        return;
+                    }
+                    if (isNew)
+                    {
+                        LatestFall = fall;
+                        FallAlertVisible = true;
+                        Debug.Log($"FALL_AR_RECEIVED boot={fall.BootId} event={fall.EventId}");
+                        try { FallReceived?.Invoke(fall); }
+                        catch (Exception error) { Debug.LogException(error); }
+                    }
+                    _ = SendFallAckAsync(source, fall);
+                });
+                return;
+            }
+            if (RepFeedbackProtocol.TryParse(json, out RepFeedbackResponse response))
+            {
+                QueueOnMainThread(() =>
+                {
+                    if (activeSocket != source) return;
+                    if (response.Type == "rep_welcome")
+                    {
+                        previousRepRun = RepRunId;
+                        RepRunId = response.RunId;
+                        RepSessionReady = false;
+                        if (RepSessionId != null)
+                        {
+                            if (previousRepRun != 0 && previousRepRun != RepRunId)
+                                RepSessionId = Guid.NewGuid().ToString("N");
+                            _ = SendRepRequestAsync(previousRepRun == RepRunId ? "rep_sync" : "rep_session_start");
+                        }
+                    }
+                    else if (response.RunId == RepRunId && response.SessionId == RepSessionId)
+                    {
+                        if (response.Status == "session_started" || response.Status == "synced")
+                        {
+                            if (response.RepIndex < currentRepCount) _ = SendRepRequestAsync("rep_sync");
+                            else RepSessionReady = true;
+                        }
+                    }
+                    RepFeedbackReceived?.Invoke(response);
+                });
+                return;
+            }
             // Malformed/unsupported packets are isolated from the connection; one
             // bad application message must not crash or disconnect the visualizer.
             if (!ExerciseUpdateProtocol.TryParse(json, out ExerciseUpdateMessage message, out string error))
@@ -192,7 +271,7 @@ namespace CG4002.Visualizer
                 return;
             }
 
-            mainThreadActions.Enqueue(() =>
+            QueueOnMainThread(() =>
             {
                 // Sequence numbers restart only when run_id changes. Duplicates or
                 // delayed packets from the current run must not roll the UI backward.
@@ -212,6 +291,90 @@ namespace CG4002.Visualizer
                     $"Run {message.RunId}, sequence {message.Sequence}");
                 UpdateReceived?.Invoke(message);
             });
+        }
+
+        /// <summary>
+        /// Explicit set/reset. Call on Unity main thread; no rep is counted here.
+        /// Waits for a busy rep send; returns false if disconnected or superseded.
+        /// </summary>
+        public Task<bool> BeginRepSession(string exercise, int baselineCount = 0)
+        {
+            string identity = Guid.NewGuid().ToString("N");
+            // Validate before changing local state; run 1/seq 0 are placeholders.
+            RepFeedbackProtocol.Build("rep_session_start", 1, 0, identity, baselineCount, exercise);
+            RepSessionId = identity;
+            repExercise = exercise;
+            currentRepCount = baselineCount;
+            RepSessionReady = false;
+            return SendRepRequestAsync("rep_session_start");
+        }
+
+        /// <summary>Synchronize without a feedback pulse, waiting for a busy rep send.</summary>
+        public Task<bool> SyncRepSession(int currentCount)
+        {
+            if (currentCount < currentRepCount || currentCount > 1000000000)
+                throw new ArgumentOutOfRangeException(nameof(currentCount));
+            currentRepCount = currentCount;
+            RepSessionReady = false;
+            return SendRepRequestAsync("rep_sync");
+        }
+
+        /// <summary>
+        /// AR supplies its cumulative count. Disconnected/busy sends are not queued;
+        /// return true means written to WSS, not applied on the boards. Listen for ACKs.
+        /// </summary>
+        public Task<bool> SendRepEvent(int repIndex)
+        {
+            if (RepSessionId == null || repIndex < currentRepCount || repIndex > 1000000000)
+                throw new ArgumentException("Start a rep session; use a new session to reset its count");
+            currentRepCount = repIndex;
+            return RepSessionReady ? SendRepRequestAsync("rep_event") : Task.FromResult(false);
+        }
+
+        private async Task SendFallAckAsync(PinnedWebSocketConnection source, FallEventMessage fall)
+        {
+            try
+            {
+                if (activeSocket == source)
+                    await source.SendTextAsync(FallProtocol.BuildAck(fall), connectionToken);
+            }
+            catch (Exception error) when (error is IOException || error is OperationCanceledException ||
+                                          error is ObjectDisposedException)
+            { Debug.LogWarning($"Fall ACK deferred until retry: {error.Message}"); }
+        }
+
+        private async Task<bool> SendRepRequestAsync(string type)
+        {
+            PinnedWebSocketConnection socket = activeSocket;
+            long runId = RepRunId;
+            string sessionId = RepSessionId;
+            CancellationToken token = connectionToken;
+            if (socket == null || runId == 0 || sessionId == null)
+                return false;
+            bool acquired = false;
+            try
+            {
+                // Control requests must survive a busy rep write; ordinary rep events
+                // retain their existing non-queued behavior.
+                if (type == "rep_session_start" || type == "rep_sync")
+                    await repSendGate.WaitAsync(token);
+                else if (!repSendGate.Wait(0))
+                    return false;
+                acquired = true;
+                // A reset, exercise change or reconnect may supersede a waiting request.
+                if (activeSocket != socket || RepRunId != runId || RepSessionId != sessionId)
+                    return false;
+                string json = RepFeedbackProtocol.Build(type, runId,
+                    Interlocked.Increment(ref repSequence), sessionId, currentRepCount, repExercise);
+                await socket.SendTextAsync(json, token);
+                return true;
+            }
+            catch (Exception error) when (error is IOException || error is OperationCanceledException ||
+                                          error is ObjectDisposedException)
+            {
+                return false;
+            }
+            finally { if (acquired) repSendGate.Release(); }
         }
 
         /// <summary>
@@ -302,10 +465,21 @@ namespace CG4002.Visualizer
             return difference == 0;
         }
 
+        private void QueueOnMainThread(Action action)
+        {
+            if (Interlocked.Increment(ref queuedActions) > 128)
+            {
+                Interlocked.Decrement(ref queuedActions);
+                activeSocket?.Dispose(); // Fail closed; reconnect and sync instead of growing a backlog.
+                return;
+            }
+            mainThreadActions.Enqueue(action);
+        }
+
         /// <summary>Queue a connection-state change for Unity's main thread.</summary>
         private void EnqueueState(VisualizerConnectionState state, string detail)
         {
-            mainThreadActions.Enqueue(() => SetState(state, detail));
+            QueueOnMainThread(() => SetState(state, detail));
         }
 
         /// <summary>Store, log, and publish a changed connection state.</summary>

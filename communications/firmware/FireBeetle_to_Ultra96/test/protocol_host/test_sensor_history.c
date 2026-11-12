@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+_Static_assert(PHYSICAL_SAMPLE_RATE_HZ == 100U, "physical capture must run at 100 Hz");
+_Static_assert(PHYSICAL_SAMPLE_PERIOD_US == 10000U, "100 Hz requires a 10 ms period");
+_Static_assert(PHYSICAL_HISTORY_CAPACITY == 701U, "seven seconds at 100 Hz is 701 inclusive samples");
+
 static protocol_physical_sample_t sample(uint32_t sequence, uint64_t timestamp_us)
 {
     protocol_physical_sample_t result = {
@@ -19,15 +23,15 @@ static void test_history_to_live_exactly_once(void)
     physical_history_t history;
     physical_feeder_t feeder = {0};
     physical_history_clear(&history);
-    for (uint32_t sequence = 0; sequence <= 300; ++sequence) {
+    for (uint32_t sequence = 0; sequence <= 600; ++sequence) {
         protocol_physical_sample_t value = sample(sequence,
             UINT64_C(1000000) + (uint64_t)sequence * PHYSICAL_SAMPLE_PERIOD_US);
         assert(physical_history_push(&history, &value));
     }
     const uint64_t t0 = UINT64_C(7000000);
     assert(physical_feeder_begin(&feeder, &history, 9, 7,
-        t0 - UINT64_C(5000000), t0));
-    uint32_t expected = 50;
+        t0 - UINT64_C(3000000), t0));
+    uint32_t expected = 300;
     protocol_physical_sample_t value;
     while (physical_feeder_next(&feeder, &history, &value)) {
         assert(value.sequence == expected++);
@@ -35,8 +39,8 @@ static void test_history_to_live_exactly_once(void)
         assert(!physical_feeder_next(&feeder, &history, &value));
         assert(physical_feeder_mark_sent(&feeder, expected - 1));
     }
-    assert(expected == 301);
-    for (uint32_t sequence = 301; sequence < 306; ++sequence) {
+    assert(expected == 601);
+    for (uint32_t sequence = 601; sequence < 606; ++sequence) {
         protocol_physical_sample_t live = sample(sequence,
             UINT64_C(1000000) + (uint64_t)sequence * PHYSICAL_SAMPLE_PERIOD_US);
         assert(physical_history_push(&history, &live));
@@ -53,21 +57,21 @@ static void test_overwrite_reports_gap(void)
     physical_history_t history;
     physical_feeder_t feeder = {0};
     physical_history_clear(&history);
-    for (uint32_t sequence = 0; sequence <= 300; ++sequence) {
+    for (uint32_t sequence = 0; sequence <= 600; ++sequence) {
         protocol_physical_sample_t value = sample(sequence,
             UINT64_C(1000000) + (uint64_t)sequence * PHYSICAL_SAMPLE_PERIOD_US);
         assert(physical_history_push(&history, &value));
     }
     assert(physical_feeder_begin(&feeder, &history, 1, 2,
-        UINT64_C(2000000), UINT64_C(7000000)));
-    for (uint32_t sequence = 301; sequence < 550; ++sequence) {
+        UINT64_C(4000000), UINT64_C(7000000)));
+    for (uint32_t sequence = 601; sequence < 1050; ++sequence) {
         protocol_physical_sample_t value = sample(sequence,
             UINT64_C(1000000) + (uint64_t)sequence * PHYSICAL_SAMPLE_PERIOD_US);
         assert(physical_history_push(&history, &value));
     }
     protocol_physical_sample_t value;
     assert(physical_feeder_next(&feeder, &history, &value));
-    assert(value.sequence > 50);
+    assert(value.sequence > 300);
     assert(value.status & PROTOCOL_STATUS_HISTORY_OVERWRITE);
     assert(feeder.lost_before_send != 0);
 }
@@ -77,7 +81,7 @@ static void test_normal_rolling_eviction_is_not_reported_as_loss(void)
     physical_history_t history;
     physical_feeder_t feeder = {0};
     physical_history_clear(&history);
-    for (uint32_t sequence = 0; sequence <= 500; ++sequence) {
+    for (uint32_t sequence = 0; sequence <= 800; ++sequence) {
         protocol_physical_sample_t value = sample(sequence,
             UINT64_C(1000000) + (uint64_t)sequence * PHYSICAL_SAMPLE_PERIOD_US);
         assert(physical_history_push(&history, &value));
@@ -96,17 +100,17 @@ static void test_full_output_queue_retries_without_overtaking(void)
     physical_history_t history;
     physical_feeder_t feeder = {0};
     physical_history_clear(&history);
-    for (uint32_t sequence = 0; sequence <= 300; ++sequence) {
+    for (uint32_t sequence = 0; sequence <= 600; ++sequence) {
         protocol_physical_sample_t value = sample(sequence,
             UINT64_C(1000000) + (uint64_t)sequence * PHYSICAL_SAMPLE_PERIOD_US);
         assert(physical_history_push(&history, &value));
     }
     assert(physical_feeder_begin(&feeder, &history, 5, 6,
-        UINT64_C(2000000), UINT64_C(7000000)));
+        UINT64_C(4000000), UINT64_C(7000000)));
 
     protocol_physical_sample_t first, retried, second;
     assert(physical_feeder_next(&feeder, &history, &first));
-    assert(first.sequence == 50);
+    assert(first.sequence == 300);
     /* Model a nonblocking xQueueSend failure: release but do not advance. */
     assert(physical_feeder_retry(&feeder, first.sequence));
     assert(physical_feeder_next(&feeder, &history, &retried));

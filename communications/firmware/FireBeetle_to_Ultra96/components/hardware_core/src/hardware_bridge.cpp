@@ -60,10 +60,24 @@ extern "C" bool hardware_bridge_capture(uint32_t sample_index,
   memset(sample, 0, sizeof(*sample));
   memset(peak, 0, sizeof(*peak));
   sample->timestamp_us = static_cast<uint64_t>(esp_timer_get_time());
+#if APP_SAMPLING_DIAGNOSTICS
+  const int64_t readStartUs = esp_timer_get_time();
+#endif
 #if APP_USE_MOCK_IMU
   makeMock(sample_index, *sample);
+#if APP_SAMPLING_DIAGNOSTICS
+  sample->read_ok = true;
+#endif
+#else
+#if APP_SAMPLING_DIAGNOSTICS
+  sample->read_ok = mpu.read(sample->acceleration, sample->gyro);
 #else
   if (!mpu.read(sample->acceleration, sample->gyro)) return false;
+#endif
+#endif
+#if APP_SAMPLING_DIAGNOSTICS
+  sample->read_duration_us = static_cast<uint32_t>(esp_timer_get_time() - readStartUs);
+  if (!sample->read_ok) return false;
 #endif
 
   SensorSample detectorSample = {};

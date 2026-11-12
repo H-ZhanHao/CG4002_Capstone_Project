@@ -48,6 +48,21 @@
 #define APP_IDLE_RESUME_INTEGRATION 0
 #endif
 
+/* Opt-in live-only START_FLUSH joins; enabled only in the new profiles. */
+#ifndef APP_ONE_NODE
+#define APP_ONE_NODE 0
+#endif
+
+/* Set to 0 to suspend sensor fall detection and synthetic fall events. */
+#ifndef APP_FALL_DETECTION
+#define APP_FALL_DETECTION 1
+#endif
+
+/* Sampling measurements are enabled only by the dedicated diagnostic builds. */
+#ifndef APP_SAMPLING_DIAGNOSTICS
+#define APP_SAMPLING_DIAGNOSTICS 0
+#endif
+
 #if APP_NODE_ROLE != APP_ROLE_HUB && APP_NODE_ROLE != APP_ROLE_LEAF
 #error "APP_NODE_ROLE must be APP_ROLE_HUB or APP_ROLE_LEAF"
 #endif

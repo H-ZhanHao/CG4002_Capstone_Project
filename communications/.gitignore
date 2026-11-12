@@ -82,6 +82,8 @@ start-demo.ps1
 docs/*.md
 docs/handoffs/*.md
 docs/plans/*.md
+!docs/plans/SINGLE_NODE_BASELINE_AND_DYNAMIC_NODE_JOIN_PLAN.md
+!docs/plans/AR_FEEDBACK_IDLE_BUZZER_AND_FALL_IMPLEMENTATION_PLAN.md
 docs/progress/*.md
 docs/results/*.md
 docs/walkthrough/*.md

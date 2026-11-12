@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+from collections import deque
+import json
 import logging
 import os
 import ssl
@@ -21,11 +23,13 @@ from typing import Any
 
 import websockets
 from websockets.exceptions import ConnectionClosed
+from fall_delivery import parse_fall
 
 from visualizer_protocol import (
     VisualizerProtocolError,
     build_message,
     parse_message,
+    parse_rep_message,
     serialize_message,
 )
 
@@ -63,6 +67,7 @@ class GatewayConfig:
     cert_file: str = ""
     key_file: str = ""
     demo_source: bool = False
+    control_port: int = 9101
 
 
 class LatestValue:
@@ -165,6 +170,7 @@ class VisualizerGateway:
             self.config.websocket_port,
             ssl=ssl_context,
             max_size=1024,
+            max_queue=8,
             ping_interval=20,
             ping_timeout=20,
         )
@@ -229,55 +235,144 @@ class VisualizerGateway:
 
         LOGGER.info("Unity visualizer connected from %s", peer)
         queue = self.updates.subscribe()
-        minimum_interval = 1.0 / self.config.max_rate_hz
-        last_send = 0.0
-        disconnect_task = asyncio.create_task(websocket.wait_closed())
-        update_task: asyncio.Task[str] | None = None
-        try:
-            while True:
-                # Wait for either new data or connection loss. Without the
-                # disconnect task, queue.get() could wait forever after the phone
-                # disappears while no new events are being published.
-                update_task = asyncio.create_task(queue.get())
-                done, _ = await asyncio.wait(
-                    (update_task, disconnect_task),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if disconnect_task in done:
-                    update_task.cancel()
-                    await asyncio.gather(update_task, return_exceptions=True)
+        responses = asyncio.Queue(maxsize=32)
+        control_writer = None
+        request_times = deque()
+
+        async def respond(message):
+            try:
+                responses.put_nowait(json.dumps(message, separators=(",", ":")))
+            except asyncio.QueueFull:
+                await websocket.close(code=1013, reason="rep response queue full; reconnect and sync")
+
+        async def relay_control():
+            nonlocal control_writer
+            while not websocket.closed:
+                writer = None
+                connected = False
+                try:
+                    reader, writer = await asyncio.wait_for(asyncio.open_connection(
+                        LOOPBACK_HOST, self.config.control_port, limit=4096), 1)
+                    line = await asyncio.wait_for(reader.readline(), 1)
+                    welcome = json.loads(line)
+                    if welcome.get("type") != "rep_welcome" or welcome.get("v") != 1:
+                        raise ValueError("invalid rep control welcome")
+                    control_writer = writer
+                    connected = True
+                    await respond(welcome)
+                    while True:
+                        line = await reader.readline()
+                        if not line or len(line) > 4096:
+                            raise ConnectionError("rep control disconnected")
+                        message = json.loads(line)
+                        if message.get("type") == "fall_event":
+                            message = parse_fall(line, "fall_event")
+                        elif message.get("type") not in ("rep_result", "rep_delivery") or message.get("v") != 1:
+                            raise ValueError("invalid rep control response")
+                        await respond(message)
+                except (OSError, ValueError, asyncio.TimeoutError) as error:
+                    LOGGER.debug("Rep control unavailable: %s", error)
+                    if connected:
+                        await websocket.close(code=1012, reason="rep server changed; reconnect and sync")
+                        return
+                    await asyncio.sleep(1)
+                finally:
+                    control_writer = None
+                    if writer is not None:
+                        writer.close()
+                        with contextlib.suppress(OSError):
+                            await writer.wait_closed()
+
+        async def receive_phone():
+            async for payload in websocket:
+                try:
+                    now = time.monotonic()
+                    while request_times and now - request_times[0] >= 1:
+                        request_times.popleft()
+                    if len(request_times) >= 20:
+                        await websocket.close(code=1008, reason="phone message rate_limit")
+                        return
+                    request_times.append(now)
+                    if len(payload.encode() if isinstance(payload, str) else payload) > 1024:
+                        raise VisualizerProtocolError("phone message exceeds 1024 bytes")
+                    try:
+                        envelope = json.loads(payload)
+                        message = (parse_fall(payload, "fall_ack")
+                                   if isinstance(envelope, dict) and envelope.get("type") == "fall_ack"
+                                   else parse_rep_message(payload))
+                    except (ValueError, UnicodeError) as error:
+                        raise VisualizerProtocolError(str(error)) from error
+                    if control_writer is None:
+                        raise VisualizerProtocolError("rep control unavailable")
+                    # No replay queue: forward only on this live phone/control link.
+                    control_writer.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
+                    await asyncio.wait_for(control_writer.drain(), 0.5)
+                except VisualizerProtocolError as error:
+                    await respond({"v": 1, "type": "rep_result", "run_id": 0,
+                        "seq": -1, "rep_session_id": "", "rep_index": -1,
+                        "status": "rejected", "reason": str(error),
+                        "feedback_event_id": 0, "nodes": []})
+                except (OSError, asyncio.TimeoutError):
+                    await websocket.close(code=1012, reason="rep control unavailable; reconnect and sync")
                     return
-                payload = update_task.result()
-                update_task = None
-                delay = minimum_interval - (time.monotonic() - last_send)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                # Rate limiting must not create an old-event backlog. If newer
-                # data arrived during the delay, send only the newest value.
-                while not queue.empty():
-                    payload = queue.get_nowait()
-                message = parse_message(payload)
+
+        async def send_messages():
+            async def send_response(payload):
                 await websocket.send(payload)
-                last_send = time.monotonic()
-                LOGGER.info(
-                    "VISUALIZER sent run_id=%d seq=%d exercise=%s",
-                    message["run_id"],
-                    message["seq"],
-                    message["exercise"],
-                )
-        except ConnectionClosed:
-            pass
-        except (ConnectionError, OSError) as error:
-            LOGGER.warning("Visualizer send error to %s: %s", peer, error)
+                message = json.loads(payload)
+                if message.get("type") == "fall_event":
+                    LOGGER.info("FALL_AR_SENT node=%d boot=%d event=%s",
+                                message["node_id"], message["boot_id"], message["event_id"])
+
+            # Exactly one WSS writer; receipts never enter the replaceable
+            # exercise slot. Outstanding response memory is bounded to 32 items.
+            update = asyncio.create_task(queue.get())
+            receipt = asyncio.create_task(responses.get())
+            last_send = 0.0
+            try:
+                while True:
+                    await asyncio.wait((update, receipt), return_when=asyncio.FIRST_COMPLETED)
+                    if receipt.done():
+                        await send_response(receipt.result())
+                        receipt = asyncio.create_task(responses.get())
+                    if update.done():
+                        payload = update.result()
+                        delay = 1.0 / self.config.max_rate_hz - (time.monotonic() - last_send)
+                        # Exercise throttling must not delay rep receipts.
+                        deadline = time.monotonic() + max(0, delay)
+                        while time.monotonic() < deadline:
+                            ready, _ = await asyncio.wait((receipt,),
+                                timeout=max(0, deadline - time.monotonic()))
+                            if receipt in ready:
+                                await send_response(receipt.result())
+                                receipt = asyncio.create_task(responses.get())
+                        while not queue.empty():
+                            payload = queue.get_nowait()
+                        message = parse_message(payload)
+                        await websocket.send(payload)
+                        last_send = time.monotonic()
+                        LOGGER.info("VISUALIZER sent run_id=%d seq=%d exercise=%s",
+                                    message["run_id"], message["seq"], message["exercise"])
+                        update = asyncio.create_task(queue.get())
+            finally:
+                update.cancel()
+                receipt.cancel()
+                await asyncio.gather(update, receipt, return_exceptions=True)
+
+        tasks = [asyncio.create_task(function()) for function in
+                 (relay_control, receive_phone, send_messages, websocket.wait_closed)]
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                if not task.cancelled():
+                    error = task.exception()
+                    if error and not isinstance(error, ConnectionClosed):
+                        LOGGER.warning("Visualizer connection error: %s", error)
         finally:
-            # Collect cancelled tasks so shutdown does not leave asyncio warnings
-            # or platform-specific late socket errors.
-            if update_task is not None and not update_task.done():
-                update_task.cancel()
-                await asyncio.gather(update_task, return_exceptions=True)
-            if not disconnect_task.done():
-                disconnect_task.cancel()
-                await asyncio.gather(disconnect_task, return_exceptions=True)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await websocket.close()
             async with self._client_lock:
                 if self._active_client is websocket:
                     self._active_client = None
@@ -374,6 +469,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--publisher-port", type=_port, default=9100)
     parser.add_argument("--max-rate-hz", type=_positive_rate, default=20.0)
     parser.add_argument("--demo-source", action="store_true")
+    parser.add_argument("--control-port", type=_port, default=9101)
     parser.add_argument(
         "--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO"
     )
@@ -415,6 +511,7 @@ def main() -> None:
         cert_file=os.path.abspath(args.tls_cert),
         key_file=os.path.abspath(args.tls_key),
         demo_source=args.demo_source,
+        control_port=args.control_port,
     )
     try:
         asyncio.run(run(config))

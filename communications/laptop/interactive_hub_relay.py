@@ -930,7 +930,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--listen-host", default="0.0.0.0")
     parser.add_argument("--listen-port", type=int, default=15000)
     parser.add_argument("--upstream-host", default="127.0.0.1")
-    parser.add_argument("--upstream-port", type=int, default=19000)
+    parser.add_argument("--upstream-port", type=int, default=15001)
     parser.add_argument("--certificate", help="TLS server certificate PEM")
     parser.add_argument("--private-key", help="TLS server private-key PEM")
     parser.add_argument("--file", help="File sent by f (r corrupts CRC, o offset)")

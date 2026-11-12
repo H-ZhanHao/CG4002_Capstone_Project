@@ -15,6 +15,7 @@ topology must not be applied to the current build.
 
 ## Plans
 
+- [Single-node baseline and dynamic node joining (proposed)](plans/SINGLE_NODE_BASELINE_AND_DYNAMIC_NODE_JOIN_PLAN.md)
 - [Hardware–communications integration plan](plans/HARDWARE_COMMUNICATIONS_INTEGRATION_PLAN.md)
 - [ESP32 individual demo implementation plan (historical)](plans/ESP32_INDIVIDUAL_DEMO_IMPLEMENTATION_PLAN.md)
 - [Ultra96 sliding-window MVP implementation plan](plans/ULTRA96_SLIDING_WINDOW_MVP_IMPLEMENTATION_PLAN.md)
