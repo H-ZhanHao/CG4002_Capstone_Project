@@ -227,8 +227,15 @@ def coordinator_class(api):
                 if self._connections.get(connection.node_id) is not connection:
                     return
                 if command_type == api.MESSAGE_TYPE_FEEDBACK_COMMAND:
-                    return super().control_acknowledged(connection, command_type,
-                        command_sequence, result, effective_local_us)
+                    # Feedback delivery is independent of capture commands.
+                    # The shared base no longer has the legacy group-ACK method.
+                    try:
+                        return self.feedback_delivery.acknowledge(
+                            connection, command_sequence, result, effective_local_us)
+                    except ValueError as error:
+                        raise api.ProtocolError(
+                            api.ERROR_INVALID_FRAME, api.MESSAGE_TYPE_CONTROL_ACK,
+                            str(error)) from error
                 node = connection.node_id
                 state = self.nodes[node]
                 now = time.monotonic_ns() // 1000
