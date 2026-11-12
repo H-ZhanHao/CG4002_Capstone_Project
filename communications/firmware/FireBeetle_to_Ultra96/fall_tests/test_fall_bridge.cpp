@@ -14,7 +14,7 @@ const float sideways[] = {9.81f, 0, 0};
 const float low[] = {0, 0, 1};
 const float impact[] = {0, 0, 30};
 const float still[] = {0, 0, 0};
-const float rotating[] = {1.5f, 0, 0};
+const float rotating[] = {3.0f, 0, 0};
 
 struct Trace {
   uint64_t now;
@@ -39,8 +39,8 @@ struct Trace {
   void baseline(const float *direction = upright) { samples(30, direction); }
 
   void candidate() {
-    samples(11, low);
-    assert(!sample(impact)); // Impact alone no longer reports a fall.
+    samples(5, low); // 40 ms of unloading from the first low sample.
+    assert(!sample(impact)); // A candidate still needs posture/settling confirmation.
   }
 
   void confirm(const float *direction = sideways) {
@@ -98,9 +98,53 @@ int main() {
 
   Trace moving;
   moving.baseline(); moving.candidate();
-  moving.samples(50, sideways, rotating);
-  assert(moving.events == 0); // Real gyro input must prevent settling.
+  moving.samples(150, sideways, rotating);
+  assert(moving.events == 0); // Rotation above the quiet limit times out.
   moving.baseline(); moving.candidate(); moving.confirm();
+
+  // Both new candidate paths use the same Hip-only communications bridge.
+  for (uint8_t node : {1, 2}) {
+    Trace softImpact(node);
+    softImpact.baseline();
+    const float soft[] = {0, 0, 17};
+    assert(!softImpact.sample(soft)); // No preceding freefall.
+    const float tilted[] = {6.3057f, 0, 7.5149f}; // 40 degrees.
+    const float residualMotion[] = {1.5f, 0, 0}; // Within the new 1.8 rad/s limit.
+    softImpact.samples(49, tilted, residualMotion);
+    assert(softImpact.events == 0);
+    assert(softImpact.sample(tilted, residualMotion) == (node == 1));
+    assert(softImpact.events == (node == 1 ? 1U : 0U));
+    // Repeated impacts cannot retrigger the Hip during the alarm cooldown.
+    softImpact.baseline(); softImpact.sample(soft);
+    softImpact.samples(50, tilted, residualMotion);
+    assert(softImpact.events == (node == 1 ? 1U : 0U));
+
+    Trace collapse(node);
+    collapse.baseline();
+    const float unloaded[] = {0, 0, 6};
+    collapse.samples(5, unloaded);
+    assert(!collapse.sample(sideways)); // Quiet posture starts confirmation.
+    collapse.samples(49, sideways);
+    assert(collapse.events == 0);
+    assert(collapse.sample(sideways) == (node == 1));
+    assert(collapse.events == (node == 1 ? 1U : 0U));
+  }
+
+  // A moving wearer may settle after 500 ms, within the 1500 ms timeout.
+  Trace late;
+  late.baseline(); late.candidate();
+  late.samples(70, sideways, rotating);
+  late.samples(10, sideways);
+  assert(late.events == 0);
+  assert(late.sample(sideways));
+
+  // Exactly 100 ms of settled posture suffices at the 500 ms deadline.
+  Trace settling;
+  settling.baseline(); settling.candidate();
+  settling.samples(39, sideways, rotating);
+  settling.samples(10, sideways);
+  assert(settling.events == 0);
+  assert(settling.sample(sideways));
 
   Trace recovery;
   recovery.baseline(); recovery.candidate();
@@ -108,7 +152,7 @@ int main() {
   assert(recovery.events == 0);
 
   Trace expired;
-  expired.baseline(); expired.samples(11, low);
+  expired.baseline(); expired.samples(5, low);
   expired.samples(100, upright); expired.sample(impact);
   expired.samples(50, sideways);
   assert(expired.events == 0); // Hardware owns impact-window expiry.
@@ -122,7 +166,7 @@ int main() {
     Trace allowedGap;
     allowedGap.baseline(); allowedGap.candidate();
     allowedGap.sample(sideways, still, interval);
-    while (allowedGap.now < 920000) allowedGap.sample(sideways);
+    while (allowedGap.now < 860000) allowedGap.sample(sideways);
     assert(allowedGap.events == 1);
   }
 
@@ -187,5 +231,5 @@ int main() {
   assert(wrist.events == 0);
   confirmedFall(0, upright, sideways); // Reinitialization clears role/cooldown.
 
-  puts("Fall bridge: confirmation, gyro, posture, gaps, invalid inputs, clock rollover, cooldown, Hip-only and alarm priority checks passed");
+  puts("Fall bridge: impact-only and soft-collapse paths, settling/timeout, gyro, posture, gaps, invalid inputs, clock rollover, cooldown, Hip-only and alarm priority checks passed");
 }

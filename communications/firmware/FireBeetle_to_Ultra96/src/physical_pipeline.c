@@ -99,6 +99,7 @@ static void diagnostics_task(void *unused)
 
 static bool record_fall(bool synthetic)
 {
+    if (!APP_FALL_DETECTION) return false;
     uint64_t now = (uint64_t)esp_timer_get_time();
     if (configured_node_id != 1 || (last_fall_us && now-last_fall_us < 3000000ULL)) return false;
     last_fall_us = now;
@@ -324,7 +325,7 @@ static void pipeline_task(void *unused)
 #else
             if (hardware_bridge_capture(sequence, &hardware_sample, &peak)) {
 #endif
-                if (fall_bridge_update(hardware_sample.acceleration,
+                if (APP_FALL_DETECTION && fall_bridge_update(hardware_sample.acceleration,
                         hardware_sample.gyro, hardware_sample.timestamp_us, true))
                     (void)record_fall(false);
                 exercise_bridge_update(hardware_sample.timestamp_us,
@@ -363,7 +364,8 @@ static void pipeline_task(void *unused)
                         trigger_armed = false;
                 }
             } else {
-                (void)fall_bridge_update(NULL, NULL, now_us, false);
+                if (APP_FALL_DETECTION)
+                    (void)fall_bridge_update(NULL, NULL, now_us, false);
             }
 #if APP_SAMPLING_DIAGNOSTICS
             sampling_diag_max(&diagnostics.processing_max_us,
@@ -445,7 +447,8 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     configured_node_id = node_id;
     do { board_boot_id = esp_random(); } while (!board_boot_id);
     device_events_init(&device_events, board_boot_id);
-    fall_bridge_begin(node_id);
+    if (APP_FALL_DETECTION) fall_bridge_begin(node_id);
+    else ESP_LOGI(TAG, "Fall detection disabled by build profile");
     feedback_bridge_set_fall_injector(inject_fall);
 #if APP_SAMPLING_DIAGNOSTICS
     diagnostics_queue = xQueueCreate(1, sizeof(sampling_diagnostics_t));

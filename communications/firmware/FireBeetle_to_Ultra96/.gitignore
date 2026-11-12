@@ -27,3 +27,6 @@
 
 !sdkconfig.node1_cleanup
 !sdkconfig.node2_cleanup
+
+!sdkconfig.node1_update_fall2
+!sdkconfig.node2_update_fall2

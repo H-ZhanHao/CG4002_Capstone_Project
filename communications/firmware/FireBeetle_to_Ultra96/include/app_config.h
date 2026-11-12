@@ -53,6 +53,11 @@
 #define APP_ONE_NODE 0
 #endif
 
+/* Set to 0 to suspend sensor fall detection and synthetic fall events. */
+#ifndef APP_FALL_DETECTION
+#define APP_FALL_DETECTION 1
+#endif
+
 /* Sampling measurements are enabled only by the dedicated diagnostic builds. */
 #ifndef APP_SAMPLING_DIAGNOSTICS
 #define APP_SAMPLING_DIAGNOSTICS 0

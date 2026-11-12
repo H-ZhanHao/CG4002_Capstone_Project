@@ -99,11 +99,18 @@ The physical pipeline passes raw acceleration (m/s^2), gyro (rad/s), and the
 capture timestamp from the same IMU read. The adapter converts microseconds to
 milliseconds; gyro bias correction stays inside the hardware detector.
 
-Node 1 (Hip) reports a fall only after the hardware detector confirms freefall,
-impact, a posture change of at least 45 degrees, and post-impact stillness.
-Current hardware settings require a stable reference for 200 ms before a
-candidate and confirmation at 500 ms after impact, with at least 200 ms settled.
-The hardware `ExerciseConfig.h` is the source of these tuning values.
+Node 1 (Hip) learns a stable gravity reference from 200 ms of quiet samples.
+A candidate starts with either an impact above 16 m/s^2 (without requiring
+freefall), or acceleration below 7 m/s^2 for at least 40 ms followed within
+1000 ms by an impact or quiet changed posture, allowing soft landings.
+Confirmation starts at that impact or first quiet changed-posture sample.
+It requires at least 500 ms from confirmation start and at least 100 ms of
+settled posture changed by 35 degrees or more. Quiet means acceleration within
+3 m/s^2 of gravity and bias-corrected gyro magnitude at most 1.8 rad/s.
+A quiet return to the original posture at/after 500 ms rejects a jump-like
+landing; otherwise settling may continue up to 1500 ms from confirmation start.
+The hardware `ExerciseConfig.h` is the source of these tuning values. These
+are initial settings requiring worn-sensor validation, not fall guarantees.
 
 The bridge rejects missing/nonfinite sensor inputs, resets on non-increasing
 timestamps or gaps exceeding the hardware's 100 ms limit, and suppresses repeat
@@ -163,3 +170,46 @@ to use `src/sensor_history.c`.
 Use `--disable-auto-clean` when retaining built images across profile additions:
 PlatformIO otherwise clears its shared build directory when the project
 configuration checksum changes.
+
+## Second fall update profiles
+
+`node1_update_fall2` (Hip) and `node2_update_fall2` (Wrist) extend the matching
+`cleanup` profiles and compile the latest canonical fall detector and tuning.
+Their separate `sdkconfig.node*_update_fall2` files are seeded from the matching
+cleanup configurations. They retain physical IMU capture at 100 Hz, the 1 ms
+scheduler tick, Wi-Fi/TLS, independent startup/live joining and USB diagnostics.
+Ultra96 feedback commands continue to own rep beeps and activity LEDs.
+Fall detection is temporarily disabled in both profiles with
+`-D APP_FALL_DETECTION=0`: sensor samples do not run the detector, and
+`fall inject` is rejected, so neither path starts a local Hip fall alarm or
+queues a fall event. The explicit `feedback fall-alarm` output diagnostic
+remains available. To restore detection, change the flag to
+`-D APP_FALL_DETECTION=1` in both profiles, rebuild and upload.
+Other profiles retain fall detection by default.
+The standalone hardware Bluetooth and ESP-NOW control flows are not added.
+
+Build from `communications/firmware/FireBeetle_to_Ultra96`:
+
+```powershell
+pio run --disable-auto-clean -e node1_update_fall2 -e node2_update_fall2
+```
+
+Outputs are `.pio/build/node1_update_fall2/firmware.bin` and
+`.pio/build/node2_update_fall2/firmware.bin`. Existing environment definitions,
+SDK configurations and the default environment are preserved. Keep copies of
+images that must be retained outside `.pio/build`: `--disable-auto-clean`
+applies to this invocation, while other PlatformIO invocations may refresh the
+shared build cache. Older profiles still share the canonical source, so
+rebuilding one later also uses the latest detector.
+
+Upload only to the matching board when ready (replace the COM port):
+
+```powershell
+pio run --disable-auto-clean -e node1_update_fall2 -t upload --upload-port COM_HIP
+pio run --disable-auto-clean -e node2_update_fall2 -t upload --upload-port COM_WRIST
+```
+
+The host bridge tests cover the new impact-only and soft-collapse paths,
+Hip-only reporting, cooldown, delayed settling and alarm priority. Physical
+validation must use actual sensor motion after re-enabling detection;
+`fall inject` bypasses the detector when enabled.
