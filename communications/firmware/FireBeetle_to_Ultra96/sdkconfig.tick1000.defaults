@@ -1,0 +1,3 @@
+# The tick1000 diagnostic and update_fall profiles load this SDK override.
+# PHYSICAL_SAMPLE_PERIOD_US remains 10000 (100 Hz capture).
+CONFIG_FREERTOS_HZ=1000

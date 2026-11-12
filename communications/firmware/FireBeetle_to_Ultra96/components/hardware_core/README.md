@@ -1,12 +1,16 @@
 # Hardware core boundary
 
-This component preserves recognizable C++ modules from `hardware/node` while
-the original directory remains the canonical, untouched source. The copied
-MPU6050 and generic-peak files retain the hardware interfaces and behavior;
-`Mpu6050.cpp` and `GenericPeakDetector.cpp` are built directly as C++.
+This component builds shared C++ modules directly from `hardware/node`, which
+remains the canonical, untouched source. `GenericPeakDetector.cpp` and the
+counter, session, buzzer, fall and MPU6050 implementations are compiled from that
+directory; their headers are included from there too. There are no copied
+hardware headers or implementations in this component. The communications-owned
+`src/node_platform_adapter.cpp` implements only `NodePlatform::delayMs` with
+FreeRTOS, preserving the canonical MPU6050 driver's initialization delays without
+building the standalone Bluetooth platform.
 
-`hardware_bridge.cpp` is communications-owned. It is the only file here that
-converts between hardware C++ objects and the C firmware. The bridge owns the
+`hardware_bridge.cpp` is the communications-owned C ABI for sensor acquisition
+and generic peak detection. The bridge owns the
 MPU6050 and generic-peak objects, supplies deterministic mock samples, maps
 `esp_timer` microseconds to the detector's millisecond API using the same
 monotonic origin, and returns plain C sample and peak structures.
@@ -18,6 +22,10 @@ a sequence assigned at acquisition, continue accepting samples while a flush
 drains, retry a rejected queue offer, and transition exactly once from history
 to live. Keeping that adapter separate avoids changing the teammate's class or
 bringing its overlapping-window workflow into the node runtime.
+
+The firmware does not compile or call `SensorHistory.cpp`. The canonical
+`SensorHistory.h` supplies `SensorSample` and the history constants used by
+`GenericPeakDetector.h`; the history class itself is not instantiated.
 
 The communications transport ring retains seven seconds at 100 Hz: three
 seconds for the requested pre-peak window plus four seconds for peak
@@ -55,8 +63,8 @@ require ESP-NOW forwarding.
 
 Bluetooth SPP startup, polling, and the communications Bluetooth bridge have
 been removed. The component no longer builds `hardware/node/NodePlatform.cpp`
-or depends on the Bluetooth component. The copied MPU6050 driver uses FreeRTOS
-delays directly, retaining its original initialization delays.
+or depends on the Bluetooth component. The canonical MPU6050 driver uses the
+communications delay adapter, retaining its original initialization delays.
 
 `sdkconfig.defaults` disables Bluetooth and software Wi-Fi/Bluetooth coexistence.
 The `node1_integration_100HZ` and `node2_integration_100HZ` configurations have
@@ -83,3 +91,75 @@ patterns and the idle double beep are removed. Session reset cancels rep sounds
 and clears activity without silencing a fall. STOP clears activity locally too.
 USB diagnostics use `feedback rep|active|idle|fall-alarm|status` and `fall inject`.
 See the Ultra96 README for action IDs, deployment and physical checks.
+
+## Fall detector integration
+
+`fall_bridge.cpp` builds and calls the canonical `hardware/node/FallDetector.cpp`.
+The physical pipeline passes raw acceleration (m/s^2), gyro (rad/s), and the
+capture timestamp from the same IMU read. The adapter converts microseconds to
+milliseconds; gyro bias correction stays inside the hardware detector.
+
+Node 1 (Hip) reports a fall only after the hardware detector confirms freefall,
+impact, a posture change of at least 45 degrees, and post-impact stillness.
+Current hardware settings require a stable reference for 200 ms before a
+candidate and confirmation at 500 ms after impact, with at least 200 ms settled.
+The hardware `ExerciseConfig.h` is the source of these tuning values.
+
+The bridge rejects missing/nonfinite sensor inputs, resets on non-increasing
+timestamps or gaps exceeding the hardware's 100 ms limit, and suppresses repeat
+events during the three-second alarm. The existing local buzzer and device-event
+delivery path receives only confirmed falls. Node 2 (Wrist) does not report falls.
+
+Run the portable bridge and canonical detector regression tests from the repo
+root with:
+
+```powershell
+& ./communications/firmware/FireBeetle_to_Ultra96/fall_tests/run_tests.ps1
+```
+
+The `node1_update_fall` (Hip) and `node2_update_fall` (Wrist) PlatformIO
+environments extend the existing `node1_one_node` and `node2_one_node` settings:
+physical IMU, 100 Hz capture, Wi-Fi/TLS, independent startup/live joining, and
+feedback diagnostics. Each has its own SDK configuration seeded from the
+corresponding one-node configuration. Existing environment definitions and
+the default environment are unchanged.
+
+From `communications/firmware/FireBeetle_to_Ultra96`, build both profiles with:
+
+```powershell
+pio run -e node1_update_fall -e node2_update_fall
+```
+
+Upload each profile to its matching board (replace the COM port):
+
+```powershell
+pio run -e node1_update_fall -t upload --upload-port COM_HIP
+pio run -e node2_update_fall -t upload --upload-port COM_WRIST
+```
+
+The updated bridge is shared source, so rebuilding an existing environment
+also compiles the updated detector. `fall inject` checks alarm/event delivery;
+it bypasses sensor-based detection and does not validate the new confirmation.
+
+## Cleanup profiles
+
+`node1_cleanup` and `node2_cleanup` extend their corresponding `update_fall`
+environments: physical IMU, 100 Hz capture, a 1 ms scheduler tick, Wi-Fi/TLS,
+independent startup/live joining, feedback diagnostics and the canonical fall
+detector. Their SDK configurations are seeded from the matching `update_fall`
+configurations. Build both from the firmware project directory:
+
+```powershell
+pio run --disable-auto-clean -e node1_cleanup -e node2_cleanup
+```
+
+Each profile has its own `sdkconfig.node*_cleanup` and
+`.pio/build/node*_cleanup` outputs. Existing environment definitions, SDK
+configurations and the default environment are preserved.
+The source cleanup is shared: rebuilding an older profile also uses the
+canonical hardware files and delay adapter. Communications history continues
+to use `src/sensor_history.c`.
+
+Use `--disable-auto-clean` when retaining built images across profile additions:
+PlatformIO otherwise clears its shared build directory when the project
+configuration checksum changes.

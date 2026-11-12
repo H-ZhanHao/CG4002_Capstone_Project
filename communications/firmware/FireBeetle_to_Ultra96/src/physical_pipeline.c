@@ -325,7 +325,8 @@ static void pipeline_task(void *unused)
             if (hardware_bridge_capture(sequence, &hardware_sample, &peak)) {
 #endif
                 if (fall_bridge_update(hardware_sample.acceleration,
-                        hardware_sample.timestamp_us, true)) (void)record_fall(false);
+                        hardware_sample.gyro, hardware_sample.timestamp_us, true))
+                    (void)record_fall(false);
                 exercise_bridge_update(hardware_sample.timestamp_us,
                     hardware_sample.acceleration, hardware_sample.gyro);
                 captured.node_id = configured_node_id;
@@ -362,7 +363,7 @@ static void pipeline_task(void *unused)
                         trigger_armed = false;
                 }
             } else {
-                (void)fall_bridge_update(NULL, now_us, false);
+                (void)fall_bridge_update(NULL, NULL, now_us, false);
             }
 #if APP_SAMPLING_DIAGNOSTICS
             sampling_diag_max(&diagnostics.processing_max_us,

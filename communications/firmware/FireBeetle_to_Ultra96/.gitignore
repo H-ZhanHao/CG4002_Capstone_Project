@@ -20,3 +20,10 @@
 
 !sdkconfig.node1_stage5
 !sdkconfig.node2_stage5
+
+!sdkconfig.node1_update_fall
+!sdkconfig.node2_update_fall
+!sdkconfig.tick1000.defaults
+
+!sdkconfig.node1_cleanup
+!sdkconfig.node2_cleanup
