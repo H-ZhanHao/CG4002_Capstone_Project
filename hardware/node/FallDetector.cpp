@@ -74,18 +74,23 @@ void FallDetector::update(const float acceleration[3], const float gyro[3],
             for (int axis = 0; axis < 3; ++axis) gravity_[axis] = acceleration[axis];
         }
         filterGravity(gravity_, acceleration, alpha);
-        if (now - quietStartTime_ >= FallConfig::SETTLED_TIME_MS) haveGravity_ = true;
+        if (now - quietStartTime_ >= FallConfig::BASELINE_TIME_MS) haveGravity_ = true;
       } else {
         trackingQuiet_ = false;
       }
-      if (haveGravity_ && rawMagnitude < FallConfig::FREE_FALL_THRESHOLD) {
+      if (haveGravity_ && rawMagnitude > FallConfig::IMPACT_THRESHOLD) {
+        // Supported falls may have an impact without measurable freefall.
+        startConfirmation(now);
+      } else if (haveGravity_ && rawMagnitude < FallConfig::FREE_FALL_THRESHOLD) {
         freeFallStartTime_ = now;
         state_ = POSSIBLE_FREE_FALL;
       }
       break;
 
     case POSSIBLE_FREE_FALL:
-      if (rawMagnitude >= FallConfig::FREE_FALL_THRESHOLD) {
+      if (rawMagnitude > FallConfig::IMPACT_THRESHOLD) {
+        startConfirmation(now);
+      } else if (rawMagnitude >= FallConfig::FREE_FALL_THRESHOLD) {
         reset();
       } else if (now - freeFallStartTime_ >= FallConfig::FREE_FALL_MIN_TIME_MS) {
         impactWindowStartTime_ = now;
@@ -97,10 +102,10 @@ void FallDetector::update(const float acceleration[3], const float gyro[3],
       // Expire first so a late impact cannot resurrect an old candidate.
       if (now - impactWindowStartTime_ > FallConfig::IMPACT_WINDOW_MS) {
         reset();
-      } else if (rawMagnitude > FallConfig::IMPACT_THRESHOLD) {
-        impactTime_ = now;
-        trackingQuiet_ = trackingSettled_ = false;
-        state_ = CONFIRMING_FALL;
+      } else if (rawMagnitude > FallConfig::IMPACT_THRESHOLD ||
+                 (quiet && changedPosture(gravity_, acceleration))) {
+        // A soft landing can change posture without a sharp impact.
+        startConfirmation(now);
       }
       break;
 
@@ -127,9 +132,14 @@ void FallDetector::update(const float acceleration[3], const float gyro[3],
         trackingSettled_ = false;
       }
       if (now - impactTime_ >= FallConfig::CONFIRMATION_TIME_MS) {
-        if (trackingSettled_ && now - settledStartTime_ >= FallConfig::SETTLED_TIME_MS)
+        if (trackingSettled_ && now - settledStartTime_ >= FallConfig::SETTLED_TIME_MS) {
           fallEvent_ = true;
-        reset();
+          reset();
+        } else if ((quiet && !changedPosture(gravity_, acceleration)) ||
+                   now - impactTime_ >= FallConfig::CONFIRMATION_TIMEOUT_MS) {
+          // Upright landings are jump-like. Otherwise allow more time to settle.
+          reset();
+        }
       }
       break;
   }
@@ -142,6 +152,12 @@ bool FallDetector::consumeFallEvent() {
 }
 
 FallDetectorState FallDetector::state() const { return state_; }
+
+void FallDetector::startConfirmation(uint32_t now) {
+  impactTime_ = now;
+  trackingQuiet_ = trackingSettled_ = false;
+  state_ = CONFIRMING_FALL;
+}
 
 void FallDetector::reset() {
   state_ = MONITORING_NORMAL;

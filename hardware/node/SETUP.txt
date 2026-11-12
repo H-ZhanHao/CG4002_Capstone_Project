@@ -535,11 +535,14 @@ BENCH AND WEARABLE CHECKS
 FALL CONFIRMATION
 
 HIP fall detection remains active in standby, including while WRIST counts
-jumping jacks. After acceleration below 4 m/s2 for at least 100 ms and an
-impact above 25 m/s2 within the next 1000 ms, the detector waits 500 ms.
-It alerts only if the final 200 ms of sampled evidence has both:
-- At least 45 degrees of posture change from the pre-event gravity direction.
-- Acceleration within 2 m/s2 of gravity and gyro magnitude at most 0.8 rad/s.
+jumping jacks. A candidate starts through either of these paths:
+- An impact above 16 m/s2, even without preceding freefall.
+- Acceleration below 7 m/s2 for at least 40 ms, followed within 1000 ms by
+  an impact or a quiet changed posture (to allow soft landings).
+Confirmation starts at that impact or first quiet changed-posture sample.
+It alerts after at least 500 ms if the final 100 ms of sampled evidence has both:
+- At least 35 degrees of posture change from the pre-event gravity direction.
+- Acceleration within 3 m/s2 of gravity and gyro magnitude at most 1.8 rad/s.
 The posture check uses current and filtered acceleration directions. Gravity
 is learned near rest, with about 200 ms of quiet readings required on startup
 or after a sensor gap above 100 ms/invalid data. Candidates are discarded on
@@ -547,15 +550,18 @@ those gaps or invalid samples. Detection uses XYZ acceleration and gyro; it
 does not assume that any fixed sensor axis is upright.
 
 Confirmation is nonblocking. The alarm begins on the first qualifying sample
-at or after 500 ms from impact (normally within one 10 ms sample interval),
-then sounds for the existing 3 seconds. An unconfirmed candidate is cleared
-at that deadline; it does not wait longer for the wearer to settle.
+at or after 500 ms from confirmation start, then sounds for 3 seconds.
+A quiet return to the original posture at/after 500 ms rejects a jump-like
+landing. Otherwise the detector allows up to 1500 ms from confirmation start
+for movement to settle before discarding an unconfirmed candidate.
 
 These are initial tuning values in FallConfig, not validated fall guarantees.
-Upright jump landings are rejected, but upright falls, falls without freefall,
-or falls with continued movement can be missed. Record worn-HIP jumping jacks,
-normal movements and safely simulated falls to measure false alarms and misses
-before adjusting the constants. Host tests use synthetic sensor traces only.
+Upright jump landings are rejected by posture, not by an exercise classifier.
+Upright falls, slow collapses without unloading or impact, and falls with
+continued vigorous movement can still be missed. Lower gates can also admit
+non-fall bumps followed by a lean. Record worn-HIP jumping jacks, normal
+movements and safely simulated falls to measure false alarms and misses.
+Host tests use synthetic sensor traces only.
 
 BUILD / HOST VERIFICATION
 

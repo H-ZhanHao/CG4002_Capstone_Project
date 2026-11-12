@@ -43,5 +43,6 @@ class FallDetector {
 
   bool fallEvent_;
 
+  void startConfirmation(uint32_t now);
   void reset();
 };

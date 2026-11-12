@@ -456,7 +456,8 @@ static void remoteBuzzerTests() {
     assert(!buzzerLevel && !data().fallAlert);
   }
 
-  step(6, 0.0f); step(1, 30.0f);
+  // A softer impact without freefall must also alert in HIP standby.
+  step(1, 17.0f);
   assert(!data().fallAlert);
   hipLyingDown = true;
   step(24);

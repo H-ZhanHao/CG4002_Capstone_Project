@@ -134,19 +134,21 @@ namespace FeedbackConfig {
 namespace FallConfig {
   constexpr int BUZZER_PIN = 26; // FireBeetle D3
 
-  constexpr float FREE_FALL_THRESHOLD = 4.0f;
-  constexpr unsigned long FREE_FALL_MIN_TIME_MS = 100;
+  constexpr float FREE_FALL_THRESHOLD = 7.0f;
+  constexpr unsigned long FREE_FALL_MIN_TIME_MS = 40;
 
-  constexpr float IMPACT_THRESHOLD = 25.0f;
+  constexpr float IMPACT_THRESHOLD = 16.0f;
   constexpr unsigned long IMPACT_WINDOW_MS = 1000;
 
   // Initial tuning values: validate with worn-sensor exercise/fall recordings.
   constexpr uint32_t CONFIRMATION_TIME_MS = 500;
-  constexpr uint32_t SETTLED_TIME_MS = 200;
+  constexpr uint32_t CONFIRMATION_TIMEOUT_MS = 1500;
+  constexpr uint32_t BASELINE_TIME_MS = 200;
+  constexpr uint32_t SETTLED_TIME_MS = 100;
   constexpr uint32_t MAX_SAMPLE_GAP_MS = 100;
-  constexpr float QUIET_ACCEL_TOLERANCE_MPS2 = 2.0f;
-  constexpr float QUIET_GYRO_RAD_S = 0.8f;
-  constexpr float POSTURE_CHANGE_COS = 0.70710678f; // At least 45 degrees.
+  constexpr float QUIET_ACCEL_TOLERANCE_MPS2 = 3.0f;
+  constexpr float QUIET_GYRO_RAD_S = 1.8f;
+  constexpr float POSTURE_CHANGE_COS = 0.81915204f; // At least 35 degrees.
   constexpr float GRAVITY_FILTER_TIME_MS = 100.0f;
 
   constexpr unsigned long BUZZER_DURATION_MS = 3000;

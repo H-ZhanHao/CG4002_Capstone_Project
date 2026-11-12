@@ -13,7 +13,7 @@ const float sideways[] = {9.81f, 0, 0};
 const float low[] = {0, 0, 1};
 const float impact[] = {0, 0, 30};
 const float still[] = {0, 0, 0};
-const float rotating[] = {1.5f, 0, 0};
+const float rotating[] = {3.0f, 0, 0};
 
 struct Trace {
   FallDetector detector;
@@ -34,7 +34,7 @@ struct Trace {
   void baseline(const float direction[3] = upright) { samples(30, direction); }
 
   void candidate() {
-    samples(11, low); // 100 ms from first low sample.
+    samples(5, low); // 40 ms from first low sample.
     assert(detector.state() == WAITING_FOR_IMPACT);
     sample(impact);
     assert(detector.state() == CONFIRMING_FALL);
@@ -78,8 +78,9 @@ int main() {
     Trace moving;
     moving.baseline(); moving.candidate();
     const float accelerating[] = {13.0f, 0, 0};
-    moving.samples(50, useGyro ? sideways : accelerating, useGyro ? rotating : still);
+    moving.samples(150, useGyro ? sideways : accelerating, useGyro ? rotating : still);
     assert(!moving.detector.consumeFallEvent());
+    assert(moving.detector.state() == MONITORING_NORMAL);
   }
 
   // Transient tilt and filter lag cannot confirm a return to upright.
@@ -89,18 +90,20 @@ int main() {
   recovery.sample(upright);
   assert(!recovery.detector.consumeFallEvent());
 
-  // Too little settled evidence at the deadline rejects the candidate.
+  // Movement at 500 ms gets extra time to settle instead of losing the fall.
   Trace late;
   late.baseline(); late.candidate();
-  late.samples(31, sideways, rotating);
-  late.samples(19, sideways);
+  late.samples(70, sideways, rotating);
+  late.samples(10, sideways);
   assert(!late.detector.consumeFallEvent());
+  late.sample(sideways);
+  assert(late.detector.consumeFallEvent());
 
-  // Exactly 200 ms of settled evidence is sufficient at 500 ms.
+  // Exactly 100 ms of settled evidence is sufficient at 500 ms.
   Trace settling;
   settling.baseline(); settling.candidate();
-  settling.samples(29, sideways, rotating);
-  settling.samples(21, sideways);
+  settling.samples(39, sideways, rotating);
+  settling.samples(11, sideways);
   assert(settling.detector.consumeFallEvent());
 
   // A small lean is not a fall posture, even when motion stops.
@@ -112,20 +115,56 @@ int main() {
 
   Trace shortFlight;
   shortFlight.baseline();
-  shortFlight.samples(10, low); // Only 90 ms.
+  shortFlight.samples(2, low); // Only 10 ms; impact can independently qualify.
   shortFlight.sample(impact);
   shortFlight.samples(50, sideways);
-  assert(!shortFlight.detector.consumeFallEvent());
+  assert(shortFlight.detector.consumeFallEvent());
 
   Trace softImpact;
-  softImpact.baseline(); softImpact.samples(11, low);
-  const float soft[] = {0, 0, 25}; // Threshold is strictly greater than 25.
+  softImpact.baseline();
+  const float soft[] = {0, 0, 17}; // No freefall, much softer than the old 25 gate.
   softImpact.sample(soft);
-  softImpact.samples(110, sideways);
-  assert(!softImpact.detector.consumeFallEvent());
+  const float tilted[] = {6.3057f, 0, 7.5149f}; // 40 degrees, below old posture gate.
+  const float residualMotion[] = {1.2f, 0, 0};
+  softImpact.samples(50, tilted, residualMotion);
+  assert(softImpact.detector.consumeFallEvent());
+
+  // A soft collapse can qualify through unloading and posture, without impact.
+  Trace collapse;
+  collapse.baseline();
+  const float unloaded[] = {0, 0, 6};
+  collapse.samples(5, unloaded);
+  collapse.samples(51, sideways);
+  assert(collapse.detector.consumeFallEvent());
+
+  // Short unloading without impact, ordinary posture changes, and subthreshold
+  // bumps alone must not become fall candidates.
+  Trace ordinary;
+  ordinary.baseline(); ordinary.samples(4, unloaded);
+  ordinary.samples(160, sideways);
+  assert(!ordinary.detector.consumeFallEvent());
+  ordinary.baseline();
+  const float belowImpact[] = {16, 0, 0};
+  ordinary.sample(belowImpact); ordinary.samples(160, upright);
+  assert(!ordinary.detector.consumeFallEvent());
+
+  // Repeated shorter jump flights and soft landings stay upright and are rejected.
+  Trace quickJumps;
+  quickJumps.baseline();
+  for (int jump = 0; jump < 12; ++jump) {
+    quickJumps.samples(2, unloaded);
+    quickJumps.sample(soft);
+    quickJumps.samples(25, upright);
+    assert(!quickJumps.detector.consumeFallEvent());
+  }
+  quickJumps.samples(160, upright);
+  assert(!quickJumps.detector.consumeFallEvent());
+  // A fall during jumping is still eligible; exercise never disables detection.
+  quickJumps.sample(soft); quickJumps.samples(50, sideways);
+  assert(quickJumps.detector.consumeFallEvent());
 
   Trace expired;
-  expired.baseline(); expired.samples(11, low);
+  expired.baseline(); expired.samples(5, low);
   expired.samples(100, upright); // Still no impact at the inclusive deadline.
   expired.sample(impact); // Impact now lies outside the permitted window.
   assert(expired.detector.state() == MONITORING_NORMAL);
