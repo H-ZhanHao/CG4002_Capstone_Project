@@ -1,7 +1,7 @@
 # Final fall-detection integration
 
-The AR enable/disable feature was removed on 2026-11-13. Hip fall detection
-runs automatically in `node1_final`; AR receives and acknowledges fall events
+Fall detection is controlled from the server terminal. Hip starts OFF in
+`node1_final`; AR receives and acknowledges fall events
 and displays the existing centred popup. Calibration and detector thresholds,
 local alarm behaviour, rep feedback, and the Unity assembly-reference fixes
 are retained.
@@ -10,10 +10,38 @@ are retained.
 
 `node1_final` and `node2_final` remain available. Both set `APP_FALL_DETECTION=1`
 and use the existing 100 Hz capture, 1 ms tick and independent-node TLS paths.
-The detector remains Hip-only. There is no runtime enable flag, AR setting
-command or default-OFF dependency. Phone disconnects/reconnects have no effect
-on detection. All 36 earlier PlatformIO sections retain their settings;
+The final profiles also set `APP_FALL_RUNTIME_CONTROL=1`: the detector starts
+OFF on each ESP reboot, and only Hip accepts the server's runtime command.
+Phone and server disconnects/reconnects retain the ESP's current setting.
+All earlier PlatformIO sections retain their settings;
 `node*_update_fall2` still disables detection at build time.
+
+## Server commands
+
+Type into the terminal running `python server_rep_fall.py` (the retained
+`communications/ultra96/server.py` console supports the same commands):
+
+```text
+fall on
+fall off
+fall status
+```
+
+`fall on` / `fall off` send an explicit setting to Hip using binary command
+`0x0C`, with payload `!B3x` (0/1 followed by three reserved zero bytes).
+Success is logged only after Hip's sampling task applies it and returns the
+matching `CONTROL_ACK` (`0x09`). Capture and rep feedback remain independent.
+Disabling clears partial detection; existing alarms and queued reports finish
+normally. The diagnostic `fall inject` also respects OFF.
+
+`fall status` reports the last confirmed setting on the current connection.
+It reports unknown before a setting is acknowledged, after timeout, or after
+Hip disconnects/reconnects; it does not query the device or infer OFF merely
+from a connection. Reissue `fall on` or `fall off` to confirm a setting.
+There is one outstanding setting at a time, a two-second ACK deadline, and
+no automatic retries or replay when an offline Hip reconnects. An unavailable
+Hip, unsupported legacy firmware, or a lost ACK cannot report false success.
+AR has no setting command and never sends OFF on reconnect.
 
 From `communications/firmware/FireBeetle_to_Ultra96`:
 
@@ -27,24 +55,25 @@ pio run -e node2_final -t upload --upload-port <WRIST_COM_PORT>
 
 Replace these beside the running `server_rep_fall.py`:
 
+- `server/server_rep_fall.py`
 - `server/dynamic_capture.py`
-- `server/rep_control.py`
-- `server/visualizer_protocol.py`
+- `server/fall_control.py`
 
-Replace `communications/ultra96/visualizer_gateway.py` in the gateway directory,
-and its `visualizer_protocol.py` if the gateway runs from a separate directory.
-Restart both services. `fall_control.py` is no longer used and has been removed
-from the repository. The supplied `server_rep_fall.py` and
-`window_assembler_updated.py` remain unchanged by this removal.
+Restart the server and flash `node1_final` onto Hip to apply the default-OFF
+behavior. For the retained communications server, deploy its matching
+`server.py`, `dynamic_capture.py` and `fall_control.py`. The two helper copies
+are identical. No gateway, phone protocol, model, or window assembler changes
+are needed for terminal control.
 
 ## Update Unity / AR handoff
 
-Replace `Ultra96VisualizerClient.cs` and `FallProtocol.cs` in the existing
+The AR toggle remains removed. When updating from the older toggle version,
+replace `Ultra96VisualizerClient.cs` and `FallProtocol.cs` in the existing
 Networking folder. Update `ExerciseDebugPanel.cs` if using the demo display;
 the button has been removed and the working centred fall popup is retained.
 Keep the corrected runtime/test `.asmdef` files and `VisualizerBootstrap.cs`.
-Rebuild/install the APK to apply the change. Previously shared runtime/demo
-ZIP packages in `.build/ar_fall_handoff/` have been refreshed.
+Rebuild/install the APK to remove the old controls. An app already running the
+alert-only client needs no update for these server terminal commands.
 
 The teammate's remaining integration API is:
 
@@ -73,14 +102,18 @@ From the repository root, with the existing Python gateway requirements:
 
 ```powershell
 python -B -m unittest discover -s server -p test_one_node_integration.py
+python -B -m unittest discover -s server -p test_server_fall_control.py
 python -B -m unittest discover -s server -p test_fall_notifications.py
 & communications/firmware/FireBeetle_to_Ultra96/fall_tests/run_tests.ps1
 & communications/unity/tests/run_protocol_host.ps1
 ```
 
+The setting tests cover both server consoles, Hip ACK matching, timeout,
+manual retry, firmware rejection, send failure, and phone/Hip reconnects.
 The notification tests use a real loopback TLS gateway, the supplied server
-and simulated ESP events. They check delivery without an enable request or
-rep session, reconnect replay, receipt acknowledgement, and rejection of the
-removed setting command. OpenSSL is required for the TLS test.
+and simulated ESP events. They check that already-created events can still
+be delivered without a phone setting request or rep session, reconnect replay,
+receipt acknowledgement, and rejection of the removed AR setting command.
+OpenSSL is required for the TLS test.
 Physical firmware flashing, APK installation and live IMU/phone acceptance
 must be repeated on the deployed devices.

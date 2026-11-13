@@ -1,4 +1,4 @@
-"""Automatic Hip event delivery after removal of the AR enable/disable feature."""
+"""Hip event delivery stays independent of server settings and AR rep sessions."""
 import asyncio
 import json
 from pathlib import Path

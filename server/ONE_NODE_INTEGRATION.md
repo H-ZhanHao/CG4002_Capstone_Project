@@ -1,6 +1,7 @@
 # Dynamic capture integration for server_rep_fall.py
 
-For the supplied 2026-11-13 files and automatic fall reporting in `node1_final` /
+For the supplied 2026-11-13 files and server-controlled fall detection (OFF at
+boot) in `node1_final` /
 `node2_final`, see [Final fall-detection integration](FINAL_FALL_CONTROL.md).
 `dynamic_capture.py` is now included in this directory alongside the server;
 the separate-copy instructions below describe the earlier integration.

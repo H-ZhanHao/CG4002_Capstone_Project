@@ -58,6 +58,11 @@
 #define APP_FALL_DETECTION 1
 #endif
 
+/* Opt-in server terminal control. Legacy profiles keep their existing startup behaviour. */
+#ifndef APP_FALL_RUNTIME_CONTROL
+#define APP_FALL_RUNTIME_CONTROL 0
+#endif
+
 /* Sampling measurements are enabled only by the dedicated diagnostic builds. */
 #ifndef APP_SAMPLING_DIAGNOSTICS
 #define APP_SAMPLING_DIAGNOSTICS 0

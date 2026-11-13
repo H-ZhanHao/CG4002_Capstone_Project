@@ -27,13 +27,15 @@
 #define PIPELINE_TRIGGER_QUEUE_LENGTH 2
 
 typedef enum {
-    COMMAND_BEGIN, COMMAND_END, COMMAND_ARM, COMMAND_FLUSH, COMMAND_STOP, COMMAND_FEEDBACK
+    COMMAND_BEGIN, COMMAND_END, COMMAND_ARM, COMMAND_FLUSH, COMMAND_STOP, COMMAND_FEEDBACK,
+    COMMAND_FALL_DETECTION
 } command_type_t;
 typedef struct {
     command_type_t type;
     uint32_t session_id;
     uint32_t boot_id;
     uint32_t command_sequence;
+    bool fall_enabled;
     protocol_feedback_t feedback;
     protocol_arm_t arm;
     protocol_start_flush_t flush;
@@ -62,6 +64,10 @@ static device_events_t device_events;
 static portMUX_TYPE event_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t board_boot_id;
 static uint64_t last_fall_us;
+/* Owned by pipeline_task, including the diagnostic fall injector. */
+static bool fall_detection_enabled;
+static uint32_t fall_command_sequence;
+static bool have_fall_command;
 
 #if APP_SAMPLING_DIAGNOSTICS
 static QueueHandle_t diagnostics_queue;
@@ -99,7 +105,7 @@ static void diagnostics_task(void *unused)
 
 static bool record_fall(bool synthetic)
 {
-    if (!APP_FALL_DETECTION) return false;
+    if (!APP_FALL_DETECTION || !fall_detection_enabled) return false;
     uint64_t now = (uint64_t)esp_timer_get_time();
     if (configured_node_id != 1 || (last_fall_us && now-last_fall_us < 3000000ULL)) return false;
     last_fall_us = now;
@@ -163,6 +169,7 @@ static void handle_command(const pipeline_command_t *command,
 #endif
         feedback_delivery_begin(&feedback_delivery, command->session_id, configured_node_id);
         *session_id = command->session_id;
+        have_fall_command = false;
         *boot_id = command->boot_id;
         *arm_generation = 0;
         *trigger_armed = false;
@@ -170,6 +177,31 @@ static void handle_command(const pipeline_command_t *command,
         physical_feeder_stop(feeder);
         xQueueReset(sample_queue);
         xQueueReset(trigger_queue);
+    } else if (command->type == COMMAND_FALL_DETECTION) {
+        physical_feedback_ack_t response = { .session_id = command->session_id,
+            .ack = { .command_type = PROTOCOL_MESSAGE_TYPE_FALL_DETECTION_SET,
+                .command_sequence = command->command_sequence,
+                .effective_local_us = reply.effective_local_us,
+                .result = PROTOCOL_CONTROL_RESULT_INVALID_STATE } };
+        if (command->session_id != *session_id) {
+            response.ack.result = PROTOCOL_CONTROL_RESULT_STALE_IDENTITY;
+        } else if (APP_FALL_DETECTION && APP_FALL_RUNTIME_CONTROL && configured_node_id == 1) {
+            if (have_fall_command && command->command_sequence <= fall_command_sequence) {
+                response.ack.result = command->command_sequence == fall_command_sequence &&
+                    command->fall_enabled == fall_detection_enabled
+                    ? PROTOCOL_CONTROL_RESULT_DUPLICATE : PROTOCOL_CONTROL_RESULT_STALE_IDENTITY;
+            } else {
+                if (fall_detection_enabled != command->fall_enabled)
+                    fall_bridge_reset(reply.effective_local_us);
+                fall_detection_enabled = command->fall_enabled;
+                fall_command_sequence = command->command_sequence;
+                have_fall_command = true;
+                response.ack.result = PROTOCOL_CONTROL_RESULT_APPLIED;
+                ESP_LOGI(TAG, "FALL_DETECTION enabled=%d sequence=%lu",
+                    fall_detection_enabled, (unsigned long)fall_command_sequence);
+            }
+        }
+        (void)xQueueSend(feedback_ack_queue, &response, 0);
     } else if (command->type == COMMAND_FEEDBACK) {
         physical_feedback_ack_t response = { .session_id = command->session_id };
         response.ack = feedback_delivery_process(&feedback_delivery,
@@ -325,7 +357,7 @@ static void pipeline_task(void *unused)
 #else
             if (hardware_bridge_capture(sequence, &hardware_sample, &peak)) {
 #endif
-                if (APP_FALL_DETECTION && fall_bridge_update(hardware_sample.acceleration,
+                if (fall_detection_enabled && fall_bridge_update(hardware_sample.acceleration,
                         hardware_sample.gyro, hardware_sample.timestamp_us, true))
                     (void)record_fall(false);
                 exercise_bridge_update(hardware_sample.timestamp_us,
@@ -364,7 +396,7 @@ static void pipeline_task(void *unused)
                         trigger_armed = false;
                 }
             } else {
-                if (APP_FALL_DETECTION)
+                if (fall_detection_enabled)
                     (void)fall_bridge_update(NULL, NULL, now_us, false);
             }
 #if APP_SAMPLING_DIAGNOSTICS
@@ -445,11 +477,14 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     if (command_queue == NULL || trigger_queue == NULL || feedback_ack_queue == NULL) return ESP_ERR_NO_MEM;
     sample_queue = output_queue;
     configured_node_id = node_id;
+    fall_detection_enabled = APP_FALL_DETECTION && !APP_FALL_RUNTIME_CONTROL;
     do { board_boot_id = esp_random(); } while (!board_boot_id);
     device_events_init(&device_events, board_boot_id);
     if (APP_FALL_DETECTION) fall_bridge_begin(node_id);
     else ESP_LOGI(TAG, "Fall detection disabled by build profile");
     feedback_bridge_set_fall_injector(inject_fall);
+    ESP_LOGI(TAG, "Fall detection startup enabled=%d runtime_control=%d",
+        fall_detection_enabled, APP_FALL_RUNTIME_CONTROL);
 #if APP_SAMPLING_DIAGNOSTICS
     diagnostics_queue = xQueueCreate(1, sizeof(sampling_diagnostics_t));
     if (diagnostics_queue == NULL) return ESP_ERR_NO_MEM;
@@ -558,6 +593,15 @@ bool physical_pipeline_submit_feedback(uint32_t session, uint32_t sequence,
     if (command_queue == NULL || feedback == NULL || session == 0) return false;
     pipeline_command_t command = { .type = COMMAND_FEEDBACK, .session_id = session,
         .command_sequence = sequence, .feedback = *feedback };
+    return xQueueSend(command_queue, &command, 0) == pdPASS;
+}
+
+bool physical_pipeline_submit_fall_detection(uint32_t session, uint32_t sequence,
+                                             bool enabled)
+{
+    if (command_queue == NULL || session == 0) return false;
+    pipeline_command_t command = { .type = COMMAND_FALL_DETECTION, .session_id = session,
+        .command_sequence = sequence, .fall_enabled = enabled };
     return xQueueSend(command_queue, &command, 0) == pdPASS;
 }
 
