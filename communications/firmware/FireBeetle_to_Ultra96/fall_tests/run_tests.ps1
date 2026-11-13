@@ -19,14 +19,6 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Hardware fall detector compilation failed' }
     & "$build/fall_detector_test.exe"
     if ($LASTEXITCODE -ne 0) { throw 'Hardware fall detector tests failed' }
-
-    $firmware = 'communications/firmware/FireBeetle_to_Ultra96'
-    gcc -std=c11 -Wall -Wextra -Werror "-I$firmware/include" `
-        "$firmware/src/protocol.c" "$PSScriptRoot/test_fall_control_protocol.c" `
-        -o "$build/test_fall_control_protocol.exe"
-    if ($LASTEXITCODE -ne 0) { throw 'Fall control protocol compilation failed' }
-    & "$build/test_fall_control_protocol.exe"
-    if ($LASTEXITCODE -ne 0) { throw 'Fall control protocol tests failed' }
 } finally {
     Pop-Location
 }

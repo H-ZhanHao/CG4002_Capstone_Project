@@ -229,17 +229,6 @@ int main() {
   Trace wrist(2);
   wrist.baseline(); wrist.candidate(); wrist.samples(50, sideways);
   assert(wrist.events == 0);
-
-  // Switching OFF/ON cancels partial confirmation without losing alarm cooldown.
-  Trace switched;
-  switched.baseline(); switched.candidate(); switched.samples(25, sideways);
-  fall_bridge_reset(switched.now);
-  switched.samples(60, sideways);
-  assert(switched.events == 0);
-  switched.baseline(); switched.candidate(); switched.confirm();
-  fall_bridge_reset(switched.now);
-  switched.baseline(); switched.candidate(); switched.samples(50, sideways);
-  assert(switched.events == 1);
   confirmedFall(0, upright, sideways); // Reinitialization clears role/cooldown.
 
   puts("Fall bridge: impact-only and soft-collapse paths, settling/timeout, gyro, posture, gaps, invalid inputs, clock rollover, cooldown, Hip-only and alarm priority checks passed");

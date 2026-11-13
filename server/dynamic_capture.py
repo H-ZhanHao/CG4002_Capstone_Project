@@ -9,11 +9,6 @@ import logging
 import struct
 import time
 
-try:
-    from fall_control import FallDetectionControl, MESSAGE_TYPE_FALL_DETECTION_SET
-except ImportError:
-    from .fall_control import FallDetectionControl, MESSAGE_TYPE_FALL_DETECTION_SET
-
 LOGGER = logging.getLogger("server")
 STREAM_TIMEOUT_US = 3_000_000
 
@@ -38,7 +33,6 @@ def coordinator_class(api):
             if not self.physical_mode:
                 raise ValueError("capture requires physical sensor streaming")
             self.nodes = {}
-            self.fall_control = FallDetectionControl(self, api.build_header)
             self._run_origin = None
             self._run_sequence = None
 
@@ -232,8 +226,6 @@ def coordinator_class(api):
             with self._lock:
                 if self._connections.get(connection.node_id) is not connection:
                     return
-                if command_type == MESSAGE_TYPE_FALL_DETECTION_SET:
-                    return self.fall_control.acknowledge(connection, command_sequence, result)
                 if command_type == api.MESSAGE_TYPE_FEEDBACK_COMMAND:
                     base_ack = getattr(super(), "control_acknowledged", None)
                     if base_ack is not None:

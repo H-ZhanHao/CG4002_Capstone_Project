@@ -41,7 +41,7 @@ namespace CG4002.Visualizer
             bool initialEnabled = GUI.enabled;
             GUI.enabled = initialEnabled && !alertVisible;
             float width = Mathf.Min(Screen.width - 32f, 620f);
-            GUILayout.BeginArea(new Rect(16f, 16f, width, 410f), GUI.skin.box);
+            GUILayout.BeginArea(new Rect(16f, 16f, width, 310f), GUI.skin.box);
             // State colour makes loss/staleness visible without requiring the
             // evaluator to inspect terminal output.
             Color previousColor = GUI.color;
@@ -65,24 +65,6 @@ namespace CG4002.Visualizer
 
             GUILayout.Space(8f);
             GUILayout.Label(client.StatusDetail, bodyStyle);
-            GUILayout.Space(8f);
-            GUILayout.Label("Fall detection: " + client.FallDetectionDetail, bodyStyle);
-            bool previousEnabled = GUI.enabled;
-            GUI.enabled = previousEnabled && client.CanControlFallDetection;
-            if (client.FallDetectionEnabled.HasValue)
-            {
-                if (GUILayout.Button(client.FallDetectionEnabled.Value ? "Disable fall detection" : "Enable fall detection"))
-                    _ = client.SetFallDetectionEnabled(!client.FallDetectionEnabled.Value);
-            }
-            else
-            {
-                // Unknown can mean either setting after a lost ACK: allow an explicit choice.
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("Set ON")) _ = client.SetFallDetectionEnabled(true);
-                if (GUILayout.Button("Set OFF")) _ = client.SetFallDetectionEnabled(false);
-                GUILayout.EndHorizontal();
-            }
-            GUI.enabled = previousEnabled;
             GUILayout.EndArea();
             GUI.enabled = initialEnabled;
             if (alertVisible)

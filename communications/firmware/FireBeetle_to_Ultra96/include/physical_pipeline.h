@@ -22,8 +22,6 @@ typedef struct {
 bool physical_pipeline_submit_feedback(uint32_t session, uint32_t sequence,
                                        const protocol_feedback_t *feedback);
 bool physical_pipeline_receive_feedback_ack(physical_feedback_ack_t *response);
-bool physical_pipeline_submit_fall_detection(uint32_t session, uint32_t sequence,
-                                             bool enabled);
 
 esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id);
 bool physical_pipeline_begin_session(uint32_t session_id, uint32_t boot_id);

@@ -26,27 +26,6 @@ MAX_PHONE_BYTES = 1024
 MAX_SAFE_INTEGER = 9007199254740991
 
 
-def parse_fall_detection_message(payload):
-    """Explicit Hip setting; independent of exercise and rep-session state."""
-    if not isinstance(payload, (str, bytes)) or len(payload.encode() if isinstance(payload, str) else payload) > MAX_PHONE_BYTES:
-        raise VisualizerProtocolError("phone message exceeds 1024 bytes")
-    try:
-        message = json.loads(payload)
-    except (ValueError, UnicodeError) as error:
-        raise VisualizerProtocolError("invalid phone JSON") from error
-    fields = {"v", "type", "run_id", "seq", "enabled"}
-    if not isinstance(message, dict) or set(message) != fields:
-        raise VisualizerProtocolError("unsupported fall control fields")
-    if type(message["v"]) is not int or message["v"] != 1 or message["type"] != "fall_detection_set":
-        raise VisualizerProtocolError("unsupported fall control command")
-    for field in ("run_id", "seq"):
-        if type(message[field]) is not int or not 0 <= message[field] <= MAX_SAFE_INTEGER:
-            raise VisualizerProtocolError("invalid " + field)
-    if message["run_id"] == 0 or type(message["enabled"]) is not bool:
-        raise VisualizerProtocolError("invalid fall control run or enabled flag")
-    return message
-
-
 def parse_rep_message(payload):
     """Strict bounded phone contract; no arbitrary hardware/control commands."""
     if not isinstance(payload, (str, bytes)) or len(payload.encode() if isinstance(payload, str) else payload) > MAX_PHONE_BYTES:

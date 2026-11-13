@@ -373,31 +373,6 @@ static void process_feedback(const application_command_t *command,
     enqueue_control_ack(command->session_id, header->sequence, &ack);
 }
 
-static void process_fall_detection(const application_command_t *command,
-                                   const protocol_header_t *header)
-{
-    bool enabled;
-    protocol_control_ack_t ack = {
-        .command_type = PROTOCOL_MESSAGE_TYPE_FALL_DETECTION_SET,
-        .command_sequence = header->sequence,
-        .result = PROTOCOL_CONTROL_RESULT_INVALID_STATE,
-        .effective_local_us = (uint64_t)esp_timer_get_time(),
-    };
-    if (header->node_id != 0 || header->flags != 0 ||
-        !protocol_decode_fall_detection_payload(command->frame + PROTOCOL_HEADER_SIZE,
-            header->payload_length, &enabled)) {
-        enqueue_error(command->session_id, header->sequence,
-            PROTOCOL_ERROR_INVALID_FRAME, header->message_type);
-        return;
-    }
-#if APP_PHYSICAL_INTEGRATION
-    if (physical_pipeline_submit_fall_detection(command->session_id, header->sequence, enabled))
-        return; // ACK is emitted only after the sampling task applies the setting.
-    ack.result = PROTOCOL_CONTROL_RESULT_BUSY;
-#endif
-    enqueue_control_ack(command->session_id, header->sequence, &ack);
-}
-
 static bool replay_control_if_cached(
     const application_command_t *command, const protocol_header_t *header,
     control_cache_entry_t *cache)
@@ -664,11 +639,6 @@ static void process_frame(
 
     if (header.message_type == PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND) {
         process_feedback(command, &header);
-        return;
-    }
-
-    if (header.message_type == PROTOCOL_MESSAGE_TYPE_FALL_DETECTION_SET) {
-        process_fall_detection(command, &header);
         return;
     }
 

@@ -62,16 +62,6 @@ namespace CG4002.Visualizer
         public bool FallAlertVisible { get; private set; }
         public event Action<FallEventMessage> FallReceived;
         public void DismissFallAlert() => FallAlertVisible = false;
-        public bool? FallDetectionEnabled { get; private set; }
-        public bool FallDetectionPending { get; private set; }
-        public string FallDetectionDetail { get; private set; } = "Unconfirmed; defaults OFF at ESP boot";
-        public bool CanControlFallDetection => activeSocket != null && fallControlReady && !FallDetectionPending;
-        private bool fallControlReady;
-        private long fallSequence;
-        private long fallRequestSequence = -1;
-        private bool fallRequestedEnabled;
-        private bool fallRequestTimedOut;
-        private float fallRequestDeadline;
 
         public string Url { get; private set; } = DefaultUrl;
         public VisualizerConnectionState State { get; private set; } =
@@ -136,14 +126,6 @@ namespace CG4002.Visualizer
                 action();
             }
 
-            if (FallDetectionPending && Time.realtimeSinceStartup >= fallRequestDeadline)
-            {
-                FallDetectionPending = false;
-                FallDetectionEnabled = null;
-                fallRequestTimedOut = true;
-                FallDetectionDetail = "Unconfirmed; retry manually";
-            }
-
             if (State == VisualizerConnectionState.Live && hasMessage &&
                 Time.realtimeSinceStartup - lastMessageRealtime > StaleAfterSeconds)
             {
@@ -184,14 +166,7 @@ namespace CG4002.Visualizer
                     finally
                     {
                         activeSocket = null;
-                        QueueOnMainThread(() => {
-                            RepSessionReady = false;
-                            fallControlReady = false;
-                            FallDetectionPending = false;
-                            FallDetectionEnabled = null;
-                            fallRequestTimedOut = true;
-                            FallDetectionDetail = "Disconnected; ESP setting unconfirmed";
-                        });
+                        QueueOnMainThread(() => RepSessionReady = false);
                     }
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -236,24 +211,6 @@ namespace CG4002.Visualizer
         /// </summary>
         private void ProcessMessage(string json, PinnedWebSocketConnection source)
         {
-            if (FallDetectionProtocol.TryParse(json, out FallDetectionResponse setting))
-            {
-                QueueOnMainThread(() => {
-                    if (activeSocket != source || setting.RunId != RepRunId ||
-                        setting.Sequence != fallRequestSequence || setting.RequestedEnabled != fallRequestedEnabled)
-                        return;
-                    if (fallRequestTimedOut && (setting.Status == "applied" || setting.Status == "pending"))
-                        return; // A late receipt cannot silently turn an unconfirmed UI ON.
-                    FallDetectionPending = setting.Status == "pending";
-                    FallDetectionEnabled = setting.Enabled;
-                    FallDetectionDetail = setting.Status == "applied"
-                        ? (setting.Enabled == true ? "ON (Hip confirmed)" : "OFF (Hip confirmed)")
-                        : setting.Status == "pending"
-                            ? (fallRequestedEnabled ? "Enabling..." : "Disabling...")
-                            : "Unconfirmed: " + setting.Reason;
-                });
-                return;
-            }
             if (FallProtocol.TryParse(json, out FallEventMessage fall))
             {
                 QueueOnMainThread(() =>
@@ -287,10 +244,6 @@ namespace CG4002.Visualizer
                         previousRepRun = RepRunId;
                         RepRunId = response.RunId;
                         RepSessionReady = false;
-                        // Minimal reconnect policy: explicitly request OFF, never replay ON.
-                        fallControlReady = true;
-                        FallDetectionPending = false;
-                        _ = SetFallDetectionEnabled(false);
                         if (RepSessionId != null)
                         {
                             if (previousRepRun != 0 && previousRepRun != RepRunId)
@@ -376,44 +329,6 @@ namespace CG4002.Visualizer
                 throw new ArgumentException("Start a rep session; use a new session to reset its count");
             currentRepCount = repIndex;
             return RepSessionReady ? SendRepRequestAsync("rep_event") : Task.FromResult(false);
-        }
-
-        /// <summary>
-        /// Call on Unity's main thread. True means written, not ESP-confirmed;
-        /// inspect FallDetectionPending/Enabled/Detail for the applied result.
-        /// </summary>
-        public async Task<bool> SetFallDetectionEnabled(bool enabled)
-        {
-            if (!CanControlFallDetection) return false;
-            PinnedWebSocketConnection source = activeSocket;
-            long sequence = ++fallSequence;
-            long run = RepRunId;
-            fallRequestSequence = sequence;
-            fallRequestedEnabled = enabled;
-            fallRequestTimedOut = false;
-            FallDetectionPending = true;
-            FallDetectionEnabled = null;
-            FallDetectionDetail = enabled ? "Enabling..." : "Disabling...";
-            fallRequestDeadline = Time.realtimeSinceStartup + 4f;
-            try
-            {
-                using var sendTimeout = CancellationTokenSource.CreateLinkedTokenSource(connectionToken);
-                sendTimeout.CancelAfter(TimeSpan.FromSeconds(2));
-                await source.SendTextAsync(FallDetectionProtocol.Build(run, sequence, enabled), sendTimeout.Token);
-                return true;
-            }
-            catch (Exception error) when (error is IOException || error is OperationCanceledException ||
-                                          error is ObjectDisposedException)
-            {
-                QueueOnMainThread(() => {
-                    if (activeSocket != source || fallRequestSequence != sequence) return;
-                    FallDetectionPending = false;
-                    FallDetectionEnabled = null;
-                    fallRequestTimedOut = true;
-                    FallDetectionDetail = "Unconfirmed; send failed, retry manually";
-                });
-                return false;
-            }
         }
 
         private async Task SendFallAckAsync(PinnedWebSocketConnection source, FallEventMessage fall)

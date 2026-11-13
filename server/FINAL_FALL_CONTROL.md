@@ -1,58 +1,21 @@
-# AR fall-detection control
+# Final fall-detection integration
 
-Implemented on 2026-11-13 using the supplied `server_rep_fall.py`,
-`window_assembler_updated.py`, and `dynamic_capture.py`. The server and window
-assembler are unchanged from those supplied files. The capture coordinator adds
-the fall-control handler and a compatibility fallback for older server feedback
-ACK handling. Matching shared helpers are present in `server/` and
-`communications/ultra96/`.
+The AR enable/disable feature was removed on 2026-11-13. Hip fall detection
+runs automatically in `node1_final`; AR receives and acknowledges fall events
+and displays the existing centred popup. Calibration and detector thresholds,
+local alarm behaviour, rep feedback, and the Unity assembly-reference fixes
+are retained.
 
-## Behaviour
+## Firmware
 
-- `node1_final` and `node2_final` are new PlatformIO environments. All earlier
-  environment definitions are unchanged, including the disabled-fall
-  `node*_update_fall2` profiles.
-- The final profiles compile in fall detection but start it OFF. Only Hip /
-  Node 1 accepts the runtime setting. Legacy profiles retain their existing
-  startup behaviour and reject this setting command.
-- The Unity debug panel exposes Enable/Disable. After an unconfirmed result it
-  offers explicit Set ON / Set OFF buttons. The same public client API can be
-  bound to a button in an AR scene:
-  `SetFallDetectionEnabled(bool enabled)`.
-- A setting remains pending until the ESP sampling task applies it and returns
-  an ACK. A successful API send alone does not mean the ESP changed its setting.
-- One setting command is outstanding at a time. The server waits two seconds
-  for its ACK; Unity has a four-second overall response timeout. There are no
-  automatic setting retries or separate state-query messages. Retry manually.
-- Every AR control connection requests OFF when its welcome message arrives.
-  OFF is displayed as confirmed only after the ESP ACK. Reconnecting while Hip
-  is unavailable leaves the setting unconfirmed; nothing is queued for replay.
-- Losing the phone connection retains the ESP's last applied setting. ESP
-  reboot resets it OFF. Replacing/losing Hip's server connection invalidates an
-  existing displayed confirmation; the user can explicitly set ON or OFF again.
-- Changing mode resets partial fall confirmation. Existing alarms finish and
-  queued fall reports remain deliverable. Sensor capture, exercise processing,
-  and rep feedback continue independently. Synthetic `fall inject` also respects
-  OFF; the separate buzzer diagnostic is still an output test.
+`node1_final` and `node2_final` remain available. Both set `APP_FALL_DETECTION=1`
+and use the existing 100 Hz capture, 1 ms tick and independent-node TLS paths.
+The detector remains Hip-only. There is no runtime enable flag, AR setting
+command or default-OFF dependency. Phone disconnects/reconnects have no effect
+on detection. All 36 earlier PlatformIO sections retain their settings;
+`node*_update_fall2` still disables detection at build time.
 
-## Deployment
-
-Deploy these together beside the existing AI server dependencies:
-
-- `server/server_rep_fall.py`
-- `server/window_assembler_updated.py`
-- `server/dynamic_capture.py`
-- `server/fall_control.py`
-- `server/rep_control.py`
-- `server/visualizer_protocol.py`
-
-Update the running gateway with
-`communications/ultra96/visualizer_gateway.py` and the matching
-`visualizer_protocol.py`. Retain its existing fall-delivery and TLS dependencies.
-No ports, relay routes, certificates, or AI model changes are needed. Launch the
-AI server using its existing `python server_rep_fall.py` command.
-
-Build and flash from `communications/firmware/FireBeetle_to_Ultra96`:
+From `communications/firmware/FireBeetle_to_Ultra96`:
 
 ```powershell
 pio run -e node1_final -e node2_final
@@ -60,53 +23,64 @@ pio run -e node1_final -t upload --upload-port <HIP_COM_PORT>
 pio run -e node2_final -t upload --upload-port <WRIST_COM_PORT>
 ```
 
-Each new environment gets its own `.pio/build/node*_final` output and generated
-`sdkconfig.node*_final`. They inherit the cleanup profile's 100 Hz capture,
-1 ms scheduler tick, independent-node TLS transport, and feedback behaviour.
+## Update Ultra96
 
-Rebuild the Unity project/APK to include the controls. The checked-in APK has
-not been rebuilt by this implementation.
+Replace these beside the running `server_rep_fall.py`:
 
-## Protocol
+- `server/dynamic_capture.py`
+- `server/rep_control.py`
+- `server/visualizer_protocol.py`
 
-AR sends bounded JSON through the existing WSS / loopback control connection:
+Replace `communications/ultra96/visualizer_gateway.py` in the gateway directory,
+and its `visualizer_protocol.py` if the gateway runs from a separate directory.
+Restart both services. `fall_control.py` is no longer used and has been removed
+from the repository. The supplied `server_rep_fall.py` and
+`window_assembler_updated.py` remain unchanged by this removal.
+
+## Update Unity / AR handoff
+
+Replace `Ultra96VisualizerClient.cs` and `FallProtocol.cs` in the existing
+Networking folder. Update `ExerciseDebugPanel.cs` if using the demo display;
+the button has been removed and the working centred fall popup is retained.
+Keep the corrected runtime/test `.asmdef` files and `VisualizerBootstrap.cs`.
+Rebuild/install the APK to apply the change. Previously shared runtime/demo
+ZIP packages in `.build/ar_fall_handoff/` have been refreshed.
+
+The teammate's remaining integration API is:
+
+- Subscribe to `client.FallReceived` to display their AR popup. Callbacks run
+  on Unity's main thread; unsubscribe when the UI is disabled.
+- Read `client.FallAlertVisible` when restoring a UI after scene changes.
+- Read `client.LatestFall` for the event identity.
+- Call `client.DismissFallAlert()` when dismissing the popup.
+
+The client sends the receipt ACK automatically and suppresses duplicate alerts.
+It no longer exposes enable/disable methods or sends a setting on reconnect.
+There should be one persistent networking client per app.
+
+Fall notification JSON is unchanged:
 
 ```json
-{"v":1,"type":"fall_detection_set","run_id":123,"seq":1,"enabled":true}
+{"v":1,"type":"fall_event","node_id":1,"boot_id":1234,"event_id":"1"}
 ```
 
-The result has type `fall_detection_result`, the same `run_id` and `seq`,
-`requested_enabled`, `status`, `reason`, and `enabled`. `enabled` is a boolean
-only for `status: "applied"`; otherwise it is null. Other statuses are
-`pending`, `rejected`, `timeout`, and `unavailable`.
-
-Ultra96 sends binary command `0x0C` to Hip using the existing header/session and
-a four-byte payload: boolean 0/1 followed by three zero reserved bytes (`!B3x`).
-ESP replies using the existing `CONTROL_ACK` (`0x09`), with command type `0x0C`
-and the matching command sequence. Wrong-node, stale-session/sequence, late,
-and superseded ACKs cannot confirm a newer request.
+Its receipt uses the same identity with `type: "fall_ack"`. `event_id` remains
+a string. Existing exercise and rep messages are unchanged.
 
 ## Validation
 
-From the repository root, in a Python environment with the existing gateway
-requirements installed (`communications/ultra96/requirements.txt`):
+From the repository root, with the existing Python gateway requirements:
 
 ```powershell
-python -B -m unittest discover -s communications/ultra96 -p test_final_fall_control.py
 python -B -m unittest discover -s server -p test_one_node_integration.py
+python -B -m unittest discover -s server -p test_fall_notifications.py
 & communications/firmware/FireBeetle_to_Ultra96/fall_tests/run_tests.ps1
 & communications/unity/tests/run_protocol_host.ps1
 ```
 
-The WSS tests use a simulated ESP connection, the real supplied server
-coordinator/control service, the real gateway, and a temporary trusted TLS
-certificate. OpenSSL is required for that test. The managed host compiles the
-Unity networking/UI source and executes protocol cases without launching Unity.
-Both final firmware environments have been built successfully. Physical IMU,
-phone UI, flashing, and live Ultra96/DPU acceptance remain hardware checks.
-
-The legacy `test_server` and `test_window_assembler` suites currently report 24
-failures and 9 errors across 96 tests. The same failing cases occur with the
-original Git capture coordinator, so they predate this feature. The supplied
-server's 14 active integration tests and the feedback-delivery regression suite
-pass with the updated coordinator.
+The notification tests use a real loopback TLS gateway, the supplied server
+and simulated ESP events. They check delivery without an enable request or
+rep session, reconnect replay, receipt acknowledgement, and rejection of the
+removed setting command. OpenSSL is required for the TLS test.
+Physical firmware flashing, APK installation and live IMU/phone acceptance
+must be repeated on the deployed devices.

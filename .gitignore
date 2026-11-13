@@ -10,7 +10,6 @@ communications/firmware/FireBeetle_to_Ultra96/test/
 communications/ultra96/test*y
 !communications/ultra96/test_dynamic_capture.py
 !communications/ultra96/test_dynamic_inference.py
-!communications/ultra96/test_final_fall_control.py
 communications/ultra96/stage4_fixtures/inference_pipeline.py
 communications/unity/tests/*
 !communications/unity/tests/ProtocolHost.cs
@@ -20,8 +19,6 @@ communications/unity/Ultra96VisualizerDemo/Assets/Tests/*
 communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/*
 !communications/unity/Ultra96VisualizerDemo/Assets/Tests/
 !communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/
-!communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/FallDetectionControlTests.cs
-!communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/FallDetectionControlTests.cs.meta
 !communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs
 !communications/unity/Ultra96VisualizerDemo/Assets/Tests/EditMode/RepSessionSendTests.cs.meta
 

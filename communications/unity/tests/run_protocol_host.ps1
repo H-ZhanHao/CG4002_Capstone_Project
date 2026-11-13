@@ -7,8 +7,9 @@ $dotnetRoot = Split-Path (Get-Command dotnet).Source
 $sdk = Get-ChildItem (Join-Path $dotnetRoot 'sdk') -Directory | Sort-Object { [version]$_.Name } | Select-Object -Last 1
 $compiler = Join-Path $sdk.FullName 'Roslyn/bincore/csc.dll'
 [xml]$csproj = Get-Content -LiteralPath (Join-Path $project 'CG4002.Visualizer.csproj')
+[xml]$testProject = Get-Content -LiteralPath (Join-Path $project 'CG4002.Visualizer.Tests.csproj')
 $references = @{}
-foreach ($reference in $csproj.Project.ItemGroup.Reference) {
+foreach ($reference in (@($csproj.Project.ItemGroup.Reference) + @($testProject.Project.ItemGroup.Reference))) {
     if (-not $reference.HintPath) { continue }
     $path = [string]$reference.HintPath
     if (-not [IO.Path]::IsPathRooted($path)) { $path = Join-Path $project $path }
@@ -21,6 +22,7 @@ $arguments = @('/nostdlib+', '/langversion:9.0', '/target:exe', "/out:$output/Pr
 foreach ($path in $references.Values) { $arguments += "/reference:`"$path`"" }
 foreach ($source in Get-ChildItem (Join-Path $project 'Assets/Scripts/Networking') -Filter '*.cs') { $arguments += "`"$($source.FullName)`"" }
 foreach ($source in Get-ChildItem (Join-Path $project 'Assets/Scripts/UI') -Filter '*.cs') { $arguments += "`"$($source.FullName)`"" }
+foreach ($source in Get-ChildItem (Join-Path $project 'Assets/Scripts') -Filter '*.cs') { $arguments += "`"$($source.FullName)`"" }
 foreach ($source in Get-ChildItem (Join-Path $project 'Assets/Tests/EditMode') -Filter '*.cs') { $arguments += "`"$($source.FullName)`"" }
 $arguments += "`"$(Join-Path $PSScriptRoot 'ProtocolHost.cs')`""
 $response = Join-Path $output 'compile.rsp'

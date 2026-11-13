@@ -17,10 +17,6 @@ extern "C" void fall_bridge_begin(uint8_t node) {
   haveSample = haveAlarm = false;
   reset(0);
 }
-extern "C" void fall_bridge_reset(uint64_t now) {
-  haveSample = false;
-  reset(now);
-}
 extern "C" bool fall_bridge_update(const float a[3], const float gyro[3],
                                    uint64_t now, bool valid) {
   if (!hip) return false;
