@@ -94,28 +94,32 @@ See the Ultra96 README for action IDs, deployment and physical checks.
 
 ## Fall detector integration
 
-`fall_bridge.cpp` builds and calls the canonical `hardware/node/FallDetector.cpp`.
-The physical pipeline passes raw acceleration (m/s^2), gyro (rad/s), and the
-capture timestamp from the same IMU read. The adapter converts microseconds to
-milliseconds; gyro bias correction stays inside the hardware detector.
+`fall_bridge.cpp` calls the canonical `hardware/node/FallDetector.cpp`, restored
+with its header and fall thresholds from commit `cfcb6ac`. The physical pipeline
+still passes acceleration (m/s^2), gyro (rad/s), and the capture timestamp from
+the same IMU read. The adapter computes raw acceleration magnitude and converts
+microseconds to milliseconds for the old `update(magnitude, milliseconds)` API.
+Gyro inputs are checked for validity but no longer gate detection.
 
-Node 1 (Hip) learns a stable gravity reference from 200 ms of quiet samples.
-A candidate starts with either an impact above 16 m/s^2 (without requiring
-freefall), or acceleration below 7 m/s^2 for at least 40 ms followed within
-1000 ms by an impact or quiet changed posture, allowing soft landings.
-Confirmation starts at that impact or first quiet changed-posture sample.
-It requires at least 500 ms from confirmation start and at least 100 ms of
-settled posture changed by 35 degrees or more. Quiet means acceleration within
-3 m/s^2 of gravity and bias-corrected gyro magnitude at most 1.8 rad/s.
-A quiet return to the original posture at/after 500 ms rejects a jump-like
-landing; otherwise settling may continue up to 1500 ms from confirmation start.
-The hardware `ExerciseConfig.h` is the source of these tuning values. These
-are initial settings requiring worn-sensor validation, not fall guarantees.
+Node 1 (Hip) must see magnitude below 4 m/s^2 continuously for at least 100 ms,
+then magnitude above 25 m/s^2 while waiting for impact. This emits an event
+immediately, without gravity learning, posture/settling confirmation, or an
+impact-only/soft-collapse path. The nominal impact wait is 1000 ms; historical
+impact-before-timeout ordering is preserved, so a non-impact reading past the
+deadline expires the wait, while an impact on that update is checked first.
+The hardware `ExerciseConfig.h` is the source of the restored thresholds.
 
-The bridge rejects missing/nonfinite sensor inputs, resets on non-increasing
-timestamps or gaps exceeding the hardware's 100 ms limit, and suppresses repeat
-events during the three-second alarm. The existing local buzzer and device-event
-delivery path receives only confirmed falls. Node 2 (Wrist) does not report falls.
+The bridge retains its independent 100 ms maximum sample gap, missing/nonfinite
+acceleration and gyro rejection, non-increasing timestamp resets, runtime mode
+reset, and three-second alarm cooldown. Only Hip reports fall events. Existing
+local alarm priority, device-event delivery and acknowledgements are unchanged.
+A qualified event no longer waits 500 ms for posture confirmation.
+
+The `node*_final` profiles still start detection OFF after reboot and accept
+server `fall on` / `fall off`; `fall status` reports the last acknowledged
+setting. All other profile flags are unchanged. This algorithm rollback needs
+only rebuilt/flashed firmware; no Ultra96, gateway or AR update is required
+when the server controls are already deployed.
 
 Run the portable bridge and canonical detector regression tests from the repo
 root with:
@@ -146,7 +150,7 @@ pio run -e node2_update_fall -t upload --upload-port COM_WRIST
 
 The updated bridge is shared source, so rebuilding an existing environment
 also compiles the updated detector. `fall inject` checks alarm/event delivery;
-it bypasses sensor-based detection and does not validate the new confirmation.
+it bypasses sensor-based detection and does not validate the freefall/impact rule.
 
 ## Cleanup profiles
 
@@ -185,7 +189,8 @@ Fall detection is temporarily disabled in both profiles with
 queues a fall event. The explicit `feedback fall-alarm` output diagnostic
 remains available. To restore detection, change the flag to
 `-D APP_FALL_DETECTION=1` in both profiles, rebuild and upload.
-Other profiles retain fall detection by default.
+Other legacy profiles retain their build-time behavior; the final profiles
+compile detection in but start it OFF under server runtime control.
 The standalone hardware Bluetooth and ESP-NOW control flows are not added.
 
 Build from `communications/firmware/FireBeetle_to_Ultra96`:
@@ -209,7 +214,8 @@ pio run --disable-auto-clean -e node1_update_fall2 -t upload --upload-port COM_H
 pio run --disable-auto-clean -e node2_update_fall2 -t upload --upload-port COM_WRIST
 ```
 
-The host bridge tests cover the new impact-only and soft-collapse paths,
-Hip-only reporting, cooldown, delayed settling and alarm priority. Physical
+The host bridge tests cover the restored freefall/impact path, immediate
+events, Hip-only reporting, invalid inputs, sample gaps, runtime reset,
+cooldown and alarm priority. Physical
 validation must use actual sensor motion after re-enabling detection;
 `fall inject` bypasses the detector when enabled.

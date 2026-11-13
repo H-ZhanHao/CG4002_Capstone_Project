@@ -2,9 +2,9 @@
 
 Fall detection is controlled from the server terminal. Hip starts OFF in
 `node1_final`; AR receives and acknowledges fall events
-and displays the existing centred popup. Calibration and detector thresholds,
-local alarm behaviour, rep feedback, and the Unity assembly-reference fixes
-are retained.
+and displays the existing centred popup. The fall algorithm and thresholds
+are restored from `cfcb6ac`; exercise calibration, local alarm duration, rep
+feedback, and the Unity assembly-reference fixes are retained.
 
 ## Firmware
 
@@ -15,6 +15,17 @@ OFF on each ESP reboot, and only Hip accepts the server's runtime command.
 Phone and server disconnects/reconnects retain the ESP's current setting.
 All earlier PlatformIO sections retain their settings;
 `node*_update_fall2` still disables detection at build time.
+
+The restored detector requires acceleration magnitude below 4 m/s^2 for at
+least 100 ms before waiting for an impact above 25 m/s^2. It reports immediately
+on qualifying impact, without posture/gyro confirmation. The nominal impact
+wait is 1000 ms; the historical impact-before-expiry check is preserved.
+The communications adapter retains its 100 ms gap limit, invalid-input and
+timestamp resets, runtime setting reset, Hip-only reporting and alarm cooldown.
+
+For this detector rollback alone, rebuild and flash the final firmware onto
+the boards. No Ultra96 files or AR app need replacing if the server controls
+documented below are already deployed.
 
 ## Server commands
 
