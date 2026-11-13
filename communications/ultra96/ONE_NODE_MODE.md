@@ -28,7 +28,7 @@ On Ultra96, from `communications/ultra96`, use either:
 python server.py --max-missing-fraction 0.03
 
 # AI capture, assuming the existing deployed infer_window supports either node:
-python server_AI.py --max-missing-fraction 0.03
+python server_one_node.py --max-missing-fraction 0.03
 ```
 
 Keep the existing relay and network/TLS setup. Both launch commands always
@@ -36,18 +36,24 @@ use independent node readiness, dynamic joining, and available-node windows.
 The legacy coordinator that waited for both nodes has been removed. The new
 firmware also accepts the existing history-flush commands.
 
-`server_AI.py` imports the AI teammate's `inference_pipeline.InferencePipeline`.
+`server_one_node.py` is the AI entrypoint renamed from `server_AI.py` in commit
+`a0d3e59`. It imports the local `window_assembler.py` and the AI teammate's
+`inference_pipeline.InferencePipeline`.
 Keep that file on Ultra96; `dynamic_inference.py` is no longer imported by the
 server and is not required for deployment. The teammate owns adapting their
 pipeline for available-node windows and idle handling. The local
 `dynamic_inference.py` remains a reference implementation, not the deployed
 pipeline.
 
-`server_AI.py` still needs the deployed model runtime, compiled models, and DPU
-overlay for real inference. Their absence in this checkout does not block
-communications implementation. Per the agreed assumption, the deployed
-`infer_window(window)` accepts node 1 alone, node 2 alone, or both. This assumption
-has been tested with deterministic model results, not real model inference.
+`server_one_node.py` still needs the deployed model runtime, compiled models,
+and DPU overlay for real inference. This checkout keeps the integrated runtime
+and model assets under `../../server/`, rather than beside this entrypoint.
+Deployment must make the runtime modules importable and configure the model
+and overlay paths for the chosen layout. The capture contract accepts node 1
+alone, node 2 alone, or both. Renaming the entrypoint does not establish that
+the deployed model supports every input combination: the checked-in
+`../../server/late_fusion_vart.py` still rejects windows missing either node.
+The earlier single-node inference checks used deterministic model results.
 
 An optional `--inference-adapter package:factory` loads an alternative adapter.
 The factory receives parsed CLI arguments, initializes/retains any required

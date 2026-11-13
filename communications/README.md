@@ -22,8 +22,7 @@ build profiles have been removed. See the
 evidence and conclusions.
 
 The earlier FireBeetle TCP/22 reachability probe was removed after embedded
-SSH was dropped from the selected architecture. Its result and limitations are
-preserved in `firmware/FireBeetle_to_Ultra96/SSH_REACHABILITY_PROBE_ARCHIVE.md`.
+SSH was dropped from the selected architecture.
 The NUS WPA2-Enterprise association-only profiles remain available.
 
 ## Development status

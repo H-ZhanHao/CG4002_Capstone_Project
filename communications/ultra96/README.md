@@ -21,7 +21,7 @@ behavior by default; no mode flag is needed. See
 
 Stage 3 adds phone-owned rep feedback over the same WSS connection. Deploy the
 updated gateway/protocol plus `rep_control.py` and `feedback_delivery.py` with
-the chosen updated server (`server.py` or `server_AI.py`). The server's
+the chosen updated server (`server.py` or `server_one_node.py`). The server's
 `--rep-control-port` and gateway's `--control-port` default to 9101, strictly
 on Ultra96 loopback. No additional phone-facing relay port is needed.
 Phone sessions must explicitly start/reset or sync before sending new reps.
@@ -49,7 +49,7 @@ The canonical `hardware/node/BuzzerFeedback` queues rapid beeps with 100 ms gaps
 Fall alarms take priority, discard queued reps and suppress new sounds during
 the alarm. Activity LED updates never silence a fall or trigger a buzzer.
 
-Both `server.py` and `server_AI.py` use FEEDBACK_COMMAND (0x0B), retaining its
+Both `server.py` and `server_one_node.py` use FEEDBACK_COMMAND (0x0B), retaining its
 24-byte header, 16-byte `!QB7x` payload and CONTROL_ACK format. Current actions:
 
 | Action | Value | Destination |
@@ -128,7 +128,7 @@ Fall AR reporting now extends this receipt path through the existing loopback
 control connection (9101) and gateway WSS connection. Deploy `fall_delivery.py`
 beside `device_events.py`, `rep_control.py`, `visualizer_protocol.py`, and
 `feedback_delivery.py`, with the updated gateway and your selected server.
-Both `server.py` and `server_AI.py` use the shared receiver; their inference and
+Both `server.py` and `server_one_node.py` use the shared receiver; their inference and
 capture paths are unchanged. Update/rebuild the Unity client as described in
 `../unity/Ultra96VisualizerDemo/README.md`. Existing firmware, laptop relay
 commands, SSH forwards and TLS certificates need no changes.
@@ -175,18 +175,19 @@ for the wire layout, saved builds, limitations and physical test procedure.
 
 Physical capture has two stop paths. `manual_stop()` (the console `stop`)
 disarms trigger handling until a manual `start`. `idle_pause()` (the console
-`idle`) stops the current ESP feeders and window run, then issues a fresh ARM
-after both STOP acknowledgements, so the next fresh `ACTIVITY_TRIGGER` automatically
+`idle`) stops the current ESP feeders and window run, then rearms each node
+after its STOP acknowledgement, so the next fresh `ACTIVITY_TRIGGER` automatically
 sends `START_FLUSH`. In both cases the ESPs continue filling their local rolling
 history; only network `PHYSICAL_DATA` transmission stops. An inference adapter
 can call `coordinator.idle_pause()` after its idle threshold is reached. The
-inference-enabled `server_new.py` does this automatically after three consecutive
-active-capture classifications whose exercise label is exactly `idle`; any
-non-idle classification resets the counter.
+AI entrypoint wires the pipeline's confirmed-idle callback to the coordinator
+as described below.
 
-Stage 4's supported AI entrypoint is `server_AI.py`. It retains the intentional
-`window_assembler_updated` import (the local updated `window_assembler.py` is
-deployed under that name). The existing Ultra96 `inference_pipeline.py` confirms
+The AI entrypoint is `server_one_node.py`, renamed from `server_AI.py` in commit
+`a0d3e59`. It imports the local `window_assembler.py` and the deployed
+`inference_pipeline.InferencePipeline`. The integrated server under
+`../../server/server_rep_fall.py` instead imports `window_assembler_updated.py`.
+The checked-in `../../server/inference_pipeline.py` confirms
 five consecutive idle classifications at confidence >= 0.80. An accepted current
 generation calls `handle_idle_classification`, which pauses streaming and sends
 the silent ACTIVITY_IDLE state to both nodes through the existing delivery path.
@@ -196,7 +197,7 @@ ignored. Every confirmed shared start sends ACTIVITY_ACTIVE. Manual STOP and
 disconnect also clear activity; no idle buzzer event is produced. Feedback
 failure does not block STOP/ACK/ARM.
 
-For `server_AI.py`, the default rotating log file is the absolute path
+For `server_one_node.py`, the default rotating log file is the absolute path
 `/home/xilinx/comms/logs/server.log`, including when launched as root. Override
 it with `--log-file /another/path/server.log`; rotation settings are unchanged.
 The supplied pipeline is retained only as a host-test fixture in
@@ -275,8 +276,8 @@ first; unique extras are removed by an order-preserving minimum-error match
 against the expected timestamp grid. The summary reports `dropped=` and
 `dropped_sequences=`. More than two extras, conflicting duplicate contents, or
 a sequence gap mixed with unique extras rejects the window. `server.py` remains
-a window/logging adapter; `server_new.py` sends accepted windows to the AI
-inference pipeline. The checked-in `server_AI.py` uses the available-node
+a window/logging adapter; `server_one_node.py` sends accepted windows to the AI
+inference pipeline. It uses the available-node
 assembler and inference worker; its model/runtime dependencies are supplied
 separately. Its missing-sample default remains 4%, compared with 3% in
 `server.py`; pass `--max-missing-fraction 0.03` to use the same limit in both.
@@ -300,7 +301,7 @@ remain zero and `is_padding=True`; this change does not resample real sensor
 values or establish model accuracy with padded inputs.
 
 To deploy this policy, copy the updated `window_assembler.py` and the server
-entry point actually used on Ultra96 (`server_AI.py` for inference), then
+entry point actually used on Ultra96 (`server_one_node.py` for inference), then
 restart that process. Keep existing model paths and launch options. The new
 policy defaults apply automatically; the fraction option above can override
 the missing-sample allowance. Remove any former `--max-sample-gap-ms` option

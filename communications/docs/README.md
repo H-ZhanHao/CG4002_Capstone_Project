@@ -3,8 +3,6 @@
 The repository keeps instructions beside the components they describe. Longer
 project-wide records are grouped here by purpose.
 
-- [AI and Unity team integration brief](TEAM_INTEGRATION_BRIEF.md)
-
 ## Current topology
 
 The active implementation uses two independent direct producers, Node 1 and
@@ -35,15 +33,6 @@ topology must not be applied to the current build.
 
 - [NUS network test results](results/NUS_NETWORK_TEST_RESULTS.md)
 - [Ultra96-to-phone visualizer progress](progress/VISUALIZER_PROGRESS.md)
-
-## Walkthrough material
-
-- [Physical live demo one-day guide](walkthrough/LIVE_DEMO_ONE_DAY_GUIDE.md)
-- [Protocol FSM diagrams](walkthrough/PROTOCOL_FSM_DIAGRAMS.md)
-- [Laptop and Ultra96 concurrency block diagram](walkthrough/LAPTOP_ULTRA96_CONCURRENCY.md)
-- [Live demo protocol explanation](walkthrough/LIVE_DEMO_PROTOCOL_EXPLANATION.md)
-- [FireBeetle protocol and concurrent connections](walkthrough/FIREBEETLE_PROTOCOL_AND_CONCURRENT_CONNECTIONS.md)
-- [Maximum-speed benchmark and file-transfer demo](walkthrough/BENCHMARK_AND_FILE_TRANSFER_DEMO.md)
 
 ## Component guides
 
