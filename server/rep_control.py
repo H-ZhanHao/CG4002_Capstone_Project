@@ -12,7 +12,8 @@ import socketserver
 import threading
 import time
 
-from visualizer_protocol import parse_rep_message, VisualizerProtocolError, MAX_PHONE_BYTES
+from visualizer_protocol import (parse_rep_message, parse_fall_detection_message,
+                                 VisualizerProtocolError, MAX_PHONE_BYTES)
 from fall_delivery import parse_fall
 from feedback_delivery import FEEDBACK_REP_BUZZ
 
@@ -31,6 +32,7 @@ class RepController:
         self.count = 0
         self.used_sessions = set()
         self.receipts = OrderedDict()
+        self.fall_link = None
 
     def _cancel_pending(self):
         for event_id in self.receipts.values():
@@ -39,16 +41,74 @@ class RepController:
     def connect(self):
         with self.lock:
             self._cancel_pending()
+            if self.fall_link is not None:
+                self._cancel_fall(self.fall_link)
             self.epoch += 1
             self.active = self.epoch
-            return {"epoch": self.epoch, "ready": False, "seq": -1,
-                    "cache": OrderedDict(), "times": deque()}
+            link = {"epoch": self.epoch, "ready": False, "seq": -1,
+                    "cache": OrderedDict(), "times": deque(),
+                    "fall_message": None, "fall_ticket": None, "fall_last": None}
+            self.fall_link = link
+            return link
 
     def disconnect(self, link):
         with self.lock:
             if self.active == link["epoch"]:
                 self._cancel_pending()
+                self._cancel_fall(link)
                 self.active = None
+
+    def _cancel_fall(self, link):
+        if link.get("fall_ticket") is not None:
+            self.coordinator.fall_control.cancel(link["fall_ticket"])
+
+    def fall_response(self, message=None, status="rejected", reason="invalid_request", enabled=None):
+        message = message or {}
+        return {"v": 1, "type": "fall_detection_result", "run_id": self.run_id,
+                "seq": message.get("seq", -1), "status": status, "reason": reason,
+                "requested_enabled": message.get("enabled", False), "enabled": enabled}
+
+    def _fall_snapshot(self, link):
+        ticket = self.coordinator.fall_control.snapshot(link["fall_ticket"])
+        return self.fall_response(link["fall_message"], ticket.status, ticket.reason,
+                                  ticket.enabled if ticket.status == "applied" else None)
+
+    def handle_fall(self, link, payload):
+        with self.lock:
+            now = time.monotonic()
+            while link["times"] and now - link["times"][0] >= 1:
+                link["times"].popleft()
+            if len(link["times"]) >= 20:
+                return self.fall_response(reason="rate_limit")
+            link["times"].append(now)
+            try:
+                message = parse_fall_detection_message(payload)
+            except VisualizerProtocolError as error:
+                return self.fall_response(reason=str(error))
+            if self.active != link["epoch"] or message["run_id"] != self.run_id:
+                return self.fall_response(message, reason="stale_connection_or_run")
+            previous = link["fall_message"]
+            if previous is not None and message["seq"] <= previous["seq"]:
+                if message == previous:
+                    return self._fall_snapshot(link)
+                return self.fall_response(message, reason="stale_sequence_or_conflict")
+            if link["fall_ticket"] is not None and self._fall_snapshot(link)["status"] == "pending":
+                return self.fall_response(message, reason="command_pending")
+            link["fall_message"] = message
+            link["fall_ticket"] = self.coordinator.fall_control.submit(message["enabled"])
+            result = self._fall_snapshot(link)
+            link["fall_last"] = result
+            return result
+
+    def poll_fall(self, link):
+        with self.lock:
+            if self.active != link["epoch"] or link["fall_ticket"] is None:
+                return None
+            result = self._fall_snapshot(link)
+            if result == link["fall_last"]:
+                return None
+            link["fall_last"] = result
+            return result
 
     def welcome(self):
         return {"v": 1, "type": "rep_welcome", "run_id": self.run_id,
@@ -174,6 +234,9 @@ class _Handler(socketserver.BaseRequestHandler):
             send(controller.welcome())
             while not self.server.stopping.is_set():
                 controller.coordinator.feedback_delivery.tick()
+                fall_result = controller.poll_fall(link)
+                if fall_result is not None:
+                    send(fall_result)
                 # Only the current gateway link can deliver/ack falls; no rep sync needed.
                 with controller.lock:
                     if controller.active == link["epoch"] and time.monotonic() >= next_fall_poll:
@@ -201,6 +264,9 @@ class _Handler(socketserver.BaseRequestHandler):
                         return
                     try:
                         envelope = json.loads(line)
+                        if isinstance(envelope, dict) and envelope.get("type") == "fall_detection_set":
+                            send(controller.handle_fall(link, bytes(line)))
+                            continue
                         if isinstance(envelope, dict) and envelope.get("type") == "fall_ack":
                             message = parse_fall(bytes(line), "fall_ack")
                             with controller.lock:

@@ -30,6 +30,7 @@ from visualizer_protocol import (
     build_message,
     parse_message,
     parse_rep_message,
+    parse_fall_detection_message,
     serialize_message,
 )
 
@@ -267,7 +268,7 @@ class VisualizerGateway:
                         message = json.loads(line)
                         if message.get("type") == "fall_event":
                             message = parse_fall(line, "fall_event")
-                        elif message.get("type") not in ("rep_result", "rep_delivery") or message.get("v") != 1:
+                        elif message.get("type") not in ("rep_result", "rep_delivery", "fall_detection_result") or message.get("v") != 1:
                             raise ValueError("invalid rep control response")
                         await respond(message)
                 except (OSError, ValueError, asyncio.TimeoutError) as error:
@@ -297,9 +298,13 @@ class VisualizerGateway:
                         raise VisualizerProtocolError("phone message exceeds 1024 bytes")
                     try:
                         envelope = json.loads(payload)
-                        message = (parse_fall(payload, "fall_ack")
-                                   if isinstance(envelope, dict) and envelope.get("type") == "fall_ack"
-                                   else parse_rep_message(payload))
+                        kind = envelope.get("type") if isinstance(envelope, dict) else None
+                        if kind == "fall_ack":
+                            message = parse_fall(payload, "fall_ack")
+                        elif kind == "fall_detection_set":
+                            message = parse_fall_detection_message(payload)
+                        else:
+                            message = parse_rep_message(payload)
                     except (ValueError, UnicodeError) as error:
                         raise VisualizerProtocolError(str(error)) from error
                     if control_writer is None:

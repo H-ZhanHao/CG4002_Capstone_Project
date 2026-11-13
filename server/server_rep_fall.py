@@ -1317,6 +1317,20 @@ class CaptureCoordinatorBase:
             nodes = (1,) if action == FEEDBACK_REP_BUZZ else (1, 2)
             return self.feedback_delivery.submit(action, sequence, build_header, nodes)
 
+    def control_acknowledged(self, connection, command_type, command_sequence,
+                             result, effective_local_us):
+        """Handle shared feedback ACKs delegated by the capture coordinator."""
+        with self._lock:
+            if self._connections.get(connection.node_id) is not connection:
+                return
+            if command_type == MESSAGE_TYPE_FEEDBACK_COMMAND:
+                try:
+                    self.feedback_delivery.acknowledge(
+                        connection, command_sequence, result, effective_local_us)
+                except ValueError as error:
+                    raise ProtocolError(ERROR_INVALID_FRAME, MESSAGE_TYPE_CONTROL_ACK,
+                                        str(error)) from error
+
     def stop_all(self, reason="operator shutdown"):
         with self._lock:
             # Shutdown is terminal, unlike an idle pause.  Clear the resume
@@ -1878,9 +1892,10 @@ def log_window_summary(window):
         else str(quality.max_index_skew_us)
     )
     LOGGER.info(
-        "%s run=%d window=%d interval=[%d,%d)%s %s max_index_skew_us=%s",
+        "%s run=%d window=%d interval=[%d,%d)%s %s max_index_skew_us=%s "
+        "available_nodes=%s excluded_nodes=%s",
         prefix, window.run_id, window.window_id, window.start_us, window.end_us,
-        reason, counts, skew)
+        reason, counts, skew, list(quality.available_nodes), quality.node_rejection_reasons)
 
 
 def process_benchmark_report(frame, session_id, hub_node_id):

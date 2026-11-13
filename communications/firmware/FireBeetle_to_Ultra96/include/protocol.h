@@ -32,6 +32,10 @@
 #define PROTOCOL_MESSAGE_TYPE_CONTROL_ACK 0x09
 #define PROTOCOL_MESSAGE_TYPE_ARM       0x0A
 #define PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND 0x0B
+#define PROTOCOL_MESSAGE_TYPE_FALL_DETECTION_SET 0x0C
+#define PROTOCOL_FALL_DETECTION_PAYLOAD_SIZE 4
+bool protocol_decode_fall_detection_payload(const uint8_t *payload, size_t length,
+                                             bool *enabled);
 #define PROTOCOL_FEEDBACK_PAYLOAD_SIZE 16
 /* Values 1..3 are retired; do not reinterpret commands from older firmware. */
 #define PROTOCOL_FEEDBACK_REP_BUZZ 4

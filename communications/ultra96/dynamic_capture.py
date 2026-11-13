@@ -9,6 +9,11 @@ import logging
 import struct
 import time
 
+try:
+    from fall_control import FallDetectionControl, MESSAGE_TYPE_FALL_DETECTION_SET
+except ImportError:
+    from .fall_control import FallDetectionControl, MESSAGE_TYPE_FALL_DETECTION_SET
+
 LOGGER = logging.getLogger("server")
 STREAM_TIMEOUT_US = 3_000_000
 
@@ -33,6 +38,7 @@ def coordinator_class(api):
             if not self.physical_mode:
                 raise ValueError("capture requires physical sensor streaming")
             self.nodes = {}
+            self.fall_control = FallDetectionControl(self, api.build_header)
             self._run_origin = None
             self._run_sequence = None
 
@@ -226,16 +232,20 @@ def coordinator_class(api):
             with self._lock:
                 if self._connections.get(connection.node_id) is not connection:
                     return
+                if command_type == MESSAGE_TYPE_FALL_DETECTION_SET:
+                    return self.fall_control.acknowledge(connection, command_sequence, result)
                 if command_type == api.MESSAGE_TYPE_FEEDBACK_COMMAND:
-                    # Feedback delivery is independent of capture commands.
-                    # The shared base no longer has the legacy group-ACK method.
+                    base_ack = getattr(super(), "control_acknowledged", None)
+                    if base_ack is not None:
+                        return base_ack(connection, command_type, command_sequence,
+                                        result, effective_local_us)
+                    # Retained communications servers predate the supplied base method.
                     try:
                         return self.feedback_delivery.acknowledge(
                             connection, command_sequence, result, effective_local_us)
                     except ValueError as error:
-                        raise api.ProtocolError(
-                            api.ERROR_INVALID_FRAME, api.MESSAGE_TYPE_CONTROL_ACK,
-                            str(error)) from error
+                        raise api.ProtocolError(api.ERROR_INVALID_FRAME,
+                            api.MESSAGE_TYPE_CONTROL_ACK, str(error)) from error
                 node = connection.node_id
                 state = self.nodes[node]
                 now = time.monotonic_ns() // 1000
