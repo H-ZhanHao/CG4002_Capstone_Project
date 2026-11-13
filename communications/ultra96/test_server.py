@@ -5,13 +5,23 @@ import hashlib
 import logging
 import os
 import struct
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import zlib
 
 import server
+try:
+    import server_AI
+    AI_IMPORT_ERROR = None
+except ImportError as error:
+    # AI-only teammate sources are optional for communications regression tests.
+    server_AI = None
+    AI_IMPORT_ERROR = str(error)
 from visualizer_protocol import validate_message
 
 
@@ -90,6 +100,25 @@ class RecordingAssembler:
 
 
 class SlidingWindowIntegrationTest(unittest.TestCase):
+    def test_quality_policy_arguments_for_both_servers(self):
+        # The AI teammate's model config is external; stub only its minimum
+        # window length to test argument handling without loading VART/models.
+        with patch.dict(sys.modules, {"config": SimpleNamespace(WINDOW_SECONDS=3)}):
+            for module in (server, server_AI):
+                with self.subTest(server=module.__name__ if module else "server_AI"):
+                    if module is None:
+                        self.skipTest(f"External AI source dependency unavailable: {AI_IMPORT_ERROR}")
+                    defaults = module.parse_args([])
+                    self.assertEqual(defaults.max_missing_fraction, 0.03)
+                    explicit = module.parse_args([
+                        "--max-missing-fraction", "0.02"])
+                    self.assertEqual(explicit.max_missing_fraction, 0.02)
+                    for args in (["--max-missing-fraction", "nan"],
+                                 ["--max-missing-fraction", "1"],
+                                 ["--max-missing-fraction", "-0.01"]):
+                        with patch("sys.stderr"), self.assertRaises(SystemExit):
+                            module.parse_args(args)
+
     def build_data(self, status=server.STATUS_MOCK_DATA):
         payload = struct.pack(
             server.DATA_PAYLOAD_FORMAT,
@@ -104,7 +133,7 @@ class SlidingWindowIntegrationTest(unittest.TestCase):
         self.assertEqual(
             (defaults.sample_rate_hz, defaults.window_seconds,
              defaults.hop_seconds),
-            (100, 5.0, 1.0))
+            (100, 3.0, 1.0))
         explicit = server.parse_args([
             "--sample-rate-hz", "100", "--window-seconds", "4.5",
             "--hop-seconds", "0.5"])
@@ -201,12 +230,14 @@ class PhysicalIntegrationTest(unittest.TestCase):
     def confirm_arm(self, coordinator, *connections):
         if not coordinator.arm_pending:
             self.assertTrue(coordinator._arm_locked("test"))
-        sequence = server.unpack_header(connections[0].client.frames[-1])[7]
+        sequence = coordinator._pending_arm_acks[connections[0].node_id]
         self.assertEqual(
-            server.unpack_header(connections[0].client.frames[-1])[2],
+            server.unpack_header(next(f for f in reversed(connections[0].client.frames)
+                if f[3] == server.MESSAGE_TYPE_ARM))[2],
             server.MESSAGE_TYPE_ARM)
         decoded = [
-            struct.unpack("!QqI", connection.client.frames[-1][server.HEADER_SIZE:])
+            struct.unpack("!QqI", next(f for f in reversed(connection.client.frames)
+                if f[3] == server.MESSAGE_TYPE_ARM)[server.HEADER_SIZE:])
             for connection in connections
         ]
         self.assertTrue(all(item[0] == decoded[0][0] for item in decoded))
@@ -329,6 +360,8 @@ class PhysicalIntegrationTest(unittest.TestCase):
         right = struct.unpack("!QqIB3xI", sock2.frames[-1][server.HEADER_SIZE:])
         self.assertEqual(left[0], right[0])
         self.assertEqual((left[1], right[1]), (100, -200))
+        self.assertEqual(left[2], 3_000_000)
+        self.assertEqual(right[2], 3_000_000)
         frame_counts = (len(sock1.frames), len(sock2.frames))
         self.assertFalse(server.process_activity_trigger(trigger, node1))
         self.assertEqual((len(sock1.frames), len(sock2.frames)), frame_counts)
@@ -551,7 +584,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
         coordinator.register(node2)
 
         coordinator.manual_stop()
-        stop_sequence = server.unpack_header(sock1.frames[-1])[7]
+        stop_sequence = coordinator._pending_stop_acks[1]
         server.process_control_ack(build_control_ack(
             node1, server.MESSAGE_TYPE_STOP, stop_sequence), node1)
         server.process_control_ack(build_control_ack(
@@ -613,7 +646,7 @@ class PhysicalIntegrationTest(unittest.TestCase):
         self.assertTrue(coordinator.idle_paused)
         self.assertFalse(coordinator.run_active)
         self.assertIn("AI idle pause", assembler.stopped)
-        stop_sequence = server.unpack_header(sock1.frames[-1])[7]
+        stop_sequence = coordinator._pending_stop_acks[1]
 
         # A peak cannot race STOP acknowledgements and restart the old feeder.
         self.assertFalse(server.process_activity_trigger(initial_trigger, node1))
@@ -834,7 +867,8 @@ class ClockSynchronizationTest(unittest.TestCase):
         coordinator.unregister(node2)
         self.assertFalse(coordinator.run_active)
         self.assertEqual(
-            server.unpack_header(socket1.frames[-1])[2],
+            server.unpack_header(next(frame for frame in reversed(socket1.frames)
+                if frame[3] != server.MESSAGE_TYPE_FEEDBACK_COMMAND))[2],
             server.MESSAGE_TYPE_STOP,
         )
 
@@ -1317,7 +1351,8 @@ class ClockSynchronizationTest(unittest.TestCase):
         coordinator.request_stop()
         self.assertFalse(coordinator.desired_running)
         self.assertEqual(
-            server.unpack_header(socket1.frames[-1])[2],
+            server.unpack_header(next(frame for frame in reversed(socket1.frames)
+                if frame[3] != server.MESSAGE_TYPE_FEEDBACK_COMMAND))[2],
             server.MESSAGE_TYPE_STOP,
         )
         frame_count = len(socket1.frames)

@@ -1,7 +1,11 @@
+# LocalRepCounting, RepCounter and ContinuousCounter are bench-only;
+# production rep counts come exclusively from CommsRepCounter.
 idf_component_register(
     SRCS
         "main.cpp"
-        "node/ContinuousCounter.cpp"
+        "node/BuzzerFeedback.cpp"
+        "node/CommsActivityState.cpp"
+        "node/CommsRepCounter.cpp"
         "node/ExerciseNode.cpp"
         "node/FallDetector.cpp"
         "node/GenericPeakDetector.cpp"
@@ -9,7 +13,6 @@ idf_component_register(
         "node/NodePlatform.cpp"
         "node/NodeRadio.cpp"
         "node/NodeSession.cpp"
-        "node/RepCounter.cpp"
         "node/SensorHistory.cpp"
         "node/StreamCoordination.cpp"
         "node/WirelessStreamer.cpp"

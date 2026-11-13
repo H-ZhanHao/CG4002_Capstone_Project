@@ -31,9 +31,45 @@
 #define PROTOCOL_MESSAGE_TYPE_STOP      0x08
 #define PROTOCOL_MESSAGE_TYPE_CONTROL_ACK 0x09
 #define PROTOCOL_MESSAGE_TYPE_ARM       0x0A
+#define PROTOCOL_MESSAGE_TYPE_FEEDBACK_COMMAND 0x0B
+#define PROTOCOL_FEEDBACK_PAYLOAD_SIZE 16
+/* Values 1..3 are retired; do not reinterpret commands from older firmware. */
+#define PROTOCOL_FEEDBACK_REP_BUZZ 4
+#define PROTOCOL_FEEDBACK_ACTIVITY_ACTIVE 5
+#define PROTOCOL_FEEDBACK_ACTIVITY_IDLE 6
 #define PROTOCOL_MESSAGE_TYPE_DATA      0x10
 #define PROTOCOL_MESSAGE_TYPE_HEARTBEAT 0x11
 #define PROTOCOL_MESSAGE_TYPE_PHYSICAL_DATA 0x12
+#define PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT 0x13
+#define PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT_ACK 0x14
+#define PROTOCOL_DEVICE_EVENT_PAYLOAD_SIZE 32
+#define PROTOCOL_DEVICE_EVENT_PACKET_SIZE (PROTOCOL_HEADER_SIZE + PROTOCOL_DEVICE_EVENT_PAYLOAD_SIZE)
+#define PROTOCOL_DEVICE_EVENT_ACK_PAYLOAD_SIZE 16
+#define PROTOCOL_DEVICE_EVENT_ACK_PACKET_SIZE (PROTOCOL_HEADER_SIZE + PROTOCOL_DEVICE_EVENT_ACK_PAYLOAD_SIZE)
+#define PROTOCOL_EVENT_FALL_STARTED 1
+#define PROTOCOL_EVENT_ACK_ACCEPTED 0
+#define PROTOCOL_EVENT_ACK_DUPLICATE 1
+
+typedef struct {
+    uint32_t boot_id;
+    uint64_t event_id;
+    uint64_t occurred_us;
+    uint32_t duration_ms;
+    uint8_t kind;
+    uint8_t synthetic;
+} protocol_device_event_t;
+typedef struct {
+    uint32_t boot_id;
+    uint64_t event_id;
+    uint8_t result;
+} protocol_device_event_ack_t;
+
+bool protocol_encode_device_event(uint8_t *packet, uint32_t session_id,
+                                  const protocol_device_event_t *event);
+bool protocol_decode_device_event(const uint8_t *frame, size_t length,
+                                  protocol_device_event_t *event);
+bool protocol_decode_device_event_ack(const uint8_t *frame, size_t length,
+                                      protocol_device_event_ack_t *ack);
 #define PROTOCOL_MESSAGE_TYPE_TEST_REQUEST 0x20
 #define PROTOCOL_MESSAGE_TYPE_TEST_RESPONSE 0x21
 #define PROTOCOL_MESSAGE_TYPE_BENCHMARK_CONTROL 0x22
@@ -237,8 +273,22 @@ typedef struct {
 #define PROTOCOL_CONTROL_RESULT_INSUFFICIENT_HISTORY 4
 #define PROTOCOL_CONTROL_RESULT_STALE_IDENTITY  5
 #define PROTOCOL_CONTROL_RESULT_BUSY            6
+#define PROTOCOL_CONTROL_RESULT_UNSUPPORTED     7
+#define PROTOCOL_CONTROL_RESULT_CONFLICT        8
 
-/** Positive or negative result for one START/STOP command Sequence. */
+/* FEEDBACK_COMMAND (0x0B): unchanged 24-byte header, coordinator node=0,
+ * flags=0, active nonzero Session. Payload offsets: [0..7] nonzero, increasing
+ * uint64 event_id, [8] action (4 REP_BUZZ, 5 ACTIVITY_ACTIVE, 6 ACTIVITY_IDLE), [9..15]
+ * reserved zero. All integers big endian. Retries preserve sequence and payload.
+ * Event IDs increase within each transport Session; older evicted IDs fail
+ * closed. CONTROL_ACK.command_type=0x0B reports acceptance, not physical proof. */
+typedef struct { uint64_t event_id; uint8_t action; } protocol_feedback_t;
+bool protocol_decode_feedback_payload(const uint8_t *payload, size_t length,
+                                     protocol_feedback_t *feedback);
+bool protocol_encode_feedback_payload(uint8_t payload[PROTOCOL_FEEDBACK_PAYLOAD_SIZE],
+                                     const protocol_feedback_t *feedback);
+
+/** Result for a capture control or FEEDBACK_COMMAND transport Sequence. */
 typedef struct {
     uint8_t command_type;
     uint8_t result;

@@ -658,6 +658,17 @@ static bool process_received_frames(
             return false;
         }
 
+        if (header.message_type == PROTOCOL_MESSAGE_TYPE_DEVICE_EVENT_ACK) {
+            protocol_device_event_ack_t ack;
+            if (!physical_samples_enabled || !protocol_decode_device_event_ack(
+                    receive_buffer->data, frame_length, &ack)) return false;
+            bool accepted = physical_pipeline_event_ack(&ack);
+            ESP_LOGI(TAG, "DEVICE_EVENT_ACK event=%llu result=%u matched=%d",
+                (unsigned long long)ack.event_id, ack.result, accepted);
+            remove_received_frame(receive_buffer, frame_length);
+            continue;
+        }
+
         if (!application_submit_frame(
                 session_id,
                 receive_buffer->data,
@@ -952,6 +963,18 @@ static void tcp_client_task(void *argument)
         }
 
         while (connection_ok) {
+            // Existing transport task remains the only socket writer. Never
+            // hold the event-state lock while encoding/sending or logging.
+            protocol_device_event_t event;
+            if (physical_samples_enabled && physical_pipeline_event_due(
+                    (uint64_t)esp_timer_get_time(), &event)) {
+                uint8_t event_packet[PROTOCOL_DEVICE_EVENT_PACKET_SIZE];
+                connection_ok = protocol_encode_device_event(event_packet, session_id, &event) &&
+                    send_complete(&connection, event_packet, sizeof(event_packet));
+                ESP_LOGI(TAG, "DEVICE_EVENT_SENT event=%llu synthetic=%u sent=%d",
+                    (unsigned long long)event.event_id, event.synthetic, connection_ok);
+                if (!connection_ok) break;
+            }
             while (application_receive_response(
                     &transport_application_response,
                     0)) {
@@ -1312,6 +1335,8 @@ esp_err_t tcp_client_start(const tcp_client_config_t *config)
     do {
         hello_message.boot_id = esp_random();
     } while (hello_message.boot_id == 0);
+    if (physical_samples_enabled) hello_message.boot_id = physical_pipeline_boot_id();
+    if (!hello_message.boot_id) return ESP_ERR_INVALID_STATE;
 
     BaseType_t result = xTaskCreate(
         tcp_client_task,

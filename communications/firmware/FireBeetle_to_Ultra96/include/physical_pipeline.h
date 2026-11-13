@@ -15,6 +15,14 @@ typedef struct {
     protocol_activity_trigger_t trigger;
 } physical_trigger_event_t;
 
+typedef struct {
+    uint32_t session_id;
+    protocol_control_ack_t ack;
+} physical_feedback_ack_t;
+bool physical_pipeline_submit_feedback(uint32_t session, uint32_t sequence,
+                                       const protocol_feedback_t *feedback);
+bool physical_pipeline_receive_feedback_ack(physical_feedback_ack_t *response);
+
 esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id);
 bool physical_pipeline_begin_session(uint32_t session_id, uint32_t boot_id);
 void physical_pipeline_end_session(uint32_t session_id);
@@ -28,5 +36,8 @@ uint8_t physical_pipeline_stop_flush(uint32_t session_id,
 bool physical_pipeline_receive_trigger(physical_trigger_event_t *event,
     TickType_t ticks_to_wait);
 uint32_t physical_pipeline_get_overwrite_count(uint8_t node_id);
+uint32_t physical_pipeline_boot_id(void);
+bool physical_pipeline_event_due(uint64_t now_us, protocol_device_event_t *event);
+bool physical_pipeline_event_ack(const protocol_device_event_ack_t *ack);
 
 #endif

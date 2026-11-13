@@ -1,3 +1,3 @@
 #pragma once
 #include <stdint.h>
-inline uint32_t esp_random() { return 42; }
+inline uint32_t esp_random() { static uint32_t boot = 42; return ++boot; }

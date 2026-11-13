@@ -24,6 +24,7 @@ namespace CG4002.Visualizer
         private readonly RemoteCertificateValidationCallback certificateValidator;
         private TcpClient tcpClient;
         private SslStream stream;
+        private readonly SemaphoreSlim writeLock = new(1, 1);
 
         /// <summary>
         /// Create a receive-oriented connection for a WSS endpoint and caller-
@@ -218,25 +219,43 @@ namespace CG4002.Visualizer
             return new Frame(final, opcode, payload);
         }
 
-        /// <summary>Send a correctly masked client control frame, currently used for pong.</summary>
-        private async Task SendControlFrameAsync(
-            int opcode,
-            byte[] payload,
-            CancellationToken cancellationToken)
+        /// <summary>Bounded application writes share the pong/control write lock.</summary>
+        public Task SendTextAsync(string text, CancellationToken cancellationToken)
         {
-            if (payload.Length > 125)
-                throw new InvalidDataException("Invalid WebSocket control frame");
-            // RFC 6455 requires every client-to-server frame, including pong, to
-            // be masked. Server-to-client frames handled above must be unmasked.
+            byte[] payload = Encoding.UTF8.GetBytes(text);
+            if (payload.Length > 1024) throw new InvalidDataException("Rep message exceeds 1024 bytes");
+            return SendFrameAsync(0x1, payload, cancellationToken);
+        }
+
+        private Task SendControlFrameAsync(int opcode, byte[] payload, CancellationToken cancellationToken)
+        {
+            if (payload.Length > 125) throw new InvalidDataException("Invalid WebSocket control frame");
+            return SendFrameAsync(opcode, payload, cancellationToken);
+        }
+
+        private async Task SendFrameAsync(int opcode, byte[] payload, CancellationToken cancellationToken)
+        {
             byte[] mask = RandomBytes(4);
-            byte[] frame = new byte[2 + mask.Length + payload.Length];
+            int headerLength = payload.Length < 126 ? 2 : 4;
+            byte[] frame = new byte[headerLength + 4 + payload.Length];
             frame[0] = (byte)(0x80 | opcode);
-            frame[1] = (byte)(0x80 | payload.Length);
-            Buffer.BlockCopy(mask, 0, frame, 2, mask.Length);
+            if (headerLength == 2) frame[1] = (byte)(0x80 | payload.Length);
+            else
+            {
+                frame[1] = 0xfe;
+                frame[2] = (byte)(payload.Length >> 8);
+                frame[3] = (byte)payload.Length;
+            }
+            Buffer.BlockCopy(mask, 0, frame, headerLength, 4);
             for (int index = 0; index < payload.Length; index++)
-                frame[6 + index] = (byte)(payload[index] ^ mask[index % 4]);
-            await stream.WriteAsync(frame, 0, frame.Length, cancellationToken);
-            await stream.FlushAsync(cancellationToken);
+                frame[headerLength + 4 + index] = (byte)(payload[index] ^ mask[index % 4]);
+            await writeLock.WaitAsync(cancellationToken);
+            try
+            {
+                await stream.WriteAsync(frame, 0, frame.Length, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            }
+            finally { writeLock.Release(); }
         }
 
         /// <summary>

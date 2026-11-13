@@ -5,11 +5,20 @@
 #include "GenericPeakDetector.h"
 #include "WindowScheduler.h"
 #include "StreamCoordination.h"
+#include "CommsRepCounter.h"
+#include "CommsActivityState.h"
 
 // Shared implementation for the two independently uploadable ESP-IDF targets.
 namespace ExerciseNode {
   void begin(NodeRole role);
   void update();
+  // Apply a cumulative AR result via comms in the main loop, never a callback.
+  // Use the HW-issued boot/session from REPS or STATUS, after ACTIVATE completes.
+  CommsRepResult receiveRepCount(uint32_t boot, uint32_t session, uint32_t total);
+  // Main-loop activity API, independent of ACTIVATE/STANDBY and rep resets.
+  // Use the boot ID and last sequence from ACTIVITY/STATUS; retry identically.
+  ActivityResult receiveActivity(uint32_t boot, uint32_t sequence, UserActivity state);
+  ActivityStatus activityStatus();
   // Call in the same main loop as update(); copy owns its data after return.
   SensorWindowResult copySensorWindow(uint32_t endMs, SensorSample* destination, size_t capacity);
   // Optional diagnostic observer, separate from coordinated trigger requests.

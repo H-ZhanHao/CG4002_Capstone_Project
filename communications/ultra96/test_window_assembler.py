@@ -13,6 +13,12 @@ def sample(node, sequence, timestamp):
 
 
 class WindowConfigTest(unittest.TestCase):
+    def test_proportional_default_and_explicit_override(self):
+        self.assertEqual(WindowConfig(100, 3_000_000, 1_000_000).missing_limit, 9)
+        self.assertEqual(WindowConfig(50, 5_000_000, 1_000_000).missing_limit, 7)
+        self.assertEqual(WindowConfig(100, 3_000_000, 1_000_000,
+                                      max_missing_per_node=5).missing_limit, 5)
+
     def test_invalid_configuration_is_rejected(self):
         invalid = (
             dict(sample_rate_hz=0, window_us=1_000_000, hop_us=1_000_000),
@@ -27,6 +33,12 @@ class WindowConfigTest(unittest.TestCase):
                  max_missing_per_node=-1),
             dict(sample_rate_hz=1, window_us=1_000_000, hop_us=1,
                  max_extra_per_node=-1),
+            dict(sample_rate_hz=100, window_us=3_000_000, hop_us=1_000_000,
+                 max_missing_fraction=float("nan")),
+            dict(sample_rate_hz=100, window_us=3_000_000, hop_us=1_000_000,
+                 max_missing_fraction=1),
+            dict(sample_rate_hz=100, window_us=3_000_000, hop_us=1_000_000,
+                 max_missing_fraction=-0.01),
         )
         for values in invalid:
             with self.subTest(values=values), self.assertRaises(ValueError):
@@ -36,7 +48,10 @@ class WindowConfigTest(unittest.TestCase):
 class WindowAssemblerTest(unittest.TestCase):
     def make_assembler(self, rate=2, window_us=1_000_000,
                        hop_us=1_000_000):
-        return WindowAssembler(WindowConfig(rate, window_us, hop_us))
+        # Legacy low-rate fixtures explicitly exercise the original count policy;
+        # production percentage defaults are covered separately below.
+        return WindowAssembler(WindowConfig(
+            rate, window_us, hop_us, max_missing_per_node=5))
 
     def complete(self, assembler, node1, node2, boundary=1_000_000):
         output = []
@@ -285,6 +300,104 @@ class WindowAssemblerTest(unittest.TestCase):
             assembler, [sample(1, 0, 0)], [sample(2, 0, 900_000)])
         self.assertTrue(windows[0].quality.accepted)
         self.assertEqual(windows[0].quality.max_index_skew_us, 900_000)
+
+
+class PhysicalWindowPolicyTest(unittest.TestCase):
+    """Exercise real 100 Hz/3-second defaults and the AI timestamp contract."""
+
+    def assemble(self, node1, node2=None, config=None):
+        assembler = WindowAssembler(config or WindowConfig(100, 3_000_000, 1_000_000))
+        assembler.start_run(1, 1_000_000)
+        output = []
+        if node2 is None:
+            node2 = [sample(2, i, 1_000_000 + i * 10_000) for i in range(300)]
+        for node_samples in (node1, node2):
+            for item in node_samples:
+                # Keep a nonzero offset between local and coordinator clocks.
+                output.extend(assembler.submit(replace(
+                    item, timestamp_us=item.coordinator_timestamp_us + 8_000_000)))
+        for node in (1, 2):
+            output.extend(assembler.submit(sample(node, 1000, 4_000_000)))
+        self.assertEqual(len(output), 1)
+        return output[0]
+
+    def assert_valid_times(self, window):
+        self.assertTrue(window.quality.accepted, window.quality.rejection_reason)
+        for samples in window.samples_by_node.values():
+            self.assertEqual(len(samples), 300)
+            self.assertTrue(all(1_000_000 <= x.coordinator_timestamp_us < 4_000_000
+                                for x in samples))
+            for left, right in zip(samples, samples[1:]):
+                self.assertGreater(right.timestamp_us, left.timestamp_us)
+                self.assertGreater(right.coordinator_timestamp_us,
+                                   left.coordinator_timestamp_us)
+            self.assertTrue(all(x.timestamp_us - x.coordinator_timestamp_us == 8_000_000
+                                for x in samples))
+
+    def test_nine_missing_accepted_ten_rejected(self):
+        for missing, accepted in ((9, True), (10, False)):
+            with self.subTest(missing=missing):
+                # Spread missing captures rather than introduce a long outage.
+                removed = set(range(10, 10 + missing * 20, 20))
+                readings = [sample(1, i, 1_000_000 + i * 10_000)
+                            for i in range(300) if i not in removed]
+                window = self.assemble(readings)
+                self.assertEqual(window.quality.accepted, accepted)
+                if accepted:
+                    self.assert_valid_times(window)
+                    self.assertEqual(window.quality.padded_counts[1], 9)
+                else:
+                    self.assertEqual(window.quality.rejection_reason, "missing_samples")
+
+    def test_timing_slowdown_does_not_collapse_trailing_padding(self):
+        # Reproduces the log's ~296/300 with contiguous capture sequences:
+        # real samples span almost the whole window, leaving little edge space.
+        readings = [sample(1, i, 1_000_000 + round(i * 2_990_000 / 295))
+                    for i in range(296)]
+        window = self.assemble(readings)
+        self.assert_valid_times(window)
+        actual = [x for x in window.samples_by_node[1] if not x.is_padding]
+        self.assertEqual([x.coordinator_timestamp_us for x in actual],
+                         [x.coordinator_timestamp_us for x in readings])
+
+    def test_leading_internal_and_trailing_padding(self):
+        for removed in (set(range(9)), set(range(140, 149)), set(range(291, 300))):
+            with self.subTest(removed=removed):
+                readings = [sample(1, i, 1_000_000 + i * 10_000)
+                            for i in range(300) if i not in removed]
+                self.assert_valid_times(self.assemble(readings))
+
+    def test_long_gap_alone_does_not_reject_valid_full_window(self):
+        readings = [sample(1, i, 1_000_000 + round(i * 2_800_000 / 299)
+                           + (150_000 if i >= 150 else 0))
+                    for i in range(300)]
+        window = self.assemble(readings)
+        self.assert_valid_times(window)
+
+    def test_long_edge_gap_alone_does_not_reject_valid_full_window(self):
+        readings = [sample(1, i, 1_150_000 + round(i * 2_840_000 / 299))
+                    for i in range(300)]
+        window = self.assemble(readings)
+        self.assert_valid_times(window)
+
+    def test_equal_real_timestamps_rejected(self):
+        readings = [sample(1, i, 1_000_000 + i * 10_000) for i in range(300)]
+        readings[100] = replace(readings[100], timestamp_us=1_990_000,
+                                coordinator_timestamp_us=1_990_000)
+        self.assertEqual(self.assemble(readings).quality.rejection_reason,
+                         "invalid_timestamps")
+
+    def test_insufficient_integer_timestamp_space_rejects_padding(self):
+        readings = [sample(1, i, 1_000_000 + round(i * 2_999_999 / 295))
+                    for i in range(296)]
+        window = self.assemble(readings)
+        self.assertFalse(window.quality.accepted)
+
+    def test_zero_missing_policy_rejects_any_padding(self):
+        readings = [sample(1, i, 1_000_000 + i * 10_000) for i in range(299)]
+        window = self.assemble(readings, config=WindowConfig(
+            100, 3_000_000, 1_000_000, max_missing_fraction=0))
+        self.assertFalse(window.quality.accepted)
 
 
 if __name__ == "__main__":

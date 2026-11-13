@@ -84,7 +84,7 @@ bool NodeRadio::begin(NodeRole nodeRole) {
       esp_now_register_recv_cb(onReceive) != ESP_OK ||
       esp_now_register_send_cb(onSent) != ESP_OK) return false;
   started = true;
-  usbConsole.println("[ESP-NOW ready; activation, mode and LED events; no heartbeats or sensor streaming]");
+  usbConsole.println("[ESP-NOW ready; activation, mode and rep feedback; no heartbeats or sensor streaming]");
   return true;
 }
 

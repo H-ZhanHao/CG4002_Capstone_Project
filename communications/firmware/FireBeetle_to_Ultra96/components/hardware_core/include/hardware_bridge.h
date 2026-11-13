@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include "esp_err.h"
 
+#ifndef APP_SAMPLING_DIAGNOSTICS
+#define APP_SAMPLING_DIAGNOSTICS 0
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,6 +17,11 @@ typedef struct {
     uint64_t timestamp_us;
     float acceleration[3];
     float gyro[3];
+#if APP_SAMPLING_DIAGNOSTICS
+    /* Local measurements only: never serialized into sensor packets. */
+    uint32_t read_duration_us;
+    bool read_ok;
+#endif
 } hardware_bridge_sample_t;
 
 typedef struct {
