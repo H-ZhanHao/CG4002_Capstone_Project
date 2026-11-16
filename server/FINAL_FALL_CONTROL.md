@@ -1,6 +1,6 @@
 # Final fall-detection integration
 
-Fall detection is controlled from the server terminal. Hip starts OFF in
+Fall detection is controlled from the server terminal. Hip starts ON in
 `node1_final`; AR receives and acknowledges fall events
 and displays the existing centred popup. The fall algorithm and thresholds
 are restored from `cfcb6ac`; exercise calibration, local alarm duration, rep
@@ -11,10 +11,10 @@ feedback, and the Unity assembly-reference fixes are retained.
 `node1_final` and `node2_final` remain available. Both set `APP_FALL_DETECTION=1`
 and use the existing 100 Hz capture, 1 ms tick and independent-node TLS paths.
 The final profiles also set `APP_FALL_RUNTIME_CONTROL=1`: the detector starts
-OFF on each ESP reboot, and only Hip accepts the server's runtime command.
+ON on each ESP reboot, and only Hip accepts the server's runtime command.
 Phone and server disconnects/reconnects retain the ESP's current setting.
-All earlier PlatformIO sections retain their settings;
-`node*_update_fall2` still disables detection at build time.
+The Wrist adapter does not detect or report falls. Setting
+`APP_FALL_DETECTION=0` still disables detection at build time.
 
 The restored detector requires acceleration magnitude below 4 m/s^2 for at
 least 100 ms before waiting for an impact above 25 m/s^2. It reports immediately
@@ -70,8 +70,9 @@ Replace these beside the running `server_rep_fall.py`:
 - `server/dynamic_capture.py`
 - `server/fall_control.py`
 
-Restart the server and flash `node1_final` onto Hip to apply the default-OFF
-behavior. For the retained communications server, deploy its matching
+Flash the rebuilt `node1_final` onto Hip to apply the default-ON behavior;
+the boot-default change needs no server update. For the retained communications
+server's terminal controls, deploy its matching
 `server.py`, `dynamic_capture.py` and `fall_control.py`. The two helper copies
 are identical. No gateway, phone protocol, model, or window assembler changes
 are needed for terminal control.

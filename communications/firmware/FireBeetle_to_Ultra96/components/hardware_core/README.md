@@ -115,7 +115,7 @@ reset, and three-second alarm cooldown. Only Hip reports fall events. Existing
 local alarm priority, device-event delivery and acknowledgements are unchanged.
 A qualified event no longer waits 500 ms for posture confirmation.
 
-The `node*_final` profiles still start detection OFF after reboot and accept
+The `node*_final` profiles start detection ON after reboot and accept
 server `fall on` / `fall off`; `fall status` reports the last acknowledged
 setting. All other profile flags are unchanged. This algorithm rollback needs
 only rebuilt/flashed firmware; no Ultra96, gateway or AR update is required
@@ -190,7 +190,7 @@ queues a fall event. The explicit `feedback fall-alarm` output diagnostic
 remains available. To restore detection, change the flag to
 `-D APP_FALL_DETECTION=1` in both profiles, rebuild and upload.
 Other legacy profiles retain their build-time behavior; the final profiles
-compile detection in but start it OFF under server runtime control.
+compile detection in and start it ON, with server runtime control available.
 The standalone hardware Bluetooth and ESP-NOW control flows are not added.
 
 Build from `communications/firmware/FireBeetle_to_Ultra96`:

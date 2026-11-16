@@ -477,7 +477,8 @@ esp_err_t physical_pipeline_start(QueueHandle_t output_queue, uint8_t node_id)
     if (command_queue == NULL || trigger_queue == NULL || feedback_ack_queue == NULL) return ESP_ERR_NO_MEM;
     sample_queue = output_queue;
     configured_node_id = node_id;
-    fall_detection_enabled = APP_FALL_DETECTION && !APP_FALL_RUNTIME_CONTROL;
+    /* Runtime control changes the current setting; it does not disable boot detection. */
+    fall_detection_enabled = APP_FALL_DETECTION;
     do { board_boot_id = esp_random(); } while (!board_boot_id);
     device_events_init(&device_events, board_boot_id);
     if (APP_FALL_DETECTION) fall_bridge_begin(node_id);

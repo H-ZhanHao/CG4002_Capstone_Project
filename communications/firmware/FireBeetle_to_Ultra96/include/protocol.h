@@ -533,9 +533,8 @@ void protocol_encode_file_result(
  *                    PROTOCOL_DATA_PACKET_SIZE bytes.
  * @param[in] sample  Sample and source metadata to encode.
  *
- * The caller supplies the active nonzero Hub-to-Ultra96 Session ID for an
- * upstream frame. A leaf uses Session ID zero on the Stage 5 ESP-NOW hop;
- * its hub re-encodes the logical sample under the active upstream session.
+ * The caller supplies the active nonzero transport Session ID for an
+ * upstream frame, including synthetic DATA used by throughput benchmarks.
  */
 void protocol_encode_data(
     uint8_t packet[PROTOCOL_DATA_PACKET_SIZE],

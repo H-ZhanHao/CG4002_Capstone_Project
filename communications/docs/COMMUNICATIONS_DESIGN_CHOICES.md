@@ -29,7 +29,7 @@ Evidence: [NUS network test results](results/NUS_NETWORK_TEST_RESULTS.md).
 
 ## 2. Each wearable is an independent producer
 
-Each ESP32 has its own identity, TLS/TCP connection, transport session, and clock mapping. The current profiles disable ESP-NOW forwarding and have no leaf-to-hub relationship.
+Each ESP32 has its own identity, TLS/TCP connection, transport session, and clock mapping. The communications firmware has no ESP-NOW forwarding implementation or leaf-to-hub relationship; both boards connect directly to the laptop relay. Throughput benchmarks generate DATA frames locally and send them over the existing TLS connection.
 
 **Why:** Direct producers keep sensor ownership clear and remove an intermediate wearable forwarding hop. Separate connections also let Ultra96 track synchronization, acknowledgements, and failures per node. The integrated dynamic coordinator lets a synchronized node start independently and lets a second node join the existing timeline with a live-only start.
 

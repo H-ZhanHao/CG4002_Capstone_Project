@@ -2,9 +2,8 @@
  * @file wifi_manager.h
  * @brief ESP32 station-mode Wi-Fi connection management.
  *
- * In hub mode, the manager connects using wifi_secrets.h, reconnects after
- * disconnection, and notifies the application after obtaining IPv4. In leaf
- * mode, it starts only the station radio on a configured ESP-NOW channel.
+ * The manager connects using the configured Wi-Fi credentials, reconnects
+ * after disconnection, and notifies the application after obtaining IPv4.
  *
  * It does not create sockets or depend on the TCP transport module.
  */
@@ -36,9 +35,6 @@ esp_err_t wifi_manager_start(
     wifi_manager_connected_callback_t connected_callback,
     void *callback_context
 );
-
-/** Start a station-mode radio on a fixed channel without joining a WLAN. */
-esp_err_t wifi_manager_start_leaf(uint8_t channel);
 
 /** Return the current primary Wi-Fi channel. */
 esp_err_t wifi_manager_get_channel(uint8_t *channel);

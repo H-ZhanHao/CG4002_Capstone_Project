@@ -2,8 +2,9 @@
 
 The active design uses two independent FireBeetle ESP32 boards named Node 1
 and Node 2. Each board produces its own local sensor stream and maintains its
-own TLS connection through the laptop relay to the Ultra96. There is no
-leaf-hub relationship and ESP-NOW forwarding is disabled.
+own TLS connection through the laptop relay to the Ultra96. The communications
+firmware has no leaf-hub relationship; its former ESP-NOW implementation has
+been removed. Each board communicates directly with the laptop relay.
 
 ## Identity mapping
 
