@@ -80,6 +80,7 @@ unity/Ultra96VisualizerDemo/Ultra96VisualizerDemo.apk
 # Others
 start-demo.ps1
 docs/*.md
+!docs/COMMUNICATIONS_DESIGN_CHOICES.md
 docs/handoffs/*.md
 docs/plans/*.md
 !docs/plans/SINGLE_NODE_BASELINE_AND_DYNAMIC_NODE_JOIN_PLAN.md

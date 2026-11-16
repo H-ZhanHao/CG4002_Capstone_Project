@@ -11,6 +11,10 @@ for current setup instructions. Documents that mention Hub 3, Hub 6, leaves,
 or ESP-NOW are retained as historical phase evidence; their identifiers and
 topology must not be applied to the current build.
 
+## Design explanations
+
+- [Communications design choices and tradeoffs](COMMUNICATIONS_DESIGN_CHOICES.md)
+
 ## Plans
 
 - [Single-node baseline and dynamic node joining (proposed)](plans/SINGLE_NODE_BASELINE_AND_DYNAMIC_NODE_JOIN_PLAN.md)
