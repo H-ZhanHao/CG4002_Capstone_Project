@@ -1,7 +1,7 @@
 """Presence-aware inference worker for the opt-in one-node server mode.
 
 Preserves the deployed pipeline's bounded queue, generation checks, five idle
-results and two exercise evidence scores (recorded in stage4_fixtures).
+results and two exercise evidence scores (recorded in test/fixtures).
 Model implementation is supplied separately; missing-node inputs are never
 fabricated or sent to the two-node model.
 """

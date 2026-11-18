@@ -1,10 +1,19 @@
 # Communications design choices
 
-Reviewed against the repository on 14 November 2026.
+Reviewed against the repository on 16 November 2026.
 
 This document explains selected communications decisions in the FitSense wearable exercise system. It uses the independent Node 1/Hip and Node 2/Wrist firmware, the integrated `server/server_rep_fall.py` entry point, and the Unity visualizer path. Current physical capture is 100 Hz; the integrated server defaults to three-second windows with a one-second hop. Earlier phase documents describe different rates, window lengths, and hub topologies.
 
 The network experiments provide direct evidence for the selected route. The other explanations describe the engineering benefits and tradeoffs of the checked-in implementation; they do not imply that every alternative was experimentally compared.
+
+Final firmware environments are `node1_final` and `node2_final`, with four
+separate sampling diagnostic environments. For operational commands use
+[Network setup](NETWORK_SETUP.md), the
+[firmware guide](../firmware/FireBeetle_to_Ultra96/FIRMWARE_GUIDE.md) and
+[server selection/policies](../ultra96/README.md#choose-one-sensor-server).
+[Design evolution](DESIGN_EVOLUTION.md) records earlier alternatives;
+[Experiments and results](EXPERIMENTS_AND_RESULTS.md) identifies the measured
+evidence and remaining validation. This review did not operate deployed devices.
 
 ## 1. A private Wi-Fi LAN and laptop bridge provide a usable route
 
@@ -33,9 +42,9 @@ Each ESP32 has its own identity, TLS/TCP connection, transport session, and cloc
 
 **Why:** Direct producers keep sensor ownership clear and remove an intermediate wearable forwarding hop. Separate connections also let Ultra96 track synchronization, acknowledgements, and failures per node. The integrated dynamic coordinator lets a synchronized node start independently and lets a second node join the existing timeline with a live-only start.
 
-**Tradeoff:** Ultra96 must coordinate concurrent connections and changing source availability. Independent communication recovery does not guarantee independent AI operation: the supplied `late_fusion_vart.py` still raises an error when either IMU source is absent. Single-node capture support therefore needs a compatible inference pipeline before it becomes a complete single-node exercise feature.
+**Tradeoff:** Ultra96 must coordinate concurrent connections and changing source availability. The AI teammate's updated implementation supports single-node inference. The [server guide](../ultra96/README.md#choose-one-sensor-server) records the local-copy version difference. 
 
-Evidence: [two-node firmware guide](../firmware/FireBeetle_to_Ultra96/DEMO_TWO_NODES.md), [dynamic coordinator](../../server/dynamic_capture.py), and [AI integration limitation](../../server/ONE_NODE_INTEGRATION.md).
+Evidence: [Hip and Wrist firmware guide](../firmware/FireBeetle_to_Ultra96/FIRMWARE_GUIDE.md) and [dynamic coordinator](../../server/dynamic_capture.py).
 
 ## 3. TCP supplies ordered delivery; the application supplies framing
 
@@ -142,7 +151,7 @@ Rep feedback has bounded retries: 750 ms spacing, up to three send attempts, and
 
 **Tradeoff:** More identity and state tracking adds implementation complexity. An ACK establishes firmware acceptance, without physically measuring a buzzer or LED. Retry behavior is command-specific: the final fall-detection setting uses an explicit ON/OFF command with a two-second ACK deadline and no automatic replay on reconnect. An unknown result stays unknown until confirmed.
 
-Evidence: [feedback sender](../../server/feedback_delivery.py), [firmware duplicate handling](../firmware/FireBeetle_to_Ultra96/src/feedback_delivery.c), and [final fall-control behavior](../../server/FINAL_FALL_CONTROL.md).
+Evidence: [feedback sender](../../server/feedback_delivery.py) and [firmware duplicate handling](../firmware/FireBeetle_to_Ultra96/src/feedback_delivery.c).
 
 ## 10. A separate WSS gateway isolates phone delivery
 

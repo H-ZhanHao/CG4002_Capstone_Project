@@ -1,221 +1,88 @@
 # Hardware core boundary
 
-This component builds shared C++ modules directly from `hardware/node`, which
-remains the canonical, untouched source. `GenericPeakDetector.cpp` and the
-counter, session, buzzer, fall and MPU6050 implementations are compiled from that
-directory; their headers are included from there too. There are no copied
-hardware headers or implementations in this component. The communications-owned
-`src/node_platform_adapter.cpp` implements only `NodePlatform::delayMs` with
-FreeRTOS, preserving the canonical MPU6050 driver's initialization delays without
-building the standalone Bluetooth platform.
+Current component reference, reviewed against the repository on 18 November 2026.
+This component compiles selected modules directly from `hardware/node`, using
+the source list in [CMakeLists.txt](CMakeLists.txt). Communications-owned bridges
+connect those modules to the existing acquisition, transport and feedback pipeline.
 
-`hardware_bridge.cpp` is the communications-owned C ABI for sensor acquisition
-and generic peak detection. The bridge owns the
-MPU6050 and generic-peak objects, supplies deterministic mock samples, maps
-`esp_timer` microseconds to the detector's millisecond API using the same
-monotonic origin, and returns plain C sample and peak structures.
+The tables below describe current source ownership. Integration decisions and
+historical verification are documented in the
+[hardware-communications vertical-slice record](../../../../docs/handoffs/HARDWARE_COMMUNICATIONS_VERTICAL_SLICE.md).
+Build and flashing instructions are in the [firmware guide](../../FIRMWARE_GUIDE.md).
 
-The communications-owned `src/sensor_history.c` is intentionally separate
-from the hardware `SensorHistory` class. The original class prepares fixed
-three-second snapshots without capture sequences. Transport history must retain
-a sequence assigned at acquisition, continue accepting samples while a flush
-drains, retry a rejected queue offer, and transition exactly once from history
-to live. Keeping that adapter separate avoids changing the teammate's class or
-bringing its overlapping-window workflow into the node runtime.
+## Source and ownership
 
-The firmware does not compile or call `SensorHistory.cpp`. The canonical
-`SensorHistory.h` supplies `SensorSample` and the history constants used by
-`GenericPeakDetector.h`; the history class itself is not instantiated.
+| Area | Current boundary |
+| --- | --- |
+| Canonical hardware | BuzzerFeedback, ContinuousCounter, NodeSession, RepCounter, FallDetector, GenericPeakDetector and Mpu6050 compile directly from `hardware/node`; headers come from there too. |
+| `src/hardware_bridge.cpp` | C ABI for acquisition and generic peaks; owns the sensor/detector objects and one monotonic capture origin. |
+| `src/node_platform_adapter.cpp` | Implements the canonical driver's delay function through FreeRTOS, without compiling the standalone Bluetooth platform. |
+| `src/exercise_bridge.cpp` | Reuses canonical counter/session processing on the already-captured sample; physical counter sessions start in standby and peer interfaces have no live radio transport. Phone/AR supplies the authoritative rep events. Local counters do not independently drive final LEDs/buzzer outputs. |
+| `src/feedback_bridge.cpp` and FeedbackController | Pipeline-owned GPIO/output state, connection LEDs and USB diagnostics. Canonical BuzzerFeedback owns queued rep sounds and fall priority. |
+| `src/fall_bridge.cpp` | Hip-only detector adapter using the same acquisition; validity/gap/runtime reset and event/alarm handoff. |
+| Firmware `src/physical_pipeline.c` | Sole task applying acquisition/control/feedback state and feeding history. |
+| Firmware `src/tcp_client.c` | Sole connection owner; callbacks hand bounded work to the pipeline. |
 
-The communications transport ring retains seven seconds at 100 Hz: three
-seconds for the requested pre-peak window plus four seconds for peak
-confirmation and command delivery. Its 701 entries live in static DRAM rather
-than on the physical-pipeline task stack.
+The standalone hardware application, Bluetooth SPP and ESP-NOW transports,
+hardware stream coordinator/window scheduler and C++ SensorHistory implementation
+are excluded. See [integration decisions](../../../../docs/handoffs/HARDWARE_COMMUNICATIONS_VERTICAL_SLICE.md#integration-decisions)
+for the reasons and replacement paths.
 
-Do not add `hardware/main.cpp`, `StreamCoordination`, or `WindowScheduler` to
-this component. The communications project retains one `app_main`, and
-Ultra96 owns clock/flush coordination and overlapping windows.
+The transport ring is firmware `src/sensor_history.c`, not the canonical C++
+SensorHistory class. It retains capture sequences, retries nonblocking queue
+handoff and transitions from retained history to live data in order. Its 701
+static entries retain seven seconds at 100 Hz; the normal pre-peak request is
+three seconds. The hardware SensorHistory header
+supplies shared sample/constants, but its implementation is not instantiated by
+the firmware. Canonical SensorHistory host tests are separate regression checks.
 
-## Exercise integration slice
+## Final build configuration
 
-`exercise_bridge.cpp` is the C ABI for the next integration phase. The
-component builds the hardware teammate's original `RepCounter.cpp`,
-`ContinuousCounter.cpp`, and `NodeSession.cpp` directly from `hardware/node`;
-those files are not edited or forked. The feedback controller also builds the
-canonical `hardware/node/BuzzerFeedback.cpp` directly. Every captured sample is offered to this
-bridge by the existing physical pipeline, so there is still only one MPU6050
-read and one acquisition clock.
+Use `node1_final` and `node2_final` from firmware `platformio.ini`. Both enable
+100 Hz physical acquisition, a 1 ms scheduler tick, TLS, independent joining,
+idle resume and serial diagnostics. The final profiles enable runtime fall
+control; Hip starts detection ON. Four additional sampling diagnostic profiles
+retain the comparison configurations described in [Sampling diagnostics](../../SAMPLING_DIAGNOSTICS.md).
+Historical stage/one-node/cleanup/update profiles are no longer environments.
 
-Node 1 maps to the hip/waist role and Node 2 maps to the wrist role. Physical
-builds start the counter session in standby. Mock builds complete a local
-synthetic peer acknowledgement and use a deterministic movement that drives
-both the pause and continuous counters, allowing counter and LED timing to be
-tested without MPU6050s or provisioned peer MAC addresses.
-
-The bridge exposes the hardware `LinkPacket` as an opaque, fixed 24-byte C
-object and stores outgoing control events in a bounded 12-entry queue. These
-legacy peer interfaces have no transport connected. The planned AR feedback
-path uses phone -> Ultra96 -> Hip for rep beeps, and Ultra96 -> both ESPs for
-steady activity LEDs, over the existing Wi-Fi/TLS connections. It does not
-require ESP-NOW forwarding.
-
-## Wi-Fi-only communications runtime
-
-Bluetooth SPP startup, polling, and the communications Bluetooth bridge have
-been removed. The component no longer builds `hardware/node/NodePlatform.cpp`
-or depends on the Bluetooth component. The canonical MPU6050 driver uses the
-communications delay adapter, retaining its original initialization delays.
-
-`sdkconfig.defaults` disables Bluetooth and software Wi-Fi/Bluetooth coexistence.
-The `node1_integration_100HZ` and `node2_integration_100HZ` configurations have
-also been regenerated with Bluetooth disabled. This releases the controller,
-host, task, and queue memory for Wi-Fi/TLS. Existing generated configurations
-for other profiles may still contain their older Bluetooth settings.
-
-USB serial logging remains available through ESP-IDF. Builds with
-`APP_FEEDBACK_DIAGNOSTICS=1` also enable the bounded USB feedback command parser
-described below. The standalone hardware application's Bluetooth implementation
-is unchanged.
-
-The checked-in `partitions_2mb.csv` provides a 0x1e0000-byte factory slot on
-the boards' detected 2 MiB flash. This project already used a single factory
-application, so the larger slot does not remove a previously available OTA
-slot.
+Bluetooth is disabled in the retained SDK defaults/configurations. The
+communications component has no Bluetooth dependency. The checked-in 2 MiB
+partition map provides one `0x1e0000`-byte factory slot and coredump space.
 
 ## Current integrated outputs
 
-`FeedbackController` owns persistent activity LED state and delegates queued
-100 ms rep beeps, 100 ms gaps and three-second fall priority to the canonical
-`BuzzerFeedback`. Only Hip may drive the buzzer. Idle is silent; ready/rep LED
-patterns and the idle double beep are removed. Session reset cancels rep sounds
-and clears activity without silencing a fall. STOP clears activity locally too.
-USB diagnostics use `feedback rep|active|idle|fall-alarm|status` and `fall inject`.
-See the Ultra96 README for action IDs, deployment and physical checks.
+Only the pipeline updates feedback/GPIO state. Connection retry is a slow blink;
+HELLO acceptance produces three fast pulses. After that, each LED indicates
+its acknowledged activity state. Idle is silent. One accepted phone rep increase
+gives Hip a 100 ms beep; rapid beeps are queued with 100 ms gaps. Wrist does not
+drive the buzzer. Fall alarm priority discards queued rep sounds and suppresses
+new rep sounds during the three-second alarm. Session/STOP cleanup must not
+silence a currently active local fall alarm.
+
+USB diagnostics are `feedback rep`, `feedback active`, `feedback idle`,
+`feedback status`, `feedback fall-alarm` and `fall inject`. The last two test
+sound-only versus marked synthetic event delivery respectively; injection is
+not physical fall detection and is filtered from phone alerts. Retired ready/
+rep LED actions and idle-beep actions must not be restored from old checkpoints.
+See [server feedback behavior](../../../../ultra96/README.md#integrated-activity-and-rep-outputs).
 
 ## Fall detector integration
 
-`fall_bridge.cpp` calls the canonical `hardware/node/FallDetector.cpp`, restored
-with its header and fall thresholds from commit `cfcb6ac`. The physical pipeline
-still passes acceleration (m/s^2), gyro (rad/s), and the capture timestamp from
-the same IMU read. The adapter computes raw acceleration magnitude and converts
-microseconds to milliseconds for the old `update(magnitude, milliseconds)` API.
-Gyro inputs are checked for validity but no longer gate detection.
+The adapter calls canonical FallDetector with acceleration magnitude and a
+millisecond timestamp derived from the capture clock. The restored thresholds
+are below 4 m/s² for at least 100 ms, then impact above 25 m/s². Impact is tested
+before nominal one-second wait expiry on that update, preserving the canonical
+algorithm. There is no posture confirmation, learned gravity or gyro gate.
 
-Node 1 (Hip) must see magnitude below 4 m/s^2 continuously for at least 100 ms,
-then magnitude above 25 m/s^2 while waiting for impact. This emits an event
-immediately, without gravity learning, posture/settling confirmation, or an
-impact-only/soft-collapse path. The nominal impact wait is 1000 ms; historical
-impact-before-timeout ordering is preserved, so a non-impact reading past the
-deadline expires the wait, while an impact on that update is checked first.
-The hardware `ExerciseConfig.h` is the source of the restored thresholds.
+The adapter separately checks finite acceleration/gyro, increasing timestamps,
+a 100 ms maximum sample gap, runtime reset and a three-second alarm cooldown.
+Only Hip emits events or drives its buzzer. Server ON/OFF applies through the
+pipeline and a matching ACK; unknown setting after reconnect is not an OFF
+inference.
 
-The bridge retains its independent 100 ms maximum sample gap, missing/nonfinite
-acceleration and gyro rejection, non-increasing timestamp resets, runtime mode
-reset, and three-second alarm cooldown. Only Hip reports fall events. Existing
-local alarm priority, device-event delivery and acknowledgements are unchanged.
-A qualified event no longer waits 500 ms for posture confirmation.
+## Verification
 
-The `node*_final` profiles start detection ON after reboot and accept
-server `fall on` / `fall off`; `fall status` reports the last acknowledged
-setting. All other profile flags are unchanged. This algorithm rollback needs
-only rebuilt/flashed firmware; no Ultra96, gateway or AR update is required
-when the server controls are already deployed.
-
-Run the portable bridge and canonical detector regression tests from the repo
-root with:
-
-```powershell
-& ./communications/firmware/FireBeetle_to_Ultra96/fall_tests/run_tests.ps1
-```
-
-The `node1_update_fall` (Hip) and `node2_update_fall` (Wrist) PlatformIO
-environments extend the existing `node1_one_node` and `node2_one_node` settings:
-physical IMU, 100 Hz capture, Wi-Fi/TLS, independent startup/live joining, and
-feedback diagnostics. Each has its own SDK configuration seeded from the
-corresponding one-node configuration. Existing environment definitions and
-the default environment are unchanged.
-
-From `communications/firmware/FireBeetle_to_Ultra96`, build both profiles with:
-
-```powershell
-pio run -e node1_update_fall -e node2_update_fall
-```
-
-Upload each profile to its matching board (replace the COM port):
-
-```powershell
-pio run -e node1_update_fall -t upload --upload-port COM_HIP
-pio run -e node2_update_fall -t upload --upload-port COM_WRIST
-```
-
-The updated bridge is shared source, so rebuilding an existing environment
-also compiles the updated detector. `fall inject` checks alarm/event delivery;
-it bypasses sensor-based detection and does not validate the freefall/impact rule.
-
-## Cleanup profiles
-
-`node1_cleanup` and `node2_cleanup` extend their corresponding `update_fall`
-environments: physical IMU, 100 Hz capture, a 1 ms scheduler tick, Wi-Fi/TLS,
-independent startup/live joining, feedback diagnostics and the canonical fall
-detector. Their SDK configurations are seeded from the matching `update_fall`
-configurations. Build both from the firmware project directory:
-
-```powershell
-pio run --disable-auto-clean -e node1_cleanup -e node2_cleanup
-```
-
-Each profile has its own `sdkconfig.node*_cleanup` and
-`.pio/build/node*_cleanup` outputs. Existing environment definitions, SDK
-configurations and the default environment are preserved.
-The source cleanup is shared: rebuilding an older profile also uses the
-canonical hardware files and delay adapter. Communications history continues
-to use `src/sensor_history.c`.
-
-Use `--disable-auto-clean` when retaining built images across profile additions:
-PlatformIO otherwise clears its shared build directory when the project
-configuration checksum changes.
-
-## Second fall update profiles
-
-`node1_update_fall2` (Hip) and `node2_update_fall2` (Wrist) extend the matching
-`cleanup` profiles and compile the latest canonical fall detector and tuning.
-Their separate `sdkconfig.node*_update_fall2` files are seeded from the matching
-cleanup configurations. They retain physical IMU capture at 100 Hz, the 1 ms
-scheduler tick, Wi-Fi/TLS, independent startup/live joining and USB diagnostics.
-Ultra96 feedback commands continue to own rep beeps and activity LEDs.
-Fall detection is temporarily disabled in both profiles with
-`-D APP_FALL_DETECTION=0`: sensor samples do not run the detector, and
-`fall inject` is rejected, so neither path starts a local Hip fall alarm or
-queues a fall event. The explicit `feedback fall-alarm` output diagnostic
-remains available. To restore detection, change the flag to
-`-D APP_FALL_DETECTION=1` in both profiles, rebuild and upload.
-Other legacy profiles retain their build-time behavior; the final profiles
-compile detection in and start it ON, with server runtime control available.
-The standalone hardware Bluetooth and ESP-NOW control flows are not added.
-
-Build from `communications/firmware/FireBeetle_to_Ultra96`:
-
-```powershell
-pio run --disable-auto-clean -e node1_update_fall2 -e node2_update_fall2
-```
-
-Outputs are `.pio/build/node1_update_fall2/firmware.bin` and
-`.pio/build/node2_update_fall2/firmware.bin`. Existing environment definitions,
-SDK configurations and the default environment are preserved. Keep copies of
-images that must be retained outside `.pio/build`: `--disable-auto-clean`
-applies to this invocation, while other PlatformIO invocations may refresh the
-shared build cache. Older profiles still share the canonical source, so
-rebuilding one later also uses the latest detector.
-
-Upload only to the matching board when ready (replace the COM port):
-
-```powershell
-pio run --disable-auto-clean -e node1_update_fall2 -t upload --upload-port COM_HIP
-pio run --disable-auto-clean -e node2_update_fall2 -t upload --upload-port COM_WRIST
-```
-
-The host bridge tests cover the restored freefall/impact path, immediate
-events, Hip-only reporting, invalid inputs, sample gaps, runtime reset,
-cooldown and alarm priority. Physical
-validation must use actual sensor motion after re-enabling detection;
-`fall inject` bypasses the detector when enabled.
+Run [portable firmware checks](../../test/protocol_host/README.md), including
+`fall_tests/run_tests.ps1` from the repository root. Source/build/host checks do
+not establish physical GPIO timing, worn-sensor detection quality, sustained
+100 Hz cadence or live phone acceptance. Retain those measurements separately.

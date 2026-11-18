@@ -1,5 +1,11 @@
 # Sampling diagnostics
 
+Reviewed against the repository on 16 November 2026. Use the
+[network setup guide](../../docs/NETWORK_SETUP.md) for the private route and
+[final firmware guide](FIRMWARE_GUIDE.md) for normal builds. This document
+defines measurement procedures; observed results belong in
+[Experiments and results](../../docs/EXPERIMENTS_AND_RESULTS.md).
+
 The `node1_sampling_diag` and `node2_sampling_diag` environments
 preserve the original sampling baseline and add `APP_SAMPLING_DIAGNOSTICS=1`.
 They share the direct Wi-Fi/TLS pipeline flags with the final firmware, but
@@ -11,30 +17,14 @@ Historical environment definitions have been removed from `platformio.ini`;
 the `sdkconfig.node1_base` and `sdkconfig.node2_base` files remain as inputs
 to the retained builds.
 
-Run these commands from `communications/firmware/FireBeetle_to_Ultra96`:
-
-```powershell
-# First build: seed separate SDK configs from the base configs.
-if (-not (Test-Path sdkconfig.node1_sampling_diag)) {
-    Copy-Item sdkconfig.node1_base sdkconfig.node1_sampling_diag
-}
-if (-not (Test-Path sdkconfig.node2_sampling_diag)) {
-    Copy-Item sdkconfig.node2_base sdkconfig.node2_sampling_diag
-}
-pio run -e node1_sampling_diag -e node2_sampling_diag
-
-# Replace COM_NODE1 / COM_NODE2 with each board's actual serial port.
-pio run -e node1_sampling_diag -t upload --upload-port COM_NODE1
-pio run -e node2_sampling_diag -t upload --upload-port COM_NODE2
-
-# Open a separate terminal per board and retain the complete output.
-pio device monitor --port COM_NODE1 --baud 115200 --filter time --filter log2file
-pio device monitor --port COM_NODE2 --baud 115200 --filter time --filter log2file
-```
-
 To restore normal firmware, upload `node1_final` / `node2_final` to the same
 respective ports. USB flashing and physical testing are separate from building.
 No Ultra96/server deployment is needed for the diagnostics.
+
+The final server still uses independent readiness, but these diagnostic builds
+do not accept the final firmware's live-only join command. For comparable runs,
+bring both diagnostic boards up and synchronized before triggering capture.
+Do not use these builds as proof of final dynamic joining or runtime fall control.
 
 ## Experimental 1,000 Hz scheduler tick
 
@@ -127,12 +117,3 @@ Fast reads with late/skipped captures suggest scheduling or other task work.
 Large read times/failures suggest I2C problems. Stable capture rate with growing
 sample age, queue retries, or history loss suggests delivery backpressure.
 This summary cannot attribute CPU time to individual Wi-Fi/TLS tasks.
-
-## Host counter checks
-
-From the repository root:
-
-```powershell
-g++ -std=c++17 -Wall -Wextra -Werror -Icommunications/firmware/FireBeetle_to_Ultra96/include hardware/tests/sampling_diagnostics_test.cpp -o .build/sampling_diagnostics_test.exe
-& .build/sampling_diagnostics_test.exe
-```

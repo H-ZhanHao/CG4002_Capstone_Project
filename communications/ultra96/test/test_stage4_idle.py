@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import test_server_ai_feedback as ai_tests
-from stage4_fixtures.inference_pipeline import InferencePipeline
+from fixtures.inference_pipeline import InferencePipeline
 
 server = ai_tests.ai_server
 

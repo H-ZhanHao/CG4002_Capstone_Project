@@ -1,220 +1,119 @@
-# Single-node startup and dynamic joining
+# Independent startup and dynamic joining
 
-Implemented on 2026-11-06 as the only server capture behavior. Either node can
-start the system, and a partner can join later. No mode flag is required;
-`--one-node` has been removed. Existing PlatformIO profile definitions are
-unchanged; use `node1_one_node` and `node2_one_node` for live joining, gated by
-`APP_ONE_NODE=1` in firmware.
-Neither board has been flashed as part of this change.
+This is the default capture
+lifecycle, shared by the communications and integrated servers. No mode switch
+is required. Use final `node1_final` and
+`node2_final` firmware environments; implementation-stage names are historical.
 
-## Build and run
+## Build and choose a server
 
-From the repository root, build both new firmware environments:
+From the repository root:
 
 ```powershell
-pio run -d communications/firmware/FireBeetle_to_Ultra96 -e node1_one_node -e node2_one_node
+pio run -d communications/firmware/FireBeetle_to_Ultra96 -e node1_final -e node2_final
 ```
 
-The profiles inherit the corresponding Stage 5 physical 100 Hz TLS build,
-including idle resume, feedback diagnostics, and hip fall reporting. They use
-separate PlatformIO build directories and generated SDK configurations.
-Build output is under `.pio/build/node1_one_node` and `.pio/build/node2_one_node`
-inside the firmware project. Flashing is a separate deployment step.
+See [firmware configuration/flashing](../firmware/FireBeetle_to_Ultra96/FIRMWARE_GUIDE.md)
+and [Network setup](../docs/NETWORK_SETUP.md). Both final profiles use physical
+100 Hz IMU capture, a 1 ms scheduler tick, TLS, live joining, serial diagnostics
+and runtime Hip fall control. Building does not flash the boards.
 
-On Ultra96, from `communications/ultra96`, use either:
+Choose one server as described in [Ultra96 services](README.md#choose-one-sensor-server):
 
-```bash
-# Communications capture/window verification, without model execution:
-python server.py --max-missing-fraction 0.03
+- `server/server_rep_fall.py` for finalized capture/window/feedback verification, together with integrated model, dashboard, rep and fall operation.
+- `communications/ultra96/server.py` for capture/window/feedback verification.
+- `communications/ultra96/server_one_node.py` is a retained alternative AI entry
+  point requiring external model/runtime modules and separately configured paths.
 
-# AI capture, assuming the existing deployed infer_window supports either node:
-python server_one_node.py --max-missing-fraction 0.03
-```
 
-Keep the existing relay and network/TLS setup. Both launch commands always
-use independent node readiness, dynamic joining, and available-node windows.
-The legacy coordinator that waited for both nodes has been removed. The new
-firmware also accepts the existing history-flush commands.
 
-`server_one_node.py` is the AI entrypoint renamed from `server_AI.py` in commit
-`a0d3e59`. It imports the local `window_assembler.py` and the AI teammate's
-`inference_pipeline.InferencePipeline`.
-Keep that file on Ultra96; `dynamic_inference.py` is no longer imported by the
-server and is not required for deployment. The teammate owns adapting their
-pipeline for available-node windows and idle handling. The local
-`dynamic_inference.py` remains a reference implementation, not the deployed
-pipeline.
+Do not substitute the local reference `dynamic_inference.py` for the deployed
+AI pipeline. Real-model prerequisites and missing-sample defaults are in the
+server guide.
 
-`server_one_node.py` still needs the deployed model runtime, compiled models,
-and DPU overlay for real inference. This checkout keeps the integrated runtime
-and model assets under `../../server/`, rather than beside this entrypoint.
-Deployment must make the runtime modules importable and configure the model
-and overlay paths for the chosen layout. The capture contract accepts node 1
-alone, node 2 alone, or both. Renaming the entrypoint does not establish that
-the deployed model supports every input combination: the checked-in
-`../../server/late_fusion_vart.py` still rejects windows missing either node.
-The earlier single-node inference checks used deterministic model results.
+## Lifecycle and eight operating scenarios
 
-An optional `--inference-adapter package:factory` loads an alternative adapter.
-The factory receives parsed CLI arguments, initializes/retains any required
-hardware resources, and returns an object implementing `infer_window(window)`.
-It is optional; the normal AI launch uses the existing VART runtime.
+| Situation | Capture behavior |
+| --- | --- |
+| Hip alone | Its own HELLO, mapping and acknowledged ARM permit a peak/start without Wrist. |
+| Wrist alone | Equivalent independent capture; Hip sound/fall functions are unavailable. |
+| Both ready | Either node's valid peak requests aligned starts for ready producers; ACKs are independent. |
+| Partner joins active run | Synchronize and start live on the existing timeline; no new peak or global reset. |
+| Partner joins before movement | Arm independently; its pending sync/ARM cannot invalidate the first node's trigger. |
+| One node fails/disconnects/stalls | Isolate it and preserve another usable producer/run; recover with a fresh session/mapping. |
+| All starting/streaming nodes lost | End capture; after recovery arm and wait for a fresh peak unless manually stopped. |
+| Confirmed idle then movement | STOP feeders, rearm ready nodes after ACKs and start a fresh capture on movement. |
 
-## Implemented lifecycle
+Supported, connected, synchronized, armed and acknowledged-streaming nodes are
+separate states. A TCP connection alone does not make samples eligible. Session,
+boot/arm identity, capture generation and command validation prevent old samples,
+ACKs and inference from entering a new run. Manual STOP persists across joins.
 
-### Node connection LEDs
+Commands normally have a 3 s ACK deadline. A streaming producer without accepted
+samples for 3 s is removed and its transport closed for normal reconnect.
+Timed-out command transports are also closed; another usable producer continues.
 
-The `node1_one_node` and `node2_one_node` builds use the following nonblocking
-LED patterns. Existing firmware profile definitions and LED behavior are
-preserved because the connection indication is gated by `APP_ONE_NODE`.
+## Live-only start and history
 
-| State | LED |
-|---|---|
-| Booted and trying to reach the server, including Wi-Fi/TLS/HELLO retries | Repeat 500 ms ON, 500 ms OFF |
-| Valid Ultra96 `HELLO_ACK` accepted | Three fast 100 ms ON pulses separated by 100 ms OFF |
-| Connected, after the burst, waiting for activity | OFF |
-| Streaming acknowledged and activity feedback received | Steady ON, after any connection burst finishes |
-| Application connection lost | Resume slow blinking |
+Final firmware accepts START_FLUSH with zero history duration as a live-only
+start. It begins at the next acquisition sequence and ACKs the actual local
+boundary, without inventing pre-boot samples. A late partner is not asked to
+reproduce the original trigger's old history.
 
-The connection burst starts with a 100 ms OFF separator so its first pulse is
-distinct even if acceptance arrives while the slow blink is ON. Including the
-separator and final gap, the burst takes 700 ms. SYNC or ARM does not trigger
-another burst. STOP/idle updates the eventual activity state without truncating
-the burst. Each newly accepted session gets its own confirmation; a stale
-session's teardown cannot change the current session's LED.
+Initial peak startup normally requests three seconds before the mapped peak.
+If history is insufficient, the server retries that producer once with a live
+start. The run origin stays at the intended pre-peak boundary; early windows
+without usable coverage are rejected. Another successfully started node is not
+cancelled by that producer's failure. Samples remain ordered from history to live.
 
-The existing application BEGIN/END events carry the validated-handshake and
-disconnect state to the physical pipeline, which remains the only owner of
-the feedback controller and GPIO. Timing is serviced by its existing loop,
-including when sensor reads fail; no blink task or blocking delays were added.
-Rep beeps and the hip's fall-alarm priority remain independent of LED timing.
+## Window availability and model contract
 
-Host verification is in
-[`test_connection_led.cpp`](../firmware/FireBeetle_to_Ultra96/one_node_tests/test_connection_led.cpp).
-It exercises both node roles, pulse counts/boundaries, startup retry blinking,
-streaming handoff, idle, reconnection, timer rollover, legacy LED behavior,
-and fall/buzzer preservation. Both node firmware profiles were rebuilt
-successfully; a physical LED check after flashing remains required.
+A window's `samples_by_node` contains `{1}` (Hip), `{2}` (Wrist) or `{1, 2}`
+according to valid coverage. `quality.available_nodes` and rejection metadata
+identify usable sources. Missing producers are omitted, not replaced by a full
+zero stream. No usable source means no accepted inference window.
 
-### Capture and node availability
+Known starting/lagging producers receive a bounded capture-time grace period:
+when the other stream advances 250 ms beyond the window end, that window may
+proceed without them. `--node-wait-ms 0` disables the grace period. This is not
+an extra wall-clock sleep; emitted windows are not replayed after a partner joins.
 
-- Either synchronized node is armed without waiting for its partner.
-- A valid peak from an acknowledged arm starts the available ready producers.
-- Each producer's ARM/START ACK is handled independently; the first successful
-  START ACK opens the run's assembler once.
-- A late synchronized node starts live, without a new peak or a global reset.
-- Per-node arm generations and boundaries prevent arming a partner from
-  invalidating the first node's trigger.
-- Disconnection, failed commands, and stalled samples isolate that producer.
-  A remaining stream continues on the same run/window timeline.
-- Losing all streaming/starting producers ends the capture. Reconnection arms
-  a new capture and requires a fresh peak unless manually stopped.
-- Manual STOP persists across reconnects. Idle pause stops transmission and
-  rearms nodes independently after their STOP ACKs.
-- Clock synchronization math, mapping quality checks, and periodic refresh
-  remain in `NodeControlConnection`.
+Defaults are 100 Hz expected rate, 3 s windows and 1 s hop. Both assemblers
+preserve real samples without zero padding or trimming to force the nominal
+count. Capture-only defaults to a 3% missing allowance; integrated inference
+defaults to 4% and resamples accepted real data downstream for model input.
+Both enforce source quality and session/timestamp rules.
 
-Commands use the existing control ACK timeout (currently three seconds).
-A streaming producer with no accepted samples for three seconds is removed and
-its transport shut down so the normal reconnect path can recover it. Other
-producers continue. Timed-out command transports are also closed; they cannot
-later start streaming under an abandoned command.
+The AI interface is `infer_window(window)` with capture/run/window identity,
+interval, exercise/class/confidence and model-window-count metadata in results.
+The AI teammate has fixed single-node inference in the updated AI implementation,
+as confirmed by the user on 18 November 2026. Deploy that version with this
+available-node capture contract; see the [server guide](README.md#choose-one-sensor-server)
+for the older local-copy synchronization requirement. Earlier capture routing
+tests used deterministic outputs and do not measure the updated model's accuracy
+or its comparative performance with one versus two sensors.
+Missing data is not an idle result. Accepted idle confirmation uses five
+consecutive confident results; stale generations cannot pause a fresh capture.
 
-## Live-join protocol
+## Connection and activity feedback
 
-Only the new firmware profiles accept a `START_FLUSH` with
-`history_duration_us = 0` as a live-only start. The board starts from its next
-acquisition sequence and reports the actual local boundary in the ACK.
-No sensor samples are invented and no pre-boot history is requested.
+Each final board slowly blinks while connecting, then emits three fast pulses
+after its accepted HELLO_ACK. After the burst it is OFF while waiting and steady
+ON after its local streaming/activity confirmation. Disconnect resumes slow
+blinking; one partner's teardown cannot change the other's session/output state.
+Idle/STOP clears activity without silencing an active local fall alarm. Hip rep
+beeps are separate from LED timing. See [current outputs](README.md#integrated-activity-and-rep-outputs).
 
-Initial peak startup still requests the existing pre-peak history. If that
-request is rejected (for example, not enough history after boot), the server
-retries that producer once with a live start. A failed retry removes that
-producer without cancelling another usable stream. The run origin remains
-the original mapped peak minus the requested history duration; insufficient
-early windows are rejected until real coverage is available.
+## Verification
 
-## Window and AI contract
+Use the current integrated tests and portable host commands in
+[Ultra96 services](README.md#verification-and-known-test-limitations) and the
+[firmware host-test guide](../firmware/FireBeetle_to_Ultra96/test/protocol_host/README.md).
+Older dynamic Python fixtures under `test/` still import the removed AI module
+name and need maintenance before use; they are not a current all-green suite.
 
-`samples_by_node` contains only the usable nodes for that window:
-
-| Keys | Input |
-|---|---|
-| `{1}` | Hip/waist only |
-| `{2}` | Wrist only |
-| `{1, 2}` | Both nodes on the shared capture timeline |
-
-`quality.available_nodes` identifies those nodes. `sample_counts`, padding and
-drop counts remain available for both supported nodes;
-`node_rejection_reasons` explains unusable coverage. Small packet-loss padding
-retains the existing policy, but a missing producer is never zero-filled.
-No usable producer means no accepted inference window.
-
-A known starting or lagging producer receives a bounded capture-time grace
-period. The other stream advancing 250 ms past the window end releases the
-window without waiting longer. Configure this with `--node-wait-ms`; zero
-disables the grace period. It is a timestamp-progress bound, not an extra
-wall-clock sleep. Previously emitted windows are not replayed when a node joins.
-
-The AI teammate's pipeline should call `infer_window(window)` for every accepted
-input combination. Result fields are the existing pipeline contract:
-
-```text
-capture_run_id, window_id, start_us, end_us,
-class_id, exercise, confidence, model_window_count
-```
-
-The local reference worker validates window/run identifiers and intervals,
-uses a bounded queue and capture-generation checks, and retains the recorded
-Stage 4 policy: confidence >= 0.80, two exercise evidence scores, and five
-consecutive confident idle results. It resets evidence when available inputs
-change. These are integration requirements to review with the AI teammate;
-their external pipeline implementation has not been verified in this checkout.
-Missing windows must never count as idle classifications.
-
-## Validation and remaining work
-
-After removing the legacy mode, 45 dynamic/default-startup tests pass. They
-exercise both servers without a mode flag, public coordinator construction,
-CLI rejection of the removed flag, independent startup, joining, window
-fallback, STOP/idle handling, and inference routing. Firmware was unchanged by
-this server cleanup.
-
-The broader test results below are the earlier implementation checkpoint,
-prior to removal of legacy mode. Older local group-start/strict-paired-window
-fixtures describe the removed behavior and are not acceptance tests for the
-current default. No full-suite pass is claimed for the cleanup.
-
-- Both new firmware profiles build successfully.
-- New coordinator, window, and inference tests cover both server variants,
-  joining, timeouts, reconnects, STOP/idle behavior, model routing, and stale
-  results. Run from the repository root:
-
-  ```powershell
-  python -m unittest discover -s communications/ultra96 -p 'test_dynamic*.py' -q
-  ```
-
-- The host C live-feeder test verifies an immediate join with less than a
-  three-second history, next-sequence ordering, retry, and stop behavior:
-
-  ```powershell
-  gcc -std=c11 -Wall -Wextra -Werror -I communications/firmware/FireBeetle_to_Ultra96/include communications/firmware/FireBeetle_to_Ultra96/src/sensor_history.c communications/firmware/FireBeetle_to_Ultra96/one_node_tests/test_live_history.c -o .build/one_node_live_test.exe
-  .build/one_node_live_test.exe
-  ```
-
-- The existing history host tests and 23 laptop relay tests pass.
-- Final portable selection: 228 tests verified (226 passed in the selection,
-  and two simulated-phone subprocess tests passed on rerun after exporting
-  the local WebSocket dependency through `PYTHONPATH`). This includes 41 new
-  dynamic-mode tests. The earlier broad-run limitations below remain separate.
-- A broader selected Ultra96 run passed 221 of 223 tests. The two failures are
-  C# WSS transport checks failing in Windows TLS credential acquisition. That
-  run excluded the existing AI default-policy assertion: the checked-in AI
-  server uses `0.04`, while its test expects `0.03` (unchanged by this work).
-  Full discovery also references absent `server_new.py`. These results are not
-  an all-green full-suite claim. Local logs are in `.build/one-node-*.log`.
-- Physical flashing, one-/two-board acceptance tests, real inference, and
-  comparative single-node/fusion accuracy remain to be verified on hardware.
-
-See the [scenario plan](../docs/plans/SINGLE_NODE_BASELINE_AND_DYNAMIC_NODE_JOIN_PLAN.md)
-for the eight agreed operating sequences.
+Physically verify each scenario, failed ACK/sync isolation, STOP persistence,
+idle/resume, actual LEDs, data coverage and final model compatibility. Historical
+45-test/228-check selections and their environment limitations are retained in
+[Experiments and results](../docs/EXPERIMENTS_AND_RESULTS.md#7-physical-integration-and-dynamic-window-verification),
+not presented here as newly rerun results.

@@ -48,12 +48,14 @@ class WindowConfigTest(unittest.TestCase):
 class WindowAssemblerTest(unittest.TestCase):
     def make_assembler(self, rate=2, window_us=1_000_000,
                        hop_us=1_000_000):
-        # Legacy low-rate fixtures explicitly exercise the original count policy;
-        # production percentage defaults are covered separately below.
+        # Low-rate fixtures use an explicit allowance; production percentage
+        # defaults are covered separately below.
         return WindowAssembler(WindowConfig(
             rate, window_us, hop_us, max_missing_per_node=5))
 
     def complete(self, assembler, node1, node2, boundary=1_000_000):
+        for node in (1, 2):
+            assembler.node_joined(node)
         output = []
         for item in node1:
             output.extend(assembler.submit(item))
@@ -111,6 +113,8 @@ class WindowAssemblerTest(unittest.TestCase):
     def test_arrival_order_does_not_change_capture_membership(self):
         assembler = self.make_assembler()
         assembler.start_run(1, 0)
+        assembler.node_joined(1)
+        assembler.node_joined(2)
         for item in (sample(2, 0, 1_000), sample(2, 1, 501_000),
                      sample(2, 2, 1_000_000), sample(1, 0, 0),
                      sample(1, 1, 500_000)):
@@ -119,16 +123,19 @@ class WindowAssemblerTest(unittest.TestCase):
         self.assertEqual(len(output), 1)
         self.assertEqual(output[0].quality.sample_counts, {1: 2, 2: 2})
 
-    def test_missing_sequence_rejects_window(self):
+    def test_missing_sequence_omits_bad_node_and_keeps_usable_partner(self):
         assembler = self.make_assembler()
         assembler.start_run(1, 0)
         windows = self.complete(
             assembler, [sample(1, 0, 0), sample(1, 2, 500_000)],
             [sample(2, 0, 0), sample(2, 1, 500_000)])
-        self.assertFalse(windows[0].quality.accepted)
+        self.assertTrue(windows[0].quality.accepted)
+        self.assertEqual(set(windows[0].samples_by_node), {2})
+        self.assertEqual(windows[0].quality.node_rejection_reasons[1],
+                         "sequence_gap_without_deficit")
         self.assertEqual(windows[0].quality.missing_sequences[1], (1,))
 
-    def test_up_to_five_missing_per_node_are_zero_padded(self):
+    def test_allowed_deficits_preserve_only_real_samples(self):
         assembler = self.make_assembler(rate=10)
         assembler.start_run(1, 0)
         node1 = [sample(1, sequence, sequence * 100_000)
@@ -139,22 +146,14 @@ class WindowAssemblerTest(unittest.TestCase):
         window = windows[0]
         self.assertTrue(window.quality.accepted)
         self.assertEqual(window.quality.sample_counts, {1: 6, 2: 5})
-        self.assertEqual(window.quality.padded_counts, {1: 4, 2: 5})
-        self.assertEqual(len(window.samples_by_node[1]), 10)
-        self.assertEqual(len(window.samples_by_node[2]), 10)
-        self.assertEqual(
-            [item.sequence for item in window.samples_by_node[1]],
-            list(range(10)))
-        self.assertEqual(
-            [item.sequence for item in window.samples_by_node[2]],
-            list(range(10)))
-        self.assertTrue(all(
-            (item.ax, item.ay, item.az, item.gx, item.gy, item.gz) ==
-            (0, 0, 0, 0, 0, 0)
-            for samples in window.samples_by_node.values()
-            for item in samples if item.is_padding))
+        self.assertEqual(window.quality.padded_counts, {1: 0, 2: 0})
+        self.assertEqual(window.samples_by_node[1], tuple(node1))
+        self.assertEqual(window.samples_by_node[2], tuple(node2))
+        self.assertTrue(all(not item.is_padding
+                            for samples in window.samples_by_node.values()
+                            for item in samples))
 
-    def test_more_than_five_missing_from_either_node_rejects_window(self):
+    def test_excessive_deficit_omits_node(self):
         assembler = self.make_assembler(rate=10)
         assembler.start_run(1, 0)
         windows = self.complete(
@@ -162,29 +161,33 @@ class WindowAssemblerTest(unittest.TestCase):
             [sample(1, sequence, sequence * 100_000) for sequence in range(4)],
             [sample(2, sequence, sequence * 100_000) for sequence in range(10)],
         )
-        self.assertFalse(windows[0].quality.accepted)
-        self.assertEqual(windows[0].quality.rejection_reason, "missing_samples")
+        self.assertTrue(windows[0].quality.accepted)
+        self.assertEqual(set(windows[0].samples_by_node), {2})
+        self.assertEqual(windows[0].quality.node_rejection_reasons[1], "missing_samples")
         self.assertEqual(windows[0].quality.padded_counts, {1: 0, 2: 0})
 
-    def test_small_count_mismatch_is_padded(self):
+    def test_small_count_mismatch_keeps_unequal_real_counts(self):
         assembler = self.make_assembler()
         assembler.start_run(1, 0)
         windows = self.complete(
             assembler, [sample(1, 0, 0)],
             [sample(2, 0, 0), sample(2, 1, 500_000)])
         self.assertTrue(windows[0].quality.accepted)
-        self.assertEqual(windows[0].quality.padded_counts, {1: 1, 2: 0})
+        self.assertEqual(windows[0].quality.padded_counts, {1: 0, 2: 0})
+        self.assertEqual(len(windows[0].samples_by_node[1]), 1)
+        self.assertEqual(len(windows[0].samples_by_node[2]), 2)
+        self.assertIsNone(windows[0].quality.max_index_skew_us)
 
-    def test_gap_without_count_deficit_still_rejects_window(self):
+    def test_no_usable_nodes_rejects_window(self):
         assembler = self.make_assembler()
         assembler.start_run(1, 0)
         windows = self.complete(
             assembler, [sample(1, 0, 0), sample(1, 2, 500_000)],
-            [sample(2, 0, 0), sample(2, 1, 500_000)])
+            [sample(2, 0, 0), sample(2, 2, 500_000)])
         self.assertFalse(windows[0].quality.accepted)
         self.assertEqual(windows[0].quality.padded_counts, {1: 0, 2: 0})
 
-    def test_one_unique_extra_drops_worst_timestamp_grid_match(self):
+    def test_one_unique_extra_is_preserved(self):
         assembler = self.make_assembler(rate=4)
         assembler.start_run(1, 0)
         node1 = [
@@ -197,11 +200,9 @@ class WindowAssemblerTest(unittest.TestCase):
         window = self.complete(assembler, node1, node2)[0]
         self.assertTrue(window.quality.accepted)
         self.assertEqual(window.quality.sample_counts, {1: 5, 2: 4})
-        self.assertEqual(window.quality.dropped_counts, {1: 1, 2: 0})
-        self.assertEqual(window.quality.dropped_sequences[1], (2,))
-        self.assertEqual(
-            [item.sequence for item in window.samples_by_node[1]],
-            [0, 1, 3, 4])
+        self.assertEqual(window.quality.dropped_counts, {1: 0, 2: 0})
+        self.assertEqual(window.quality.dropped_sequences[1], ())
+        self.assertEqual(window.samples_by_node[1], tuple(node1))
 
     def test_identical_duplicate_is_dropped(self):
         assembler = self.make_assembler(rate=4)
@@ -216,7 +217,7 @@ class WindowAssemblerTest(unittest.TestCase):
         self.assertEqual(window.quality.dropped_sequences[1], (1,))
         self.assertEqual(len(window.samples_by_node[1]), 4)
 
-    def test_conflicting_duplicate_is_rejected(self):
+    def test_conflicting_duplicate_omits_node(self):
         assembler = self.make_assembler(rate=4)
         assembler.start_run(1, 0)
         original = sample(1, 1, 250_000)
@@ -226,11 +227,12 @@ class WindowAssemblerTest(unittest.TestCase):
         node2 = [sample(2, sequence, sequence * 250_000)
                  for sequence in range(4)]
         window = self.complete(assembler, node1, node2)[0]
-        self.assertFalse(window.quality.accepted)
-        self.assertEqual(window.quality.rejection_reason,
+        self.assertTrue(window.quality.accepted)
+        self.assertEqual(set(window.samples_by_node), {2})
+        self.assertEqual(window.quality.node_rejection_reasons[1],
                          "conflicting_duplicate")
 
-    def test_more_than_two_extra_samples_rejects_window(self):
+    def test_more_than_two_extra_samples_omits_node(self):
         assembler = self.make_assembler(rate=4)
         assembler.start_run(1, 0)
         node1 = [sample(1, sequence, sequence * 100_000)
@@ -238,8 +240,9 @@ class WindowAssemblerTest(unittest.TestCase):
         node2 = [sample(2, sequence, sequence * 250_000)
                  for sequence in range(4)]
         window = self.complete(assembler, node1, node2)[0]
-        self.assertFalse(window.quality.accepted)
-        self.assertEqual(window.quality.rejection_reason,
+        self.assertTrue(window.quality.accepted)
+        self.assertEqual(set(window.samples_by_node), {2})
+        self.assertEqual(window.quality.node_rejection_reasons[1],
                          "too_many_extra_samples")
 
     def test_timestamp_regression_is_ignored(self):
@@ -260,9 +263,9 @@ class WindowAssemblerTest(unittest.TestCase):
         assembler.stop_run("test")
         assembler.stop_run("test again")
         assembler.start_run(2, 0)
-        assembler.submit(sample(1, 1, 1_000_000))
-        window = assembler.submit(sample(2, 1, 1_000_000))[0]
+        window = assembler.submit(sample(1, 1, 1_000_000))[0]
         self.assertEqual(window.quality.sample_counts[1], 0)
+        self.assertFalse(window.quality.accepted)
 
     def test_new_run_resets_window_id_and_samples(self):
         assembler = self.make_assembler(rate=1)
@@ -276,8 +279,10 @@ class WindowAssemblerTest(unittest.TestCase):
         self.assertEqual((window.run_id, window.window_id), (2, 0))
 
     def test_one_submission_can_complete_multiple_buffered_windows(self):
-        assembler = self.make_assembler(rate=1)
+        assembler = WindowAssembler(WindowConfig(
+            1, 1_000_000, 1_000_000, node_wait_us=4_000_000))
         assembler.start_run(1, 0)
+        assembler.node_joined(2)
         for second in range(4):
             assembler.submit(sample(1, second, second * 1_000_000))
         assembler.submit(sample(2, 0, 0))
@@ -291,7 +296,8 @@ class WindowAssemblerTest(unittest.TestCase):
             assembler, [sample(1, 0, 0), sample(1, 1000, 500_000)],
             [sample(2, 0, 0), sample(2, 1, 500_000)])
         self.assertEqual(len(windows[0].quality.missing_sequences[1]), 100)
-        self.assertFalse(windows[0].quality.accepted)
+        self.assertTrue(windows[0].quality.accepted)
+        self.assertNotIn(1, windows[0].samples_by_node)
 
     def test_skew_does_not_reject_complete_window(self):
         assembler = self.make_assembler(rate=1)
@@ -310,7 +316,9 @@ class PhysicalWindowPolicyTest(unittest.TestCase):
         assembler.start_run(1, 1_000_000)
         output = []
         if node2 is None:
-            node2 = [sample(2, i, 1_000_000 + i * 10_000) for i in range(300)]
+            # Isolate node 1's quality policy; a healthy partner would allow the
+            # window to proceed even when node 1 is rejected.
+            node2 = []
         for node_samples in (node1, node2):
             for item in node_samples:
                 # Keep a nonzero offset between local and coordinator clocks.
@@ -324,7 +332,9 @@ class PhysicalWindowPolicyTest(unittest.TestCase):
     def assert_valid_times(self, window):
         self.assertTrue(window.quality.accepted, window.quality.rejection_reason)
         for samples in window.samples_by_node.values():
-            self.assertEqual(len(samples), 300)
+            self.assertGreaterEqual(len(samples), 291)
+            self.assertLessEqual(len(samples), 302)
+            self.assertTrue(all(not x.is_padding for x in samples))
             self.assertTrue(all(1_000_000 <= x.coordinator_timestamp_us < 4_000_000
                                 for x in samples))
             for left, right in zip(samples, samples[1:]):
@@ -345,11 +355,12 @@ class PhysicalWindowPolicyTest(unittest.TestCase):
                 self.assertEqual(window.quality.accepted, accepted)
                 if accepted:
                     self.assert_valid_times(window)
-                    self.assertEqual(window.quality.padded_counts[1], 9)
+                    self.assertEqual(len(window.samples_by_node[1]), 291)
+                    self.assertEqual(window.quality.padded_counts[1], 0)
                 else:
                     self.assertEqual(window.quality.rejection_reason, "missing_samples")
 
-    def test_timing_slowdown_does_not_collapse_trailing_padding(self):
+    def test_timing_slowdown_preserves_real_samples(self):
         # Reproduces the log's ~296/300 with contiguous capture sequences:
         # real samples span almost the whole window, leaving little edge space.
         readings = [sample(1, i, 1_000_000 + round(i * 2_990_000 / 295))
@@ -360,12 +371,16 @@ class PhysicalWindowPolicyTest(unittest.TestCase):
         self.assertEqual([x.coordinator_timestamp_us for x in actual],
                          [x.coordinator_timestamp_us for x in readings])
 
-    def test_leading_internal_and_trailing_padding(self):
+    def test_leading_internal_and_trailing_deficits_remain_unfilled(self):
         for removed in (set(range(9)), set(range(140, 149)), set(range(291, 300))):
             with self.subTest(removed=removed):
                 readings = [sample(1, i, 1_000_000 + i * 10_000)
                             for i in range(300) if i not in removed]
-                self.assert_valid_times(self.assemble(readings))
+                window = self.assemble(readings)
+                self.assert_valid_times(window)
+                self.assertEqual(len(window.samples_by_node[1]), 291)
+                self.assertEqual([x.sequence for x in window.samples_by_node[1]],
+                                 [x.sequence for x in readings])
 
     def test_long_gap_alone_does_not_reject_valid_full_window(self):
         readings = [sample(1, i, 1_000_000 + round(i * 2_800_000 / 299)
@@ -387,17 +402,51 @@ class PhysicalWindowPolicyTest(unittest.TestCase):
         self.assertEqual(self.assemble(readings).quality.rejection_reason,
                          "invalid_timestamps")
 
-    def test_insufficient_integer_timestamp_space_rejects_padding(self):
+    def test_samples_near_window_end_need_no_space_for_padding(self):
         readings = [sample(1, i, 1_000_000 + round(i * 2_999_999 / 295))
                     for i in range(296)]
         window = self.assemble(readings)
-        self.assertFalse(window.quality.accepted)
+        self.assert_valid_times(window)
+        self.assertEqual(len(window.samples_by_node[1]), 296)
 
-    def test_zero_missing_policy_rejects_any_padding(self):
+    def test_zero_missing_policy_rejects_any_deficit(self):
         readings = [sample(1, i, 1_000_000 + i * 10_000) for i in range(299)]
         window = self.assemble(readings, config=WindowConfig(
             100, 3_000_000, 1_000_000, max_missing_fraction=0))
         self.assertFalse(window.quality.accepted)
+
+    def test_two_extra_real_samples_are_kept_but_three_are_rejected(self):
+        for count, accepted in ((302, True), (303, False)):
+            with self.subTest(count=count):
+                readings = [sample(1, i, 1_000_000 + round(i * 3_000_000 / count))
+                            for i in range(count)]
+                window = self.assemble(readings)
+                self.assertEqual(window.quality.accepted, accepted)
+                if accepted:
+                    self.assertEqual(len(window.samples_by_node[1]), count)
+                    self.assertEqual(window.quality.dropped_counts[1], 0)
+                else:
+                    self.assertEqual(window.quality.rejection_reason,
+                                     "too_many_extra_samples")
+
+    def test_capture_server_logs_real_counts_without_padding(self):
+        import server
+
+        for count in (291, 296, 300, 302):
+            with self.subTest(count=count):
+                readings = [sample(1, i, 1_000_000 + round(i * 3_000_000 / count))
+                            for i in range(count)]
+                window = self.assemble(readings)
+                with self.assertLogs(server.LOGGER, level="INFO") as output:
+                    server.log_window_summary(window)
+                self.assertIn("WINDOW_READY", output.output[0])
+                self.assertIn(f"node1={count}/300 padded=0 dropped=0",
+                              output.output[0])
+
+        rejected = self.assemble([])
+        with self.assertLogs(server.LOGGER, level="INFO") as output:
+            server.log_window_summary(rejected)
+        self.assertIn("WINDOW_REJECTED", output.output[0])
 
 
 if __name__ == "__main__":
