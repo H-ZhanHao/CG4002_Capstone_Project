@@ -1414,7 +1414,7 @@ CaptureCoordinator = coordinator_class(sys.modules[__name__])
 def run_control_console(coordinator):
     """Accept optional line-based capture controls without extra services."""
     LOGGER.info("Control commands: start (s), stop (x), idle (i), "
-                "feedback rep|active|idle|status|repeat")
+                "feedback rep|active|idle|status|repeat, fall on|off|status")
     for line in sys.stdin:
         command = line.strip().lower()
         if command in ("start", "s"):
@@ -1434,9 +1434,11 @@ def run_control_console(coordinator):
         elif command == "feedback repeat":
             LOGGER.info("FEEDBACK_REPEAT queued=%d (same event/sequence; expires after 2.5s)",
                         coordinator.feedback_delivery.repeat_last())
+        elif coordinator.fall_control.handle_console(command):
+            pass
         elif command:
             LOGGER.warning("Unknown control command %r; use start, stop, idle, "
-                           "or feedback rep|active|idle|status|repeat", command)
+                           "feedback rep|active|idle|status|repeat, or fall on|off|status", command)
 
 
 class ManagedClient:

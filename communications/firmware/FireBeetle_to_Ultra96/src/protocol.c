@@ -422,6 +422,16 @@ void protocol_encode_control_ack(
     write_u64_be(&packet[32], ack->effective_local_us);
 }
 
+bool protocol_decode_fall_detection_payload(const uint8_t *payload, size_t length,
+                                            bool *enabled)
+{
+    if (payload == NULL || enabled == NULL ||
+        length != PROTOCOL_FALL_DETECTION_PAYLOAD_SIZE || payload[0] > 1 ||
+        payload[1] != 0 || payload[2] != 0 || payload[3] != 0) return false;
+    *enabled = payload[0] != 0;
+    return true;
+}
+
 bool protocol_decode_feedback_payload(const uint8_t *payload, size_t length,
                                      protocol_feedback_t *feedback)
 {

@@ -1,19 +1,12 @@
 /**
  * @file app_config.h
- * @brief Compile-time role selection for the Stage 5 two-board build.
+ * @brief Compile-time configuration for directly connected sensor nodes.
  */
 
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
 
-#define APP_ROLE_HUB  1
-#define APP_ROLE_LEAF 2
-
-/* PlatformIO environments supply the physical role and protocol Node ID. */
-#ifndef APP_NODE_ROLE
-#error "APP_NODE_ROLE must be supplied by the PlatformIO environment"
-#endif
-
+/* PlatformIO environments supply the protocol Node ID. */
 #ifndef APP_NODE_ID
 #error "APP_NODE_ID must be supplied by the PlatformIO environment"
 #endif
@@ -21,11 +14,6 @@
 /* Diagnostic build: join Wi-Fi but do not start the application transport. */
 #ifndef APP_WIFI_ASSOCIATION_ONLY
 #define APP_WIFI_ASSOCIATION_ONLY 0
-#endif
-
-/* Hub build with only its local sensor source and no ESP-NOW leaf. */
-#ifndef APP_HUB_LOCAL_ONLY
-#define APP_HUB_LOCAL_ONLY 0
 #endif
 
 /* Select authenticated TLS instead of development plain TCP. */
@@ -58,13 +46,14 @@
 #define APP_FALL_DETECTION 1
 #endif
 
+/* Enable server terminal control independently of the detection setting at boot. */
+#ifndef APP_FALL_RUNTIME_CONTROL
+#define APP_FALL_RUNTIME_CONTROL 0
+#endif
+
 /* Sampling measurements are enabled only by the dedicated diagnostic builds. */
 #ifndef APP_SAMPLING_DIAGNOSTICS
 #define APP_SAMPLING_DIAGNOSTICS 0
-#endif
-
-#if APP_NODE_ROLE != APP_ROLE_HUB && APP_NODE_ROLE != APP_ROLE_LEAF
-#error "APP_NODE_ROLE must be APP_ROLE_HUB or APP_ROLE_LEAF"
 #endif
 
 #if APP_NODE_ID < 1 || APP_NODE_ID > 6

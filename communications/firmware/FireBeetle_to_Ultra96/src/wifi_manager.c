@@ -131,7 +131,7 @@ static esp_err_t configure_enterprise_authentication(void)
 }
 #endif
 
-/* Log channel and station MAC needed when provisioning the ESP-NOW peer. */
+/* Log station MAC and channel for Wi-Fi connection diagnostics. */
 static void log_station_radio(void)
 {
     uint8_t mac[6] = {0};
@@ -344,60 +344,6 @@ esp_err_t wifi_manager_start(
     }
 
     wifi_started = true;
-    return ESP_OK;
-}
-
-/* Enable only the station radio on a fixed channel for a leaf ESP-NOW role. */
-esp_err_t wifi_manager_start_leaf(uint8_t channel)
-{
-    if (wifi_started) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (channel < 1 || channel > 14) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    esp_err_t result = esp_netif_init();
-
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    result = esp_event_loop_create_default();
-
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    wifi_init_config_t initial_configuration = WIFI_INIT_CONFIG_DEFAULT();
-    result = esp_wifi_init(&initial_configuration);
-
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    result = esp_wifi_set_mode(WIFI_MODE_STA);
-
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    result = esp_wifi_start();
-
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    result = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    wifi_started = true;
-    ESP_LOGI(TAG, "Leaf radio started without WLAN association");
-    log_station_radio();
     return ESP_OK;
 }
 

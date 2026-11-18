@@ -3,26 +3,48 @@
 The repository keeps instructions beside the components they describe. Longer
 project-wide records are grouped here by purpose.
 
-- [AI and Unity team integration brief](TEAM_INTEGRATION_BRIEF.md)
+Maintained guides were reviewed against the repository on 16 November 2026.
+Source-checked defaults and documented test procedures do not establish new
+physical acceptance or a current all-green regression suite.
+
+## Setup entry point
+
+Start with [Network setup](NETWORK_SETUP.md) for router/IP configuration,
+Windows Firewall inspection/creation, both TLS identities, SSH forwarding,
+startup order and per-hop checks. Use the component guides for firmware,
+server selection, tests and Unity integration.
 
 ## Current topology
 
-The active implementation uses two independent direct producers, Node 1 and
-Node 2. Use the two-node firmware, laptop, and Ultra96 component guides below
-for current setup instructions. Documents that mention Hub 3, Hub 6, leaves,
+The active implementation uses two independent direct producers, Node 1 (Thigh/Hip)
+and Node 2 (Wrist), with independent startup and live joining. Current firmware
+profiles are `node1_final` and `node2_final`; older profile names in historical
+records are not current build commands. See the firmware configuration and
+component guides below. Documents that mention Hub 3, Hub 6, leaves,
 or ESP-NOW are retained as historical phase evidence; their identifiers and
 topology must not be applied to the current build.
 
-## Plans
+## Design explanations
 
-- [Single-node baseline and dynamic node joining (proposed)](plans/SINGLE_NODE_BASELINE_AND_DYNAMIC_NODE_JOIN_PLAN.md)
-- [Hardware–communications integration plan](plans/HARDWARE_COMMUNICATIONS_INTEGRATION_PLAN.md)
-- [ESP32 individual demo implementation plan (historical)](plans/ESP32_INDIVIDUAL_DEMO_IMPLEMENTATION_PLAN.md)
-- [Ultra96 sliding-window MVP implementation plan](plans/ULTRA96_SLIDING_WINDOW_MVP_IMPLEMENTATION_PLAN.md)
-- [Continuous IMU streaming and sliding-window proposal](plans/CONTINUOUS_IMU_STREAMING_AND_SLIDING_WINDOW_PLAN.md)
-- [Ultra96-to-Unity visualizer implementation plan](plans/ULTRA96_TO_UNITY_VISUALIZER_IMPLEMENTATION_PLAN.md)
+- [Design evolution, original milestones and user workflow](DESIGN_EVOLUTION.md)
+- [Communications design choices and tradeoffs](COMMUNICATIONS_DESIGN_CHOICES.md)
+
+## Experiments and results
+
+- [Experiments, recorded measurements, validation limits and pending checks](EXPERIMENTS_AND_RESULTS.md)
+- [Detailed NUS network test results](results/NUS_NETWORK_TEST_RESULTS.md)
+
+The two consolidated records replace seven implementation plans, the old
+presentation walkthrough and the September visualizer progress note. Their
+[source map](DESIGN_EVOLUTION.md#source-consolidation) identifies what was
+retained. Historical handoffs and checkpoints remain supporting evidence;
+their rates, topology, output patterns and test counts describe their own revisions.
 
 ## Implementation handoffs
+
+The Phase 1-10 handoffs record preparation for the Individual Subsystem Test
+on 1 October. The hardware-communications vertical-slice handoff covers
+subsequent integration work.
 
 - [Hardware–communications vertical-slice implementation](handoffs/HARDWARE_COMMUNICATIONS_VERTICAL_SLICE.md)
 - [Phases 1–6 physical test results and handoff](handoffs/PHASE_1_TO_6_PHYSICAL_TEST_RESULTS_AND_HANDOFF.md)
@@ -31,24 +53,15 @@ topology must not be applied to the current build.
 - [Phase 9 physical test results and handoff](handoffs/PHASE_9_PHYSICAL_TEST_RESULTS_AND_HANDOFF.md)
 - [Phase 10 implementation handoff](handoffs/PHASE_10_IMPLEMENTATION_HANDOFF.md)
 
-## Results and progress
-
-- [NUS network test results](results/NUS_NETWORK_TEST_RESULTS.md)
-- [Ultra96-to-phone visualizer progress](progress/VISUALIZER_PROGRESS.md)
-
-## Walkthrough material
-
-- [Physical live demo one-day guide](walkthrough/LIVE_DEMO_ONE_DAY_GUIDE.md)
-- [Protocol FSM diagrams](walkthrough/PROTOCOL_FSM_DIAGRAMS.md)
-- [Laptop and Ultra96 concurrency block diagram](walkthrough/LAPTOP_ULTRA96_CONCURRENCY.md)
-- [Live demo protocol explanation](walkthrough/LIVE_DEMO_PROTOCOL_EXPLANATION.md)
-- [FireBeetle protocol and concurrent connections](walkthrough/FIREBEETLE_PROTOCOL_AND_CONCURRENT_CONNECTIONS.md)
-- [Maximum-speed benchmark and file-transfer demo](walkthrough/BENCHMARK_AND_FILE_TRANSFER_DEMO.md)
-
 ## Component guides
 
+- [Final firmware profiles](../firmware/FireBeetle_to_Ultra96/platformio.ini)
 - [Laptop relays](../laptop/README.md)
 - [Ultra96 services](../ultra96/README.md)
+- [Independent startup and dynamic joining](../ultra96/ONE_NODE_MODE.md)
 - [Ultra96 deployment notes](../ultra96/ULTRA96_SETUP_NOTES.md)
-- [Two-node firmware demo](../firmware/FireBeetle_to_Ultra96/DEMO_TWO_NODES.md)
+- [Hip and Wrist firmware guide](../firmware/FireBeetle_to_Ultra96/FIRMWARE_GUIDE.md)
+- [Sampling diagnostics](../firmware/FireBeetle_to_Ultra96/SAMPLING_DIAGNOSTICS.md)
+- [Hardware integration boundary](../firmware/FireBeetle_to_Ultra96/components/hardware_core/README.md)
+- [Portable firmware tests and historical-runner limits](../firmware/FireBeetle_to_Ultra96/test/protocol_host/README.md)
 - [Unity visualizer demo](../unity/Ultra96VisualizerDemo/README.md)

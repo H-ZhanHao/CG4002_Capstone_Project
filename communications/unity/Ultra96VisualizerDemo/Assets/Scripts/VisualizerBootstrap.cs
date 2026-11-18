@@ -15,14 +15,19 @@ namespace CG4002.Visualizer
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void CreateVisualizer()
         {
-            // Avoid a second connection if a future scene supplies its own client.
-            if (Object.FindFirstObjectByType<Ultra96VisualizerClient>() != null)
-                return;
+            // Reuse a scene-provided connection, but always attach its display.
+            Ultra96VisualizerClient client = Object.FindAnyObjectByType<Ultra96VisualizerClient>();
+            if (client == null)
+            {
+                var root = new GameObject("Ultra96 Visualizer");
+                client = root.AddComponent<Ultra96VisualizerClient>();
+            }
 
-            var root = new GameObject("Ultra96 Visualizer");
-            Ultra96VisualizerClient client = root.AddComponent<Ultra96VisualizerClient>();
-            ExerciseDebugPanel panel = root.AddComponent<ExerciseDebugPanel>();
+            ExerciseDebugPanel panel = client.GetComponent<ExerciseDebugPanel>();
+            if (panel == null)
+                panel = client.gameObject.AddComponent<ExerciseDebugPanel>();
             panel.Initialize(client);
+            panel.enabled = true;
         }
     }
 }

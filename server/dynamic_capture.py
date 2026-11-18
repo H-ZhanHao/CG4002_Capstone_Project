@@ -9,6 +9,11 @@ import logging
 import struct
 import time
 
+try:
+    from fall_control import FallDetectionControl, MESSAGE_TYPE_FALL_DETECTION_SET
+except ImportError:
+    from .fall_control import FallDetectionControl, MESSAGE_TYPE_FALL_DETECTION_SET
+
 LOGGER = logging.getLogger("server")
 STREAM_TIMEOUT_US = 3_000_000
 
@@ -33,6 +38,7 @@ def coordinator_class(api):
             if not self.physical_mode:
                 raise ValueError("capture requires physical sensor streaming")
             self.nodes = {}
+            self.fall_control = FallDetectionControl(self, api.build_header)
             self._run_origin = None
             self._run_sequence = None
 
@@ -81,6 +87,7 @@ def coordinator_class(api):
                 self.feedback_delivery.unregister(connection)
                 connection.cancel_arm_sync()
                 del self._connections[node]
+                self.fall_control.tick()
                 del self.nodes[node]
                 self._pending_stop_acks.pop(node, None)
                 self._forget_samples(node)
@@ -226,9 +233,20 @@ def coordinator_class(api):
             with self._lock:
                 if self._connections.get(connection.node_id) is not connection:
                     return
+                if command_type == MESSAGE_TYPE_FALL_DETECTION_SET:
+                    return self.fall_control.acknowledge(connection, command_sequence, result)
                 if command_type == api.MESSAGE_TYPE_FEEDBACK_COMMAND:
-                    return super().control_acknowledged(connection, command_type,
-                        command_sequence, result, effective_local_us)
+                    base_ack = getattr(super(), "control_acknowledged", None)
+                    if base_ack is not None:
+                        return base_ack(connection, command_type, command_sequence,
+                                        result, effective_local_us)
+                    # Retained communications servers predate the supplied base method.
+                    try:
+                        return self.feedback_delivery.acknowledge(
+                            connection, command_sequence, result, effective_local_us)
+                    except ValueError as error:
+                        raise api.ProtocolError(api.ERROR_INVALID_FRAME,
+                            api.MESSAGE_TYPE_CONTROL_ACK, str(error)) from error
                 node = connection.node_id
                 state = self.nodes[node]
                 now = time.monotonic_ns() // 1000
@@ -301,6 +319,7 @@ def coordinator_class(api):
         def tick(self, now_us=None):
             now = time.monotonic_ns() // 1000 if now_us is None else now_us
             self.feedback_delivery.tick(now)
+            self.fall_control.tick()
             with self._lock:
                 for node, state in list(self.nodes.items()):
                     if ((state.phase in ("arming", "starting", "stopping") and

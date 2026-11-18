@@ -7,7 +7,8 @@ namespace {
 FallDetector detector;
 bool hip, haveSample, haveAlarm;
 uint64_t lastSample, lastAlarm;
-constexpr uint64_t MAX_GAP_US = FallConfig::MAX_SAMPLE_GAP_MS * 1000ULL;
+// Transport protection remains independent of the restored detector config.
+constexpr uint64_t MAX_GAP_US = 100000ULL;
 void reset(uint64_t now) {
   detector.begin(static_cast<unsigned long>(now / 1000));
 }
@@ -16,6 +17,10 @@ extern "C" void fall_bridge_begin(uint8_t node) {
   hip = node == 1;
   haveSample = haveAlarm = false;
   reset(0);
+}
+extern "C" void fall_bridge_reset(uint64_t now) {
+  haveSample = false;
+  reset(now);
 }
 extern "C" bool fall_bridge_update(const float a[3], const float gyro[3],
                                    uint64_t now, bool valid) {
@@ -32,8 +37,9 @@ extern "C" bool fall_bridge_update(const float a[3], const float gyro[3],
     reset(now);
     return false;
   }
-  // Hardware owns freefall, impact expiry, posture and settling confirmation.
-  detector.update(a, gyro, static_cast<unsigned long>(now / 1000));
+  // The restored hardware detector takes raw acceleration magnitude in m/s^2.
+  const float magnitude = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+  detector.update(magnitude, static_cast<unsigned long>(now / 1000));
   if (!detector.consumeFallEvent()) return false;
   haveAlarm = true;
   lastAlarm = now;

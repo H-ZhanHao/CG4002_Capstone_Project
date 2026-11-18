@@ -1,4 +1,19 @@
-"""Thread-safe capture-time windows using either or both available sensor nodes."""
+"""Thread-safe capture-time windows using either or both sensor nodes.
+
+Windows carry only REAL samples. The assembler never fabricates zero-valued
+padding samples and never discards real samples to hit an exact count. Each
+accepted window hands every deduplicated in-window sample to inference, where
+``resample_poly_to_window`` polyphase-resamples the real count (e.g. 298 or
+301) to the model's 300-sample grid, the same way training and the reference
+tools do.
+
+The resampler only sees a sample count, not timestamps, so a genuine dropout
+inside a window slightly compresses time after the hole. To bound that, a
+an included node must be missing at most ``missing_limit`` samples
+(``max_missing_fraction`` of the expected count, 3% by default). Unavailable or
+unusable nodes are omitted. One usable node is sufficient for an accepted
+window; a known lagging partner receives only a bounded capture-time grace.
+"""
 
 from collections import deque
 from dataclasses import dataclass, field
@@ -43,7 +58,8 @@ class WindowConfig:
 
     @property
     def missing_limit(self):
-        """An explicit count overrides the proportional default for legacy callers."""
+        """Most samples a node may be short of ``expected_per_node`` and still
+        be accepted. An explicit count overrides the proportional default."""
         if self.max_missing_per_node is not None:
             return self.max_missing_per_node
         return math.floor(self.expected_per_node * self.max_missing_fraction)
@@ -68,6 +84,8 @@ class DecodedImuSample:
     gz: int
     status: int
     flags: int
+    # Retained for interface compatibility. The assembler no longer creates
+    # padding samples, so this is always False for samples in a window.
     is_padding: bool = False
 
 
@@ -97,7 +115,7 @@ class AssembledWindow:
 
 
 class WindowAssembler:
-    """Build overlapping windows from mapped capture timestamps."""
+    """Build overlapping windows of real samples from mapped capture timestamps."""
 
     def __init__(self, config: WindowConfig):
         self.config = config
@@ -155,17 +173,17 @@ class WindowAssembler:
         for node_id in self._latest:
             self._latest[node_id] = None
 
+    def node_joined(self, node_id):
+        """Give an acknowledged/starting producer a bounded first-sample grace."""
+        with self._lock:
+            self._active_nodes.add(node_id)
+
     def node_lost(self, node_id):
-        """Discard the obsolete session without resetting the run/window origin."""
+        """Discard obsolete-session samples without resetting the window origin."""
         with self._lock:
             self._buffers[node_id].clear()
             self._latest[node_id] = None
             self._active_nodes.discard(node_id)
-
-    def node_joined(self, node_id):
-        """Allow a starting producer the bounded grace period before its first sample."""
-        with self._lock:
-            self._active_nodes.add(node_id)
 
     def _window_bounds_locked(self):
         start = self._start_us + self._next_window_id * self.config.hop_us
@@ -174,11 +192,9 @@ class WindowAssembler:
     def _window_ready_locked(self):
         _start, end = self._window_bounds_locked()
         timestamps = [t for t in self._latest.values() if t is not None]
-        # A missing producer never blocks the first window. A lagging one
-        # gets a bounded capture-time grace period while the other advances.
         return bool(timestamps) and (
-            all(self._latest[n] is not None and self._latest[n] >= end
-                for n in self._active_nodes) or
+            all(self._latest[node] is not None and self._latest[node] >= end
+                for node in self._active_nodes) or
             max(timestamps) >= end + self.config.node_wait_us)
 
     @staticmethod
@@ -195,27 +211,6 @@ class WindowAssembler:
                 missing.append(candidate)
                 candidate = (candidate + 1) & 0xFFFFFFFF
         return tuple(missing), gap_found
-
-    @staticmethod
-    def _padding_sample(node_id, sequence, timestamp_us,
-                        coordinator_timestamp_us, session_id=0):
-        """Create an inference-only zero sample; it is never put on the wire."""
-        return DecodedImuSample(
-            node_id=node_id,
-            session_id=session_id,
-            sequence=sequence & 0xFFFFFFFF,
-            timestamp_us=timestamp_us,
-            coordinator_timestamp_us=coordinator_timestamp_us,
-            ax=0,
-            ay=0,
-            az=0,
-            gx=0,
-            gy=0,
-            gz=0,
-            status=0,
-            flags=0,
-            is_padding=True,
-        )
 
     @staticmethod
     def _same_transmitted_sample(left, right):
@@ -246,141 +241,46 @@ class WindowAssembler:
             dropped.append(sample.sequence)
         return tuple(unique), tuple(dropped), False
 
-    @staticmethod
-    def _better_grid_match(candidate, existing):
-        if existing is None:
-            return True
-        candidate_cost, _candidate_kept, candidate_dropped = candidate
-        existing_cost, _existing_kept, existing_dropped = existing
-        if candidate_cost != existing_cost:
-            return candidate_cost < existing_cost
-        # On an exact timing tie, retain earlier samples by dropping later ones.
-        return candidate_dropped > existing_dropped
+    def _validate_node_samples(self, unique, duplicate_sequences,
+                               conflicting_duplicate, missing_sequences, has_gap):
+        """Return ``None`` if a node's real samples are usable, else a reason.
 
-    def _select_on_timestamp_grid(self, samples, expected, start):
-        """Select the expected count with minimum total timestamp error."""
-        extra = len(samples) - expected
-        # State value: total error, retained sample indices, dropped indices.
-        states = {0: (0, (), ())}
-        for sample_index, sample in enumerate(samples):
-            next_states = {}
-            for dropped_count, (cost, kept, dropped) in states.items():
-                target_index = len(kept)
-                if target_index < expected:
-                    target_us = start + round(
-                        target_index * self.config.window_us / expected)
-                    candidate = (
-                        cost + abs(sample.coordinator_timestamp_us - target_us),
-                        kept + (sample_index,), dropped,
-                    )
-                    if self._better_grid_match(
-                            candidate, next_states.get(dropped_count)):
-                        next_states[dropped_count] = candidate
-                if dropped_count < extra:
-                    candidate = (cost, kept, dropped + (sample_index,))
-                    if self._better_grid_match(
-                            candidate, next_states.get(dropped_count + 1)):
-                        next_states[dropped_count + 1] = candidate
-            states = next_states
+        The samples themselves are never modified: no padding, no dropping.
+        Only exact re-transmissions (same Sequence, same data) were removed
+        earlier by deduplication.
+        """
+        expected = self.config.expected_per_node
+        if conflicting_duplicate:
+            return "conflicting_duplicate"
+        if not unique:
+            return "missing_samples"
+        if len(duplicate_sequences) > self.config.max_extra_per_node:
+            return "too_many_extra_samples"
+        if any(right.timestamp_us <= left.timestamp_us or
+               right.coordinator_timestamp_us <= left.coordinator_timestamp_us
+               for left, right in zip(unique, unique[1:])):
+            return "invalid_timestamps"
 
-        _cost, kept_indices, dropped_indices = states[extra]
-        retained = tuple(samples[index] for index in kept_indices)
-        dropped_sequences = tuple(samples[index].sequence
-                                  for index in dropped_indices)
-        return retained, dropped_sequences
-
-    def _pad_node_samples(self, node_id, samples, expected, start, end,
-                          missing_sequences, has_gap):
-        """Return an expected-length tuple, or None when padding is unsafe."""
-        padding_needed = expected - len(samples)
-        if padding_needed < 0 or padding_needed > self.config.missing_limit:
-            return None
-        if has_gap and len(missing_sequences) > padding_needed:
-            # A gap without a corresponding count deficit indicates a duplicate,
-            # reordering, or a replacement sample rather than simple packet loss.
-            return None
-        if padding_needed == 0:
-            return samples
-
-        period_us = 1_000_000 / self.config.sample_rate_hz
-        if not samples:
+        extra = len(unique) - expected
+        if extra > 0:
+            # A few extra real samples come from the device clock running
+            # slightly fast relative to the window boundary; the resampler
+            # absorbs them. A sequence gap together with extra samples, or more
+            # extras than allowed, points to broken timing rather than drift.
+            if has_gap:
+                return "sequence_gap_with_extra_samples"
+            if len(duplicate_sequences) + extra > self.config.max_extra_per_node:
+                return "too_many_extra_samples"
             return None
 
-        internal = []
-        internal_padding = 0
-        for previous, current in zip(samples, samples[1:]):
-            gap_sequences, gap_found = self._missing_sequences((previous, current))
-            if gap_found:
-                internal_padding += len(gap_sequences)
-                if internal_padding > padding_needed:
-                    return None
-            internal.append((previous, current, gap_sequences))
-
-        remaining = padding_needed - internal_padding
-        estimated_leading = round(
-            (samples[0].coordinator_timestamp_us - start) / period_us)
-        leading_count = min(remaining, max(0, estimated_leading))
-        trailing_count = remaining - leading_count
-
-        padded = []
-        first = samples[0]
-        # Fit synthetic edge timestamps into the available interval rather than
-        # clamping several samples to the same start/end timestamp. Keep real
-        # timestamps unchanged and use the same delta in both clock domains.
-        leading_step = (min(period_us,
-                            (first.coordinator_timestamp_us - start) / leading_count)
-                        if leading_count else period_us)
-        for offset in range(leading_count, 0, -1):
-            delta = round(offset * leading_step)
-            padded.append(self._padding_sample(
-                node_id,
-                sequence=first.sequence - offset,
-                timestamp_us=first.timestamp_us - delta,
-                coordinator_timestamp_us=first.coordinator_timestamp_us - delta,
-                session_id=first.session_id,
-            ))
-
-        for previous, current, gap_sequences in internal:
-            padded.append(previous)
-            gap_size = len(gap_sequences)
-            for index, sequence in enumerate(gap_sequences, start=1):
-                padded.append(self._padding_sample(
-                    node_id,
-                    sequence=sequence,
-                    timestamp_us=previous.timestamp_us + round(
-                        (current.timestamp_us - previous.timestamp_us) *
-                        index / (gap_size + 1)),
-                    coordinator_timestamp_us=(
-                        previous.coordinator_timestamp_us + round(
-                            (current.coordinator_timestamp_us -
-                             previous.coordinator_timestamp_us) *
-                            index / (gap_size + 1))),
-                    session_id=previous.session_id,
-                ))
-        padded.append(samples[-1])
-
-        last = samples[-1]
-        trailing_step = min(period_us,
-                            (end - last.coordinator_timestamp_us) / (trailing_count + 1))
-        for offset in range(1, trailing_count + 1):
-            delta = round(offset * trailing_step)
-            padded.append(self._padding_sample(
-                node_id,
-                sequence=last.sequence + offset,
-                timestamp_us=last.timestamp_us + delta,
-                coordinator_timestamp_us=last.coordinator_timestamp_us + delta,
-                session_id=last.session_id,
-            ))
-        # Reject intervals too narrow to hold distinct integer-microsecond
-        # padding, including rounded internal gaps. Never hand invalid times to AI.
-        if (len(padded) != expected or
-                any(item.timestamp_us < 0 or not start <= item.coordinator_timestamp_us < end
-                    for item in padded) or
-                any(right.timestamp_us <= left.timestamp_us or
-                    right.coordinator_timestamp_us <= left.coordinator_timestamp_us
-                    for left, right in zip(padded, padded[1:]))):
-            return None
-        return tuple(padded)
+        deficit = -extra
+        if deficit > self.config.missing_limit:
+            return "missing_samples"
+        if has_gap and len(missing_sequences) > deficit:
+            # A gap without a matching count deficit indicates a duplicate,
+            # reordering, or replacement sample rather than simple packet loss.
+            return "sequence_gap_without_deficit"
+        return None
 
     def _assemble_next_locked(self):
         start, end = self._window_bounds_locked()
@@ -390,74 +290,29 @@ class WindowAssembler:
             for node_id, samples in self._buffers.items()
         }
         counts = {node_id: len(samples) for node_id, samples in selected.items()}
-        normalized = {}
+        real_samples = {}
         dropped = {}
-        invalid = {}
-        invalid_reasons = {}
         missing = {}
-        gaps = {}
+        invalid_reasons = {}
         for node_id, samples in selected.items():
             unique, duplicate_sequences, conflicting_duplicate = (
                 self._deduplicate_samples(samples))
-            missing[node_id], gaps[node_id] = self._missing_sequences(unique)
-            dropped_sequences = list(duplicate_sequences)
-            node_invalid = conflicting_duplicate
-            node_reason = "conflicting_duplicate" if conflicting_duplicate else None
+            missing[node_id], has_gap = self._missing_sequences(unique)
+            dropped[node_id] = tuple(duplicate_sequences)
+            invalid_reasons[node_id] = self._validate_node_samples(
+                unique, duplicate_sequences, conflicting_duplicate,
+                missing[node_id], has_gap)
+            real_samples[node_id] = unique
 
-            if len(dropped_sequences) > self.config.max_extra_per_node:
-                node_invalid = True
-                node_reason = "too_many_extra_samples"
-            if len(unique) > self.config.expected_per_node:
-                unique_extra = len(unique) - self.config.expected_per_node
-                if gaps[node_id]:
-                    node_invalid = True
-                    node_reason = "sequence_gap_with_extra_samples"
-                elif (len(dropped_sequences) + unique_extra >
-                      self.config.max_extra_per_node):
-                    node_invalid = True
-                    node_reason = "too_many_extra_samples"
-                else:
-                    unique, grid_dropped = self._select_on_timestamp_grid(
-                        unique, self.config.expected_per_node, start)
-                    dropped_sequences.extend(grid_dropped)
-
-            normalized[node_id] = unique
-            if not node_invalid and unique:
-                if any(right.timestamp_us <= left.timestamp_us or
-                       right.coordinator_timestamp_us <= left.coordinator_timestamp_us
-                       for left, right in zip(unique, unique[1:])):
-                    node_invalid, node_reason = True, "invalid_timestamps"
-            dropped[node_id] = tuple(dropped_sequences)
-            invalid[node_id] = node_invalid
-            invalid_reasons[node_id] = node_reason
-
-        expected = self.config.expected_per_node
-        padded = {
-            node_id: None if invalid[node_id] else self._pad_node_samples(
-                node_id, normalized[node_id], expected, start, end,
-                missing[node_id], gaps[node_id])
-            for node_id in selected
-        }
-        available = tuple(node for node, samples in padded.items() if samples is not None)
-        node_reasons = {node: invalid_reasons[node] or "insufficient_coverage"
-                        for node in selected if padded[node] is None}
+        available = tuple(node for node, reason in invalid_reasons.items()
+                          if reason is None)
         accepted = bool(available)
-        padded_counts = {
-            node_id: (sum(sample.is_padding for sample in padded[node_id])
-                      if accepted and padded[node_id] is not None else 0)
-            for node_id in selected
-        }
-        dropped_counts = {
-            node_id: len(dropped[node_id]) for node_id in selected
-        }
         rejection_reason = None
         if not accepted:
             rejection_reason = next(
-                (reason for reason in invalid_reasons.values()
-                 if reason is not None),
-                "missing_samples",
-            )
-        sample_lists = [padded[node] for node in available]
+                reason for reason in invalid_reasons.values() if reason is not None)
+
+        sample_lists = [real_samples[node] for node in available]
         if (len(sample_lists) == 2 and len(sample_lists[0]) > 0 and
                 len(sample_lists[0]) == len(sample_lists[1])):
             max_skew = max(abs(left.coordinator_timestamp_us -
@@ -466,24 +321,25 @@ class WindowAssembler:
         else:
             max_skew = None
         quality = WindowQuality(
-            expected_per_node=expected,
+            expected_per_node=self.config.expected_per_node,
             sample_counts=counts,
-            padded_counts=padded_counts,
-            dropped_counts=dropped_counts,
+            padded_counts={node_id: 0 for node_id in selected},
+            dropped_counts={node_id: len(dropped[node_id]) for node_id in selected},
             dropped_sequences=dropped,
             missing_sequences=missing,
             max_index_skew_us=max_skew,
             accepted=accepted,
             rejection_reason=rejection_reason,
-            available_nodes=available if accepted else (),
-            node_rejection_reasons=node_reasons,
+            available_nodes=available,
+            node_rejection_reasons={node: reason for node, reason in invalid_reasons.items()
+                                    if reason is not None},
         )
         window = AssembledWindow(
             run_id=self._run_id,
             window_id=self._next_window_id,
             start_us=start,
             end_us=end,
-            samples_by_node=({node: padded[node] for node in available}
+            samples_by_node=({node: real_samples[node] for node in available}
                              if accepted else selected),
             quality=quality,
         )

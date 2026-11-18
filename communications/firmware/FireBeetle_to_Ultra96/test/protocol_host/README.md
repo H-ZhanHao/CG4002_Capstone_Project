@@ -1,92 +1,116 @@
-# Protocol host tests
+# Portable firmware and protocol checks
 
-Stage 3 adds phone session/rep contracts, loopback IPC, real WSS integration,
-and the checked-in C# transport. Run `run_stage3_tests.ps1`; see
-[the Stage 3 checkpoint](STAGE3_CHECKPOINT.md) for dependencies, source/flash
-archives, Unity APIs, and simulator/physical test instructions.
+Reviewed against the repository on 16 November 2026. Run the commands below
+from the **repository root**, with desktop GCC/G++ and Python available.
+They compile production logic or run simulated server tests; they do not flash
+boards, validate actual GPIO timing or run DPU models.
 
-Stage 2 adds feedback codecs, replay protection, and server-to-two-C-peer tests:
+Some files in this test tree are ignored by Git. Confirm the referenced test
+sources are included in your checkout/submission before using them. The current
+runtime builds canonical C++ modules from `hardware/node`; do not use removed
+component-local copies of GenericPeakDetector or SensorHistory.
 
-```powershell
-& communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/run_stage2_tests.ps1
-```
+## Protocol and ordered history
 
-See [the Stage 2 checkpoint](STAGE2_CHECKPOINT.md) for the wire layout, saved
-firmware versions, automated results, and physical TLS test commands.
-
-For Stage 1 local LED/buzzer feedback and the existing firmware regressions, run
-all seven host executables from the repository root:
+Create an output directory, then compile/run the production C codec tests:
 
 ```powershell
-& communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/run_stage1_tests.ps1
-```
-
-See [the Stage 1 checkpoint](STAGE1_CHECKPOINT.md) for the changed files, build
-commands, USB diagnostic commands, physical test procedure, and limitations.
-
-These tests compile the production `protocol.c` directly with a desktop C
-compiler. The expected byte arrays are written independently from the codec so
-they detect byte-order and layout regressions.
-
-From the repository root on Windows with GCC available:
-
-```powershell
+New-Item -ItemType Directory -Force .build | Out-Null
 gcc -std=c11 -Wall -Wextra -Werror `
   -Icommunications/firmware/FireBeetle_to_Ultra96/include `
   communications/firmware/FireBeetle_to_Ultra96/src/protocol.c `
   communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/test_protocol.c `
-  -o .tmp/protocol_host_tests.exe
-.tmp/protocol_host_tests.exe
+  -o .build/protocol_host_tests.exe
+& .build/protocol_host_tests.exe
 ```
 
-The history/feeder test is independent of ESP-IDF and verifies a three-second
-historical flush followed by live delivery, chronological exactly-once capture
-sequences, and bounded-ring overwrite reporting:
+Independent golden vectors check encoding/decoding rather than constructing
+expected bytes through the codec under test. To check the sequence-aware feeder:
 
 ```powershell
 gcc -std=c11 -Wall -Wextra -Werror `
   -Icommunications/firmware/FireBeetle_to_Ultra96/include `
   communications/firmware/FireBeetle_to_Ultra96/src/sensor_history.c `
   communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/test_sensor_history.c `
-  -o .tmp/sensor_history_tests.exe
-.tmp/sensor_history_tests.exe
+  -o .build/sensor_history_tests.exe
+& .build/sensor_history_tests.exe
 ```
 
-The copied C++ generic detector has a focused communications-side regression
-test for its 100 Hz duration guard and weak sustained peaks:
+To check live-only joining, immediate startup, queue retry and stop ordering:
 
 ```powershell
-g++ -std=c++17 -Wall -Wextra -Werror `
-  -Icommunications/firmware/FireBeetle_to_Ultra96/components/hardware_core/include `
-  communications/firmware/FireBeetle_to_Ultra96/components/hardware_core/src/GenericPeakDetector.cpp `
+gcc -std=c11 -Wall -Wextra -Werror `
+  -Icommunications/firmware/FireBeetle_to_Ultra96/include `
+  communications/firmware/FireBeetle_to_Ultra96/src/sensor_history.c `
+  communications/firmware/FireBeetle_to_Ultra96/one_node_tests/test_live_history.c `
+  -o .build/one_node_live_test.exe
+& .build/one_node_live_test.exe
+```
+
+## Canonical hardware and final fall control
+
+The fall runner compiles the canonical detector, communications bridge and
+current fall-setting codec:
+
+```powershell
+& ./communications/firmware/FireBeetle_to_Ultra96/fall_tests/run_tests.ps1
+```
+
+For the generic peak detector and separate canonical history regression:
+
+```powershell
+g++ -std=c++17 -Wall -Wextra -Werror -Ihardware/node `
+  hardware/node/GenericPeakDetector.cpp `
   communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/test_generic_peak_detector.cpp `
-  -o .tmp/generic_peak_detector_tests.exe
-.tmp/generic_peak_detector_tests.exe
+  -o .build/generic_peak_detector_tests.exe
+& .build/generic_peak_detector_tests.exe
+
+g++ -std=c++17 -Wall -Wextra -Werror -Ihardware/node `
+  hardware/node/SensorHistory.cpp hardware/tests/sensor_history_test.cpp `
+  -o .build/hardware_sensor_history_tests.exe
+& .build/hardware_sensor_history_tests.exe
 ```
 
-The copied C++ sensor-history implementation is likewise checked with the
-hardware team's original host test. This protects the recognizable hardware
-module even though the communications-specific sequence-aware feeder lives in
-`src/sensor_history.c`:
+These tests do not imply the canonical C++ SensorHistory class runs in the
+communications firmware; its transport history is `src/sensor_history.c`.
+Additional connection-LED coverage is in
+[the final-profile host fixture](../../one_node_tests/test_connection_led.cpp).
+
+## Current integrated server checks
+
+From the repository root:
 
 ```powershell
-g++ -std=c++17 -Wall -Wextra -Werror `
-  -Icommunications/firmware/FireBeetle_to_Ultra96/components/hardware_core/include `
-  communications/firmware/FireBeetle_to_Ultra96/components/hardware_core/src/SensorHistory.cpp `
-  hardware/tests/sensor_history_test.cpp `
-  -o .tmp/hardware_sensor_history_tests.exe
-.tmp/hardware_sensor_history_tests.exe
+python -B -m unittest discover -s server -p 'test_one_node_integration.py' -v
+python -B -m unittest discover -s server -p 'test_server_fall_control.py' -v
 ```
 
-The exercise mock integration test proves that the deterministic firmware
-waveform drives the hardware team's original pause and continuous counters
-exactly once:
+These exercise dynamic capture, real-only windows and acknowledged settings with
+simulated connections. Gateway/phone notification tests additionally require
+`websockets==12.0` and OpenSSL; see
+[Ultra96 verification](../../../../ultra96/README.md#verification-and-known-test-limitations).
+The Unity managed helper needs .NET plus generated Unity projects/references;
+see [Unity tests](../../../../unity/Ultra96VisualizerDemo/README.md#tests).
 
-```powershell
-g++ -std=c++11 -Wall -Wextra -Werror `
-  -Ihardware/tests/stubs -Ihardware/node `
-  communications/firmware/FireBeetle_to_Ultra96/test/protocol_host/test_exercise_mock.cpp `
-  hardware/node/RepCounter.cpp hardware/node/ContinuousCounter.cpp `
-  -o .build/test_exercise_mock.exe
-& .build/test_exercise_mock.exe
-```
+## Historical stage runners and evidence
+
+`run_stage1_tests.ps1` through `run_stage5_tests.ps1` and the old integrated
+feedback wrapper were authored around staged revisions. Several Python tests
+have since moved under `communications/ultra96/test` and still import the
+removed `server_AI.py`/`server_new.py`; some wrappers also calculate paths for
+the old layout. Do not present them as a verified one-command final regression
+suite or create aliases to conceal those differences. Their test maintenance is
+separate from this guide refresh.
+
+The annotated [Stage 1](STAGE1_CHECKPOINT.md), [Stage 2](STAGE2_CHECKPOINT.md),
+[Stage 3](STAGE3_CHECKPOINT.md), [Stage 4](STAGE4_CHECKPOINT.md) and
+[Stage 5](STAGE5_CHECKPOINT.md) records preserve tested source/image archives,
+old outputs and confirmation limits. Use matching saved source/images to
+reproduce those historical stages; old profile names are not current builds.
+Historical pass counts are collected in
+[Experiments and results](../../../../docs/EXPERIMENTS_AND_RESULTS.md#6-feedback-idle-and-fall-checkpoints).
+
+Current physical acceptance still needs final firmware/device checks: actual
+100 Hz cadence, history catch-up, body axes, independent joining, output timing,
+Hip enable/disable and detector-to-phone notification. Synthetic fall injection
+is a marked delivery diagnostic, not a measurement of detector sensitivity.
