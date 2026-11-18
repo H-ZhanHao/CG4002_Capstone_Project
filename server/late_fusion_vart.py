@@ -259,7 +259,7 @@ def softmax(v):
 
 @dataclass(frozen=True)
 class ClassificationResult:
-    """One late-fusion decision for a complete two-IMU capture window."""
+    """One late-fusion decision for the usable IMUs in a capture window."""
 
     capture_run_id: int
     window_id: int
@@ -303,7 +303,7 @@ class LateFusionInference:
             self.fusion = factory(fusion_xmodel)
 
     def predict_pair(self, wrist, thigh):
-        """Run one resampled pair (or one CSV branch) and return six probabilities."""
+        """Run available resampled branches and return class probabilities."""
         cfg = self.cfg
         feats = np.zeros((cfg.num_branches, cfg.feature_dim), dtype=np.float32)
         mask = np.zeros(cfg.num_branches, dtype=np.float32)
@@ -335,12 +335,14 @@ class LateFusionInference:
                 range(window.start_us, window.end_us - model_us + 1, self.stride_us)]
 
     def infer_window(self, window):
-        """Average paired three-second predictions inside one assembled segment.
+        """Average three-second predictions from the segment's usable IMUs.
 
         Bounds come from the assembler, not the last sample timestamp (4.99 s
         at 100 Hz). Thus [2 s, 5 s) is included in a complete five-second window.
         Both branches use the same coordinator-time bounds, without individually
         rebasing their first samples and losing their relative alignment.
+        The assembler omits unavailable or unusable nodes. Pass those branches
+        as None so predict_pair supplies zero features and a zero presence mask.
         """
         if not window.quality.accepted:
             raise ValueError("capture window failed quality checks")
@@ -352,7 +354,7 @@ class LateFusionInference:
         for node_id in (1, 2):
             samples = window.samples_by_node.get(node_id, ())
             if not samples:
-                raise ValueError(f"missing IMU Node {node_id}")
+                continue
             ts = np.array([s.coordinator_timestamp_us - window.start_us
                            for s in samples], dtype=np.int64)
             signal = np.array([(s.ax, s.ay, s.az, s.gx, s.gy, s.gz)
@@ -361,6 +363,8 @@ class LateFusionInference:
                     np.any(ts >= duration_us)):
                 raise ValueError(f"invalid timestamps for Node {node_id}")
             streams[node_id] = ts, signal
+        if not streams:
+            raise ValueError("at least one IMU is required")
 
         all_probs = []
         for start_us, end_us in self.model_intervals(window):
@@ -368,6 +372,9 @@ class LateFusionInference:
             pair = []
             # predict_pair expects wrist first, then thigh.
             for node_id in (2, 1):
+                if node_id not in streams:
+                    pair.append(None)
+                    continue
                 ts, signal = streams[node_id]
                 segment = signal[(ts >= start) & (ts < end)]
                 if len(segment) < self.min_samples:
